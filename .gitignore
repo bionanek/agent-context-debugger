@@ -1,0 +1,9 @@
+# Build artifact. Regenerate with `python3 build_real_view.py`.
+# Not tracked: it bakes full session transcripts, so it is both large (~13MB)
+# and a copy of whatever was said in those sessions.
+agent-context-ide-real.html
+
+__pycache__/
+.pytest_cache/
+.venv/
+.DS_Store
