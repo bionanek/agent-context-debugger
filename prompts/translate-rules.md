@@ -24,12 +24,14 @@ Emit only these predicate kinds. Do not invent others.
 | `required_pattern` | `pattern` is ABSENT from a file matching `applies_to` | pattern, applies_to |
 | `forbidden_co_occurrence` | `pattern` and `with_pattern` BOTH appear in the same file | pattern, with_pattern, applies_to |
 | `required_co_occurrence` | `pattern` appears but `with_pattern` is absent | pattern, with_pattern, applies_to |
-| `required_order` | `pattern` appears before `before_pattern` is violated (i.e. wrong order) | pattern, before_pattern, applies_to |
+| `required_order` | both patterns are present AND the first match of `first_pattern` starts at a later offset than the first match of `second_pattern`, i.e. they are in the wrong order | first_pattern, second_pattern, applies_to |
 | `forbidden_command` | `pattern` matches a shell command | pattern |
 | `required_command` | a command matching `trigger_pattern` ran without a matching `pattern` | trigger_pattern, pattern |
 | `forbidden_path` | a written file path matches `pattern` | pattern |
 
 `applies_to` is a list of glob patterns matched against the file path.
+
+For `required_order`, name the patterns in the order the rule demands. A rule reading "call `makePersistable` immediately after `makeAutoObservable`" gives `first_pattern` = `makeAutoObservable`, `second_pattern` = `makePersistable`, and fires when the file has them the other way round. Do not encode the violation itself; encode the required order and let the checker invert it.
 
 Note the asymmetry: `required_pattern` and `required_co_occurrence` are dangerous on partial edits, because the required text may exist elsewhere in a file you cannot see. Only use them when the rule's own scope makes the requirement local to the hunk, and drop the rule's confidence to `low` when you do.
 
@@ -68,6 +70,10 @@ Every check must carry `should_match` (code that genuinely violates the rule) an
 - the compliant form of the same code, which often mentions the same words
 
 Write these as realistic code lines, not as toy strings. This is what stops the tool from accusing the agent because a word appeared in a comment.
+
+Do NOT build comment or string guards into your patterns. The checker strips comments and string literals centrally before any pattern runs, and applies that same stripping to these snippets. A guard written into the regex only handles lines that carry a comment marker, which misses the continuation lines of a block comment and gives a false sense of safety. Keep the comment and string cases in `should_not_match` regardless: they verify the stripping, not your regex.
+
+Your own verification of these tests does not count. The consuming tool re-runs every self-test with its own matcher and discards any check that fails, so write patterns whose behaviour follows from the vocabulary table above rather than from how you would implement it.
 
 ## Output
 
