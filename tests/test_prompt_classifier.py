@@ -1,6 +1,6 @@
 """Tests for the shared real-user-prompt classifier.
 
-Phase 1 of plans/context-fidelity-v2.md: list-content prompts (pasted
+Covers list-content prompts (pasted
 screenshots), interrupt markers, local-command wrappers and stdout wrappers.
 """
 import json

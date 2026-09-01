@@ -300,7 +300,7 @@ def test_possibly_referenced_beats_every_not_used_status():
 
 
 def test_prd_invariant_holds_used_in_any_turn_is_used_at_session_scope():
-    """plans/turn-aware-view.md's documented invariant, re-proved after the
+    """The turn-aware view's documented invariant, re-proved after the
     taxonomy grew: a block used in any turn is used at session scope."""
     for others in (["unused"], ["dormant", "not-loaded"], ["possibly-referenced"],
                    ["undelivered", "possibly-referenced", "used-partial"]):
