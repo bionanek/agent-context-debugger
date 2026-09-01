@@ -23,6 +23,7 @@ in the loop.
 - [What it tells you](#what-it-tells-you)
 - [Requirements](#requirements)
 - [Quick start](#quick-start)
+- [Installing the ctxlog hook](#installing-the-ctxlog-hook)
 - [CLI reference](#cli-reference)
 - [Query mode](#query-mode)
 - [The HTML views](#the-html-views)
@@ -58,9 +59,11 @@ For every session, per turn (one real user prompt to the next):
 - Claude Code transcripts on disk (`~/.claude/projects/`). Run the tool from the
   project directory whose sessions you want to inspect: discovery encodes the
   current working directory to find the right transcript folder.
-- Optional: the `ctxlog` hook log (`~/.claude/ctxlog/<session>.jsonl`) for ground
-  truth about which instruction files were actually loaded. Sessions without it
-  still work, using path conventions.
+- Optional but recommended: the `ctxlog` hook (see
+  [Installing the ctxlog hook](#installing-the-ctxlog-hook)). Sessions without it
+  still work, but in a degraded mode: instruction-file loading falls back to path
+  conventions, and compaction events are invisible (the hook is the only source of
+  compaction boundaries, so without it there is no eviction accounting).
 
 ## Quick start
 
@@ -77,6 +80,36 @@ python3 build_real_view.py --session abc12345
 
 # Then open the output in a browser
 open agent-context-ide-real.html
+```
+
+## Installing the ctxlog hook
+
+[`hooks/ctxlog.py`](hooks/ctxlog.py) is a stdlib-only Claude Code hook that logs
+what actually entered the model's context - instruction-file loads (with the load
+reason), Read/Grep/Glob coverage including truncation detection, compaction
+events, and subagent boundaries - to `~/.claude/ctxlog/<session_id>.jsonl`. This
+project reads those logs (via `ctxlog_facts.py`) as ground truth; without them it
+falls back to path conventions and cannot see compactions.
+
+```bash
+# Print the hook config to merge into ~/.claude/settings.json yourself
+python3 hooks/ctxlog.py install
+
+# Or let it merge for you (writes a .bak backup of settings.json first)
+python3 hooks/ctxlog.py install --write
+```
+
+Restart Claude Code afterwards. The hook only covers sessions that run *after*
+it is installed - existing transcripts stay in degraded mode. It is designed to
+be safe: `collect` never writes to stdout (hook stdout on some events is fed
+into the model's context - the very thing being measured), always exits 0, and
+runs async with a 10s timeout so it can never stall a turn.
+
+The script is also a standalone reader, independent of this project:
+
+```bash
+python3 hooks/ctxlog.py sessions      # list logged sessions, newest first
+python3 hooks/ctxlog.py report [SID]  # timeline + coverage check for a session
 ```
 
 ## CLI reference
@@ -299,6 +332,7 @@ candidate; one that is `used` on the turns that matter earns its cost.
 | `build_real_view.py` | The tool (~7k lines): parser, assessors, query mode, HTML emitter. |
 | `rule_checks.py` | Compiled rule checking: loads/validates checks files, strips comments, evaluates. |
 | `ctxlog_facts.py` | Hook-log parser: "actually loaded" facts that override path conventions. |
+| `hooks/ctxlog.py` | The hook that writes those logs. Self-installing (`install --write`); also a standalone session reporter. |
 | `prompts/translate-rules.md` | The authoring prompt that turns a guidelines doc into a checks file. |
 | `CLAUDE.md` | The detailed architecture map (canonical for contributors). |
 | `PRD-turn-aware-view.md` | Design doc for per-turn scoping (its session/turn pickers are superseded by the drill-down). |
