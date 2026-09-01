@@ -335,7 +335,6 @@ candidate; one that is `used` on the turns that matter earns its cost.
 | `hooks/ctxlog.py` | The hook that writes those logs. Self-installing (`install --write`); also a standalone session reporter. |
 | `prompts/translate-rules.md` | The authoring prompt that turns a guidelines doc into a checks file. |
 | `CLAUDE.md` | The detailed architecture map (canonical for contributors). |
-| `PRD-turn-aware-view.md` | Design doc for per-turn scoping (its session/turn pickers are superseded by the drill-down). |
 | `agent-context-ide-prototype.html` | Hand-written static mockup. Layout reference only; not generated. |
 | `agent-context-ide-real.html` | The script's output. Build artifact — regenerate, don't edit. |
 | `tests/` | Pytest suite (~357 tests, 16 modules). |
