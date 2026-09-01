@@ -1,0 +1,854 @@
+{
+ "activeSessionId": "t",
+ "perSession": {
+  "t": {
+   "attribution": {
+    "attributedTokens": 0,
+    "files": {
+     "<TMP>/agent-context-ide-rollup-fixture-root/home/.claude/CLAUDE.md": {
+      "cached": 0,
+      "fresh": 0,
+      "sentCount": 4,
+      "tokens": 0
+     },
+     "<TMP>/agent-context-ide-rollup-fixture-root/proj/CLAUDE.md": {
+      "cached": 0,
+      "fresh": 0,
+      "sentCount": 4,
+      "tokens": 0
+     }
+    },
+    "history": {
+     "cached": 0,
+     "fresh": 0,
+     "tokens": 0
+    },
+    "requests": 4
+   },
+   "contextFiles": [
+    {
+     "blocks": [
+      {
+       "content": "be direct and brief",
+       "cost": {
+        "estimated": true,
+        "tokens": 0
+       },
+       "evidence": [],
+       "id": "ollup-fixture-root-home-claude-claude-md-0-talking",
+       "level": 1,
+       "moments": [
+        {
+         "kind": "non-event",
+         "label": "No topical reasoning detected",
+         "t": null,
+         "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+         "verdict": "no"
+        }
+       ],
+       "reason": "No predicate derivable and no keyword overlap with the assistant's reasoning.",
+       "status": "unused",
+       "title": "Talking",
+       "type": "instruction"
+      },
+      {
+       "content": "never sign commits",
+       "cost": {
+        "estimated": true,
+        "tokens": 0
+       },
+       "evidence": [
+        {
+         "label": "not mechanically checkable",
+         "text": "no checks file beside this document, and nothing in the rule could be extracted mechanically"
+        }
+       ],
+       "id": "ollup-fixture-root-home-claude-claude-md-1-commits",
+       "level": 1,
+       "moments": [
+        {
+         "kind": "non-event",
+         "label": "No topical reasoning detected",
+         "t": null,
+         "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+         "verdict": "no"
+        }
+       ],
+       "reason": "No predicate derivable and no keyword overlap with the assistant's reasoning.",
+       "ruleCheck": {
+        "checksApplied": [],
+        "confidence": "low",
+        "findings": [],
+        "notCheckable": [
+         {
+          "ruleRef": "Commits",
+          "ruleText": "never sign commits",
+          "why": "no checks file beside this document, and nothing in the rule could be extracted mechanically"
+         }
+        ],
+        "rejected": [],
+        "source": "none",
+        "stale": [],
+        "state": "not-checkable"
+       },
+       "status": "unused",
+       "title": "Commits",
+       "type": "rule"
+      }
+     ],
+     "cost": {
+      "cached": 0,
+      "fresh": 0,
+      "sentCount": 4,
+      "tokens": 0
+     },
+     "drift": false,
+     "group": "global",
+     "kind": "global",
+     "loaded": true,
+     "name": null,
+     "path": "~/.claude/CLAUDE.md",
+     "referencedBy": null,
+     "scope": null,
+     "source": "disk"
+    },
+    {
+     "blocks": [
+      {
+       "content": "run the build before claiming done",
+       "cost": {
+        "estimated": true,
+        "tokens": 0
+       },
+       "evidence": [],
+       "id": "t-ide-rollup-fixture-root-proj-claude-md-0-build",
+       "level": 1,
+       "moments": [
+        {
+         "kind": "non-event",
+         "label": "No topical reasoning detected",
+         "t": null,
+         "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+         "verdict": "no"
+        }
+       ],
+       "reason": "No predicate derivable and no keyword overlap with the assistant's reasoning.",
+       "status": "unused",
+       "title": "Build",
+       "type": "instruction"
+      },
+      {
+       "content": "run pytest",
+       "cost": {
+        "estimated": true,
+        "tokens": 0
+       },
+       "evidence": [],
+       "id": "t-ide-rollup-fixture-root-proj-claude-md-1-tests",
+       "level": 1,
+       "moments": [
+        {
+         "kind": "non-event",
+         "label": "No topical reasoning detected",
+         "t": null,
+         "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+         "verdict": "no"
+        }
+       ],
+       "reason": "No predicate derivable and no keyword overlap with the assistant's reasoning.",
+       "status": "unused",
+       "title": "Tests",
+       "type": "instruction"
+      }
+     ],
+     "cost": {
+      "cached": 0,
+      "fresh": 0,
+      "sentCount": 4,
+      "tokens": 0
+     },
+     "drift": false,
+     "group": "project",
+     "kind": "project",
+     "loaded": true,
+     "name": null,
+     "path": "<TMP>/agent-context-ide-rollup-fixture-root/proj/CLAUDE.md",
+     "referencedBy": null,
+     "scope": null,
+     "source": "disk"
+    }
+   ],
+   "counts": {
+    "assistantMessages": 4,
+    "events": 8,
+    "filesEdited": 1,
+    "filesRead": 1,
+    "toolCalls": {
+     "Edit": 1,
+     "Read": 1
+    },
+    "totalToolCalls": 2,
+    "userMessages": 2
+   },
+   "duplicates": [],
+   "fileActivity": {
+    "edits": [
+     [
+      "<TMP>/agent-context-ide-rollup-fixture-root/home/.claude/CLAUDE.md",
+      1
+     ]
+    ],
+    "reads": [
+     [
+      "<TMP>/agent-context-ide-rollup-fixture-root/proj/CLAUDE.md",
+      1
+     ]
+    ]
+   },
+   "session": {
+    "branch": "",
+    "cwd": "",
+    "durationSec": 7,
+    "endTime": "2026-01-01T00:00:07.000Z",
+    "id": "t",
+    "project": "",
+    "startTime": "2026-01-01T00:00:00.000Z",
+    "transcriptPath": "<TMP>/agent-context-ide-rollup-fixture-root/proj/t.jsonl",
+    "userPrompt": "read the project rules",
+    "version": ""
+   },
+   "timeline": [
+    {
+     "kind": "user",
+     "label": "user",
+     "text": "read the project rules",
+     "ts": "2026-01-01T00:00:00.000Z"
+    },
+    {
+     "kind": "tool-use",
+     "label": "Read",
+     "text": "<TMP>/agent-context-ide-rollup-fixture-root/proj/CLAUDE.md",
+     "ts": "2026-01-01T00:00:01.000Z"
+    },
+    {
+     "kind": "tool-result",
+     "label": "tool result",
+     "text": "body",
+     "ts": "2026-01-01T00:00:02.000Z"
+    },
+    {
+     "kind": "assistant-text",
+     "label": "assistant",
+     "text": "read them",
+     "ts": "2026-01-01T00:00:03.000Z"
+    },
+    {
+     "kind": "user",
+     "label": "user",
+     "text": "now tighten the global ones",
+     "ts": "2026-01-01T00:00:04.000Z"
+    },
+    {
+     "kind": "tool-use",
+     "label": "Edit",
+     "text": "<TMP>/agent-context-ide-rollup-fixture-root/home/.claude/CLAUDE.md",
+     "ts": "2026-01-01T00:00:05.000Z"
+    },
+    {
+     "kind": "tool-result",
+     "label": "tool result",
+     "text": "ok",
+     "ts": "2026-01-01T00:00:06.000Z"
+    },
+    {
+     "kind": "assistant-text",
+     "label": "assistant",
+     "text": "tightened",
+     "ts": "2026-01-01T00:00:07.000Z"
+    }
+   ],
+   "turnCount": 2,
+   "turns": [
+    {
+     "attribution": {
+      "attributedTokens": 0,
+      "files": {
+       "<TMP>/agent-context-ide-rollup-fixture-root/home/.claude/CLAUDE.md": {
+        "cached": 0,
+        "fresh": 0,
+        "sentCount": 2,
+        "tokens": 0
+       },
+       "<TMP>/agent-context-ide-rollup-fixture-root/proj/CLAUDE.md": {
+        "cached": 0,
+        "fresh": 0,
+        "sentCount": 2,
+        "tokens": 0
+       }
+      },
+      "history": {
+       "cached": 0,
+       "fresh": 0,
+       "tokens": 0
+      },
+      "requests": 2
+     },
+     "contextFiles": [
+      {
+       "blocks": [
+        {
+         "content": "be direct and brief",
+         "cost": {
+          "estimated": true,
+          "tokens": 0
+         },
+         "evidence": [],
+         "id": "turn0-ollup-fixture-root-home-claude-claude-md-0-talking",
+         "level": 1,
+         "moments": [
+          {
+           "kind": "non-event",
+           "label": "No topical reasoning detected",
+           "t": null,
+           "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+           "verdict": "no"
+          }
+         ],
+         "reason": "No predicate derivable and no keyword overlap with the assistant's reasoning.",
+         "status": "unused",
+         "title": "Talking",
+         "type": "instruction"
+        },
+        {
+         "content": "never sign commits",
+         "cost": {
+          "estimated": true,
+          "tokens": 0
+         },
+         "evidence": [
+          {
+           "label": "not mechanically checkable",
+           "text": "no checks file beside this document, and nothing in the rule could be extracted mechanically"
+          }
+         ],
+         "id": "turn0-ollup-fixture-root-home-claude-claude-md-1-commits",
+         "level": 1,
+         "moments": [
+          {
+           "kind": "non-event",
+           "label": "No topical reasoning detected",
+           "t": null,
+           "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+           "verdict": "no"
+          }
+         ],
+         "reason": "No predicate derivable and no keyword overlap with the assistant's reasoning.",
+         "ruleCheck": {
+          "checksApplied": [],
+          "confidence": "low",
+          "findings": [],
+          "notCheckable": [
+           {
+            "ruleRef": "Commits",
+            "ruleText": "never sign commits",
+            "why": "no checks file beside this document, and nothing in the rule could be extracted mechanically"
+           }
+          ],
+          "rejected": [],
+          "source": "none",
+          "stale": [],
+          "state": "not-checkable"
+         },
+         "status": "unused",
+         "title": "Commits",
+         "type": "rule"
+        }
+       ],
+       "cost": {
+        "cached": 0,
+        "fresh": 0,
+        "sentCount": 2,
+        "tokens": 0
+       },
+       "drift": false,
+       "group": "global",
+       "kind": "global",
+       "loaded": true,
+       "name": null,
+       "path": "~/.claude/CLAUDE.md",
+       "referencedBy": null,
+       "scope": null,
+       "source": "disk"
+      },
+      {
+       "blocks": [
+        {
+         "content": "run the build before claiming done",
+         "cost": {
+          "estimated": true,
+          "tokens": 0
+         },
+         "evidence": [],
+         "id": "turn0-t-ide-rollup-fixture-root-proj-claude-md-0-build",
+         "level": 1,
+         "moments": [
+          {
+           "kind": "non-event",
+           "label": "No topical reasoning detected",
+           "t": null,
+           "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+           "verdict": "no"
+          }
+         ],
+         "reason": "No predicate derivable and no keyword overlap with the assistant's reasoning.",
+         "status": "unused",
+         "title": "Build",
+         "type": "instruction"
+        },
+        {
+         "content": "run pytest",
+         "cost": {
+          "estimated": true,
+          "tokens": 0
+         },
+         "evidence": [],
+         "id": "turn0-t-ide-rollup-fixture-root-proj-claude-md-1-tests",
+         "level": 1,
+         "moments": [
+          {
+           "kind": "non-event",
+           "label": "No topical reasoning detected",
+           "t": null,
+           "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+           "verdict": "no"
+          }
+         ],
+         "reason": "No predicate derivable and no keyword overlap with the assistant's reasoning.",
+         "status": "unused",
+         "title": "Tests",
+         "type": "instruction"
+        }
+       ],
+       "cost": {
+        "cached": 0,
+        "fresh": 0,
+        "sentCount": 2,
+        "tokens": 0
+       },
+       "drift": false,
+       "group": "project",
+       "kind": "project",
+       "loaded": true,
+       "name": null,
+       "path": "<TMP>/agent-context-ide-rollup-fixture-root/proj/CLAUDE.md",
+       "referencedBy": null,
+       "scope": null,
+       "source": "disk"
+      }
+     ],
+     "counts": {
+      "assistantMessages": 2,
+      "events": 4,
+      "filesEdited": 0,
+      "filesRead": 1,
+      "toolCalls": {
+       "Read": 1
+      },
+      "totalToolCalls": 1,
+      "userMessages": 1
+     },
+     "durationSec": 3,
+     "endTime": "2026-01-01T00:00:03.000Z",
+     "fileActivity": {
+      "edits": [],
+      "reads": [
+       [
+        "<TMP>/agent-context-ide-rollup-fixture-root/proj/CLAUDE.md",
+        1
+       ]
+      ]
+     },
+     "id": "turn-0",
+     "index": 0,
+     "promptPreview": "read the project rules",
+     "startTime": "2026-01-01T00:00:00.000Z",
+     "timeline": [
+      {
+       "kind": "user",
+       "label": "user",
+       "text": "read the project rules",
+       "ts": "2026-01-01T00:00:00.000Z"
+      },
+      {
+       "kind": "tool-use",
+       "label": "Read",
+       "text": "<TMP>/agent-context-ide-rollup-fixture-root/proj/CLAUDE.md",
+       "ts": "2026-01-01T00:00:01.000Z"
+      },
+      {
+       "kind": "tool-result",
+       "label": "tool result",
+       "text": "body",
+       "ts": "2026-01-01T00:00:02.000Z"
+      },
+      {
+       "kind": "assistant-text",
+       "label": "assistant",
+       "text": "read them",
+       "ts": "2026-01-01T00:00:03.000Z"
+      }
+     ],
+     "usage": {
+      "cacheCreation1hTokens": 0,
+      "cacheCreation5mTokens": 0,
+      "cacheCreationTokens": 0,
+      "cacheReadTokens": 0,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "promptTokens": 0,
+      "requests": 2,
+      "thinkingTokens": 0
+     },
+     "userPrompt": "read the project rules"
+    },
+    {
+     "attribution": {
+      "attributedTokens": 0,
+      "files": {
+       "<TMP>/agent-context-ide-rollup-fixture-root/home/.claude/CLAUDE.md": {
+        "cached": 0,
+        "fresh": 0,
+        "sentCount": 2,
+        "tokens": 0
+       },
+       "<TMP>/agent-context-ide-rollup-fixture-root/proj/CLAUDE.md": {
+        "cached": 0,
+        "fresh": 0,
+        "sentCount": 2,
+        "tokens": 0
+       }
+      },
+      "history": {
+       "cached": 0,
+       "fresh": 0,
+       "tokens": 0
+      },
+      "requests": 2
+     },
+     "contextFiles": [
+      {
+       "blocks": [
+        {
+         "content": "be direct and brief",
+         "cost": {
+          "estimated": true,
+          "tokens": 0
+         },
+         "evidence": [],
+         "id": "turn1-ollup-fixture-root-home-claude-claude-md-0-talking",
+         "level": 1,
+         "moments": [
+          {
+           "kind": "non-event",
+           "label": "No topical reasoning detected",
+           "t": null,
+           "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+           "verdict": "no"
+          }
+         ],
+         "reason": "No predicate derivable and no keyword overlap with the assistant's reasoning.",
+         "status": "unused",
+         "title": "Talking",
+         "type": "instruction"
+        },
+        {
+         "content": "never sign commits",
+         "cost": {
+          "estimated": true,
+          "tokens": 0
+         },
+         "evidence": [
+          {
+           "label": "not mechanically checkable",
+           "text": "no checks file beside this document, and nothing in the rule could be extracted mechanically"
+          }
+         ],
+         "id": "turn1-ollup-fixture-root-home-claude-claude-md-1-commits",
+         "level": 1,
+         "moments": [
+          {
+           "kind": "non-event",
+           "label": "No topical reasoning detected",
+           "t": null,
+           "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+           "verdict": "no"
+          }
+         ],
+         "reason": "No predicate derivable and no keyword overlap with the assistant's reasoning.",
+         "ruleCheck": {
+          "checksApplied": [],
+          "confidence": "low",
+          "findings": [],
+          "notCheckable": [
+           {
+            "ruleRef": "Commits",
+            "ruleText": "never sign commits",
+            "why": "no checks file beside this document, and nothing in the rule could be extracted mechanically"
+           }
+          ],
+          "rejected": [],
+          "source": "none",
+          "stale": [],
+          "state": "not-checkable"
+         },
+         "status": "unused",
+         "title": "Commits",
+         "type": "rule"
+        }
+       ],
+       "cost": {
+        "cached": 0,
+        "fresh": 0,
+        "sentCount": 2,
+        "tokens": 0
+       },
+       "drift": false,
+       "group": "global",
+       "kind": "global",
+       "loaded": true,
+       "name": null,
+       "path": "~/.claude/CLAUDE.md",
+       "referencedBy": null,
+       "scope": null,
+       "source": "disk"
+      },
+      {
+       "blocks": [
+        {
+         "content": "run the build before claiming done",
+         "cost": {
+          "estimated": true,
+          "tokens": 0
+         },
+         "evidence": [],
+         "id": "turn1-t-ide-rollup-fixture-root-proj-claude-md-0-build",
+         "level": 1,
+         "moments": [
+          {
+           "kind": "non-event",
+           "label": "No topical reasoning detected",
+           "t": null,
+           "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+           "verdict": "no"
+          }
+         ],
+         "reason": "No predicate derivable and no keyword overlap with the assistant's reasoning.",
+         "status": "unused",
+         "title": "Build",
+         "type": "instruction"
+        },
+        {
+         "content": "run pytest",
+         "cost": {
+          "estimated": true,
+          "tokens": 0
+         },
+         "evidence": [],
+         "id": "turn1-t-ide-rollup-fixture-root-proj-claude-md-1-tests",
+         "level": 1,
+         "moments": [
+          {
+           "kind": "non-event",
+           "label": "No topical reasoning detected",
+           "t": null,
+           "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+           "verdict": "no"
+          }
+         ],
+         "reason": "No predicate derivable and no keyword overlap with the assistant's reasoning.",
+         "status": "unused",
+         "title": "Tests",
+         "type": "instruction"
+        }
+       ],
+       "cost": {
+        "cached": 0,
+        "fresh": 0,
+        "sentCount": 2,
+        "tokens": 0
+       },
+       "drift": false,
+       "group": "project",
+       "kind": "project",
+       "loaded": true,
+       "name": null,
+       "path": "<TMP>/agent-context-ide-rollup-fixture-root/proj/CLAUDE.md",
+       "referencedBy": null,
+       "scope": null,
+       "source": "disk"
+      }
+     ],
+     "counts": {
+      "assistantMessages": 2,
+      "events": 4,
+      "filesEdited": 1,
+      "filesRead": 0,
+      "toolCalls": {
+       "Edit": 1
+      },
+      "totalToolCalls": 1,
+      "userMessages": 1
+     },
+     "durationSec": 3,
+     "endTime": "2026-01-01T00:00:07.000Z",
+     "fileActivity": {
+      "edits": [
+       [
+        "<TMP>/agent-context-ide-rollup-fixture-root/home/.claude/CLAUDE.md",
+        1
+       ]
+      ],
+      "reads": []
+     },
+     "id": "turn-1",
+     "index": 1,
+     "promptPreview": "now tighten the global ones",
+     "startTime": "2026-01-01T00:00:04.000Z",
+     "timeline": [
+      {
+       "kind": "user",
+       "label": "user",
+       "text": "now tighten the global ones",
+       "ts": "2026-01-01T00:00:04.000Z"
+      },
+      {
+       "kind": "tool-use",
+       "label": "Edit",
+       "text": "<TMP>/agent-context-ide-rollup-fixture-root/home/.claude/CLAUDE.md",
+       "ts": "2026-01-01T00:00:05.000Z"
+      },
+      {
+       "kind": "tool-result",
+       "label": "tool result",
+       "text": "ok",
+       "ts": "2026-01-01T00:00:06.000Z"
+      },
+      {
+       "kind": "assistant-text",
+       "label": "assistant",
+       "text": "tightened",
+       "ts": "2026-01-01T00:00:07.000Z"
+      }
+     ],
+     "usage": {
+      "cacheCreation1hTokens": 0,
+      "cacheCreation5mTokens": 0,
+      "cacheCreationTokens": 0,
+      "cacheReadTokens": 0,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "promptTokens": 0,
+      "requests": 2,
+      "thinkingTokens": 0
+     },
+     "userPrompt": "now tighten the global ones"
+    }
+   ],
+   "usage": {
+    "cacheCreation1hTokens": 0,
+    "cacheCreation5mTokens": 0,
+    "cacheCreationTokens": 0,
+    "cacheReadTokens": 0,
+    "inputTokens": 0,
+    "outputTokens": 0,
+    "promptTokens": 0,
+    "requests": 4,
+    "thinkingTokens": 0
+   },
+   "usageSeries": [
+    {
+     "cacheCreation": 0,
+     "cacheCreation1h": 0,
+     "cacheCreation5m": 0,
+     "cacheRead": 0,
+     "eventIndex": 1,
+     "input": 0,
+     "output": 0,
+     "requestId": null,
+     "thinking": 0,
+     "ts": "2026-01-01T00:00:01.000Z"
+    },
+    {
+     "cacheCreation": 0,
+     "cacheCreation1h": 0,
+     "cacheCreation5m": 0,
+     "cacheRead": 0,
+     "eventIndex": 3,
+     "input": 0,
+     "output": 0,
+     "requestId": null,
+     "thinking": 0,
+     "ts": "2026-01-01T00:00:03.000Z"
+    },
+    {
+     "cacheCreation": 0,
+     "cacheCreation1h": 0,
+     "cacheCreation5m": 0,
+     "cacheRead": 0,
+     "eventIndex": 5,
+     "input": 0,
+     "output": 0,
+     "requestId": null,
+     "thinking": 0,
+     "ts": "2026-01-01T00:00:05.000Z"
+    },
+    {
+     "cacheCreation": 0,
+     "cacheCreation1h": 0,
+     "cacheCreation5m": 0,
+     "cacheRead": 0,
+     "eventIndex": 7,
+     "input": 0,
+     "output": 0,
+     "requestId": null,
+     "thinking": 0,
+     "ts": "2026-01-01T00:00:07.000Z"
+    }
+   ]
+  }
+ },
+ "project": {
+  "cwd": "<TMP>/agent-context-ide-rollup-fixture-root/proj",
+  "name": "proj"
+ },
+ "sessions": [
+  {
+   "branch": "",
+   "contextTokens": 0,
+   "duplicatePairs": 0,
+   "duplicateTokens": 0,
+   "durationSec": 7,
+   "endTime": "2026-01-01T00:00:07.000Z",
+   "events": 8,
+   "filesEdited": 1,
+   "id": "t",
+   "path": "<TMP>/agent-context-ide-rollup-fixture-root/proj/t.jsonl",
+   "promptPreview": "read the project rules",
+   "redundantPairs": 0,
+   "startTime": "2026-01-01T00:00:00.000Z",
+   "toolCalls": 2,
+   "usage": {
+    "cacheCreation1hTokens": 0,
+    "cacheCreation5mTokens": 0,
+    "cacheCreationTokens": 0,
+    "cacheReadTokens": 0,
+    "inputTokens": 0,
+    "outputTokens": 0,
+    "promptTokens": 0,
+    "requests": 4,
+    "thinkingTokens": 0
+   },
+   "userMessages": 2
+  }
+ ]
+}

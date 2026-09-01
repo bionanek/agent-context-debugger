@@ -41,9 +41,16 @@ def _blk(bid, title, status="unused", reason="no signal", content="body",
     }
 
 
-def _file(path, blocks, loaded=True, kind="global"):
-    return {"path": path, "kind": kind, "loaded": loaded, "group": "global",
-            "blocks": blocks}
+def _file(path, blocks, loaded=True, kind="global", active=False, summary=None,
+          reads=0, edits=0, fid=None):
+    counts = {}
+    for b in blocks:
+        counts[b["status"]] = counts.get(b["status"], 0) + 1
+    return {"id": fid or brv.file_slug(path), "path": path, "kind": kind,
+            "loaded": loaded, "group": "global", "blocks": blocks,
+            "activity": {"reads": reads, "edits": edits},
+            "rollup": {"statusCounts": counts, "active": active,
+                       "summary": summary or "in context, nothing referenced it"}}
 
 
 def _turn(index, prompt, files=None, calls=0):
@@ -143,7 +150,8 @@ def test_session_listing_names_the_next_command():
 
 def test_every_query_line_is_bounded():
     data = _simple_data()
-    for address in (["sessions"], [SID], [SID, "turns"], [SID, "blocks"]):
+    for address in (["sessions"], [SID], [SID, "turns"], [SID, "files"],
+                    [SID, "blocks"]):
         for line in brv.run_query(data, address):
             assert len(line) <= brv.QUERY_FIELD_LIMIT + 200
 
@@ -249,6 +257,86 @@ def test_unknown_block_under_a_turn_names_that_turns_listing():
     with pytest.raises(brv.QueryError) as e:
         brv.run_query(_simple_data(), [SID, "turn-1", "no-such-block"])
     assert f"--query {SID} turn-1 blocks" in str(e.value)
+
+
+# ---------- files ----------
+
+def _files_data():
+    """A turn with one active and one quiet file, plus a session-scope file."""
+    hot = _file("~/.claude/CLAUDE.md",
+                [_blk("turn1-claude-md-0-talk", "How to talk to me", status="ignored")],
+                active=True, summary="1 rule fired, 1 violated", reads=2, fid="turn1-claude-md")
+    cold = _file("~/.claude/skills/cp/SKILL.md",
+                 [_blk("turn1-cp-0-cp", "cp", status="not-loaded")],
+                 loaded=False, summary="on disk, never entered context", fid="turn1-cp-skill")
+    sess = _file("~/.claude/CLAUDE.md",
+                 [_blk("claude-md-0-talk", "How to talk to me", status="used")],
+                 active=True, summary="1 of 1 sections matched the trace", fid="claude-md")
+    turns = [_turn(1, "fix the parser", [cold, hot], calls=3)]
+    return _data((_summary(SID), _session(SID, files=[sess], turns=turns)))
+
+
+def test_query_turn_files_lists_each_file_with_its_summary_and_group():
+    text = _joined(brv.run_query(_files_data(), [SID, "turn-1", "files"]))
+    assert "turn1-claude-md" in text and "turn1-cp-skill" in text
+    assert "1 rule fired, 1 violated" in text
+    assert "on disk, never entered context" in text
+    assert "active" in text and "quiet" in text
+
+
+def test_files_listing_puts_active_before_quiet():
+    """The page groups Active above Quiet; the CLI must show the same order."""
+    out = brv.run_query(_files_data(), [SID, "turn-1", "files"])
+    rows = [ln for ln in out if ln.startswith("turn1-")]
+    assert rows[0].startswith("turn1-claude-md")
+    assert rows[1].startswith("turn1-cp-skill")
+
+
+def test_files_listing_names_the_next_command():
+    out = brv.run_query(_files_data(), [SID, "turn-1", "files"])
+    assert f"--query {SID} turn1-claude-md" in _joined(out)
+
+
+def test_query_session_files_lists_session_scope_files():
+    text = _joined(brv.run_query(_files_data(), [SID, "files"]))
+    assert "claude-md" in text
+    assert "1 of 1 sections matched the trace" in text
+
+
+def test_file_listing_is_capped_and_names_the_all_flag():
+    files = [_file(f"~/.claude/f{i}.md", [_blk(f"f{i}-0-b", "B")], fid=f"f{i}")
+             for i in range(brv.QUERY_ROW_LIMIT + 5)]
+    data = _data((_summary(SID), _session(SID, files=files)))
+    out = brv.run_query(data, [SID, "files"])
+    assert f"--query {SID} files --all" in _joined(out)
+    assert len([ln for ln in out if ln.startswith("f")]) == brv.QUERY_ROW_LIMIT
+
+    full = brv.run_query(data, [SID, "files"], show_all=True)
+    assert len([ln for ln in full if ln.startswith("f")]) == brv.QUERY_ROW_LIMIT + 5
+
+
+def test_query_file_prints_its_rollup_activity_and_blocks():
+    text = _joined(brv.run_query(_files_data(), [SID, "turn1-claude-md"]))
+    assert "~/.claude/CLAUDE.md" in text
+    assert "1 rule fired, 1 violated" in text
+    assert "2 read" in text
+    assert "turn1-claude-md-0-talk" in text and "ignored" in text
+
+
+def test_query_file_names_the_block_command_for_the_next_step():
+    out = brv.run_query(_files_data(), [SID, "turn1-claude-md"])
+    assert f"--query {SID} turn1-claude-md-0-talk" in _joined(out)
+
+
+def test_unknown_file_id_raises_with_the_files_listing_command():
+    with pytest.raises(brv.QueryError) as e:
+        brv.run_query(_files_data(), [SID, "turn-1", "no-such-file"])
+    assert f"--query {SID} turn-1 files" in str(e.value)
+
+
+def test_field_on_the_files_listing_raises():
+    with pytest.raises(brv.QueryError):
+        brv.run_query(_files_data(), [SID, "files"], field="content")
 
 
 # ---------- bounding and elision ----------

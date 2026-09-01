@@ -3282,13 +3282,86 @@ def query_blocks(sid, session_data, turn=None, show_all=False):
     return lines
 
 
+def _files_listing_cmd(sid, turn, *extra):
+    return (_query_cmd(sid, turn["id"], "files", *extra) if turn is not None
+            else _query_cmd(sid, "files", *extra))
+
+
+def _file_group(rec):
+    return "active" if (rec.get("rollup") or {}).get("active") else "quiet"
+
+
+def query_files(sid, session_data, turn=None, show_all=False):
+    """List the scope's context files, active ones first.
+
+    The order is the page's grouping, not a sort: a reader who drills into a
+    turn on screen and asks the same question here must see the same two groups
+    in the same order, or one of the two views is lying about what mattered.
+    """
+    scope = turn if turn is not None else session_data
+    label = turn["id"] if turn is not None else "session scope"
+    files = list(scope.get("contextFiles") or [])
+    ordered = ([f for f in files if _file_group(f) == "active"]
+               + [f for f in files if _file_group(f) == "quiet"])
+    rows = [f"{f.get('id', '')}  [{_file_group(f)}]  {f['path']}: "
+            f"{(f.get('rollup') or {}).get('summary', '')}" for f in ordered]
+    n_active = sum(1 for f in files if _file_group(f) == "active")
+    lines = [f"session {sid} — {label} — {len(files)} context file(s): "
+             f"{n_active} active, {len(files) - n_active} quiet"]
+    lines += _bounded_rows(rows, _files_listing_cmd(sid, turn, "--all"), show_all)
+    if ordered:
+        lines.append(f"next: {_query_cmd(sid, ordered[0].get('id', ''))}")
+    return lines
+
+
+def _find_query_file(session_data, file_id):
+    """(scope label, file record) for a file id, at any scope."""
+    for f in session_data.get("contextFiles") or []:
+        if f.get("id") == file_id:
+            return "session", f
+    for t in session_data.get("turns") or []:
+        for f in t.get("contextFiles") or []:
+            if f.get("id") == file_id:
+                return t["id"], f
+    return None
+
+
+def query_file(sid, file_id, scope, file_rec, show_all=False):
+    rollup = file_rec.get("rollup") or {}
+    activity = file_rec.get("activity") or {}
+    counts = rollup.get("statusCounts") or {}
+    cost = file_rec.get("cost") or {}
+    blocks = file_rec.get("blocks") or []
+    lines = [
+        f"file     {file_id}",
+        f"scope    {scope}",
+        f"path     {file_rec['path']} ({'loaded' if file_rec.get('loaded') else 'not loaded'})",
+        f"group    {_file_group(file_rec)}",
+        f"summary  {rollup.get('summary', '')}",
+        f"activity {activity.get('reads', 0)} reads, {activity.get('edits', 0)} edits",
+        f"status   {', '.join(f'{k} {v}' for k, v in counts.items()) or 'no blocks'}",
+        f"tokens   {_fmt_tokens(cost.get('tokens'))} over "
+        f"{cost.get('sentCount', 0)} request(s)",
+        f"blocks   {len(blocks)}",
+    ]
+    rows = [f"  {b['id']}  [{b.get('status', '')}]  {b.get('title', '')}" for b in blocks]
+    lines += _bounded_rows(rows, _query_cmd(sid, file_id, "--all"), show_all)
+    if blocks:
+        lines.append(f"next: {_query_cmd(sid, blocks[0]['id'])}")
+    return lines
+
+
 def query_block(sid, session_data, block_id, turn=None, field=None):
     found = _find_query_block(session_data, block_id)
     if not found:
-        # The listing named is the one the caller addressed, so the suggested
-        # command lists exactly the ids that would have worked here.
-        raise QueryError(f"error: session {sid} has no block `{block_id}`. "
-                         f"List blocks with: {_blocks_listing_cmd(sid, turn)}")
+        # The listings named are the ones the caller addressed, so the suggested
+        # commands list exactly the ids that would have worked here. Both levels
+        # are named because a leaf token is a block id or a file id, and a reader
+        # who mistyped one has no way to tell which listing to reach for.
+        raise QueryError(f"error: session {sid} has no block or context file "
+                         f"`{block_id}`. "
+                         f"List blocks with: {_blocks_listing_cmd(sid, turn)}. "
+                         f"List files with: {_files_listing_cmd(sid, turn)}")
     scope, file_rec, block = found
     if field:
         return _query_field(block, field, QUERY_BLOCK_FIELDS)
@@ -3347,14 +3420,27 @@ def run_query(data, address, field=None, show_all=False):
     token = rest.pop(0)
     if rest:
         raise QueryError(f"error: unexpected address `{' '.join(rest)}`. "
-                         f"An address is <session> [turn-N] [blocks|turns|<block-id>].")
-    if token in ("turns", "blocks"):
+                         f"An address is <session> [turn-N] "
+                         f"[turns|files|blocks|<file-id>|<block-id>].")
+    if token in ("turns", "files", "blocks"):
         if field:
             raise QueryError(f"error: --field addresses one session, turn or block, "
                              f"not the `{token}` listing.")
         if token == "turns":
             return query_turns(sid, session_data, show_all=show_all)
+        if token == "files":
+            return query_files(sid, session_data, turn=turn, show_all=show_all)
         return query_blocks(sid, session_data, turn=turn, show_all=show_all)
+    # A block id is tried first, so every id that resolved before this level
+    # existed still resolves to the same block.
+    if _find_query_block(session_data, token) is None:
+        found_file = _find_query_file(session_data, token)
+        if found_file is not None:
+            if field:
+                raise QueryError("error: --field addresses one session, turn or "
+                                 "block, not a context file.")
+            scope, file_rec = found_file
+            return query_file(sid, token, scope, file_rec, show_all=show_all)
     return query_block(sid, session_data, token, turn=turn, field=field)
 
 
@@ -3428,6 +3514,93 @@ def _annotate_costs(file_items, entries, nonresident_by_request=None, history_ch
     return result
 
 
+# Statuses that mean the block did something observable in this scope. Everything
+# else, `not-loaded` included, leaves the file quiet.
+ACTIVE_BLOCK_STATUSES = frozenset({"used", "used-partial", "ignored",
+                                   "possibly-referenced", "undelivered"})
+
+
+def _resolve_key(path):
+    """Filesystem-identity key for a path, for joining activity to a file.
+
+    The activity counters are keyed by the raw `file_path` a tool input carried
+    and context files by their `abs_path`, which most - but not all - of the
+    add_file callers have already resolved. Resolving both sides is what keeps
+    a symlinked home (/var vs /private/var on macOS) or a `~` in a tool input
+    from reporting every file as untouched, which looks plausible.
+    """
+    try:
+        return str(Path(path).resolve())
+    except Exception:
+        return str(path)
+
+
+def _resolved_counts(counter):
+    """A file-activity Counter re-keyed by _resolve_key."""
+    out = Counter()
+    for raw, n in counter.items():
+        out[_resolve_key(raw)] += n
+    return out
+
+
+def _annotate_activity(file_items, reads, edits):
+    """Attach `activity` (reads/edits in this scope) to each context-file record."""
+    read_by_path = _resolved_counts(reads)
+    edit_by_path = _resolved_counts(edits)
+    for abs_path, _chars, rec in file_items:
+        key = _resolve_key(abs_path)
+        rec["activity"] = {"reads": read_by_path.get(key, 0),
+                           "edits": edit_by_path.get(key, 0)}
+
+
+def _annotate_rollup(rec):
+    """Attach `rollup` (status tally, active/quiet, one-line summary) to a record.
+
+    Reads `activity`, so it runs after _annotate_activity. Kept separate from it
+    because the aggregate payload re-derives its block statuses from the per-turn
+    ones after _compute_payload has returned, and its rollup has to be recomputed
+    over those final statuses rather than the session-wide first pass.
+    """
+    blocks = rec.get("blocks") or []
+    counts = Counter(b["status"] for b in blocks)
+    activity = rec.get("activity") or {}
+    reads = activity.get("reads", 0)
+    edits = activity.get("edits", 0)
+    total = len(blocks)
+    matched = counts["used"] + counts["used-partial"]
+    # A rule that fired is one the trace tied to an outcome, followed or not.
+    fired = matched + counts["ignored"]
+
+    if counts["ignored"]:
+        summary = (f"{fired} rule{'s' if fired != 1 else ''} fired, "
+                   f"{counts['ignored']} violated")
+    elif edits:
+        summary = (f"edited {edits} time{'s' if edits != 1 else ''}; "
+                   f"{matched} of {total} sections matched the trace")
+    elif reads:
+        summary = f"read this turn; {matched} of {total} sections matched the trace"
+    elif matched:
+        summary = f"{matched} of {total} sections matched the trace"
+    elif rec.get("loaded"):
+        summary = "in context, nothing referenced it"
+    else:
+        summary = "on disk, never entered context"
+
+    rec["rollup"] = {
+        "statusCounts": dict(counts),
+        "active": bool(reads or edits) or any(s in ACTIVE_BLOCK_STATUSES for s in counts),
+        "summary": summary,
+    }
+
+
+def _violation_headline(files):
+    """One line naming the most consequential thing a turn or session did."""
+    n = sum(1 for f in files for b in (f.get("blocks") or []) if b["status"] == "ignored")
+    if not n:
+        return "nothing violated"
+    return f"{n} rule{'s' if n != 1 else ''} violated"
+
+
 def _compute_payload(events, calls, asst_segs, args, project_dir, id_prefix="", hook_facts=None,
                      nonresident_paths=None, usage_entries=None, history_chars=None,
                      nonresident_by_request=None):
@@ -3493,6 +3666,10 @@ def _compute_payload(events, calls, asst_segs, args, project_dir, id_prefix="", 
             "scope": f.get("scope"),
             "referencedBy": f.get("referenced_by"),
             "blocks": assessed,
+            # Appended, not inserted: every key above keeps the position it had
+            # before this field existed. Shares the prefix its blocks carry, so
+            # a block id always starts with the id of the file it came from.
+            "id": f"{id_prefix}{slug}",
         }
         # Emitted only when content was actually withheld, so a session with no
         # truncation serialises exactly as it did before this field existed.
@@ -3520,6 +3697,9 @@ def _compute_payload(events, calls, asst_segs, args, project_dir, id_prefix="", 
     attribution = _annotate_costs(file_items, usage_entries,
                                   nonresident_by_request=nonresident_by_request,
                                   history_chars=history_chars)
+    _annotate_activity(file_items, reads, edits_counter)
+    for _abs, _chars, rec in file_items:
+        _annotate_rollup(rec)
 
     timestamps = [e.get("timestamp") for e in events if e.get("timestamp")]
     start = (timestamps[0] if timestamps else "") or (timeline[0]["ts"] if timeline else "")
@@ -3664,6 +3844,7 @@ def process_session(transcript_path, args):
             "contextFiles": p["contextFiles"],
             "timeline": p["timeline"],
             "fileActivity": p["fileActivity"],
+            "headline": _violation_headline(p["contextFiles"]),
         })
         # Same rule as `delivery` and `hook`: keys appear only when there is
         # something to report, so sessions without compaction serialise as before.
@@ -3689,6 +3870,11 @@ def process_session(transcript_path, args):
                 statuses = per_block_statuses.get(b["id"])
                 if statuses:
                     b["status"] = combine_verdicts(statuses)
+        # The rollups computed inside _compute_payload scored the session-wide
+        # statuses; recompute them over the combined ones the aggregate now
+        # carries, or the file summary contradicts the block list beneath it.
+        for f in aggregate["contextFiles"]:
+            _annotate_rollup(f)
 
     # Pull aggregate values back out for the existing top-level keys.
     user_prompt = aggregate["userPrompt"] or None
@@ -3724,6 +3910,7 @@ def process_session(transcript_path, args):
         "usage": session_usage,
         # Cheap enough for the picker; the per-file breakdown stays in per_session.
         "contextTokens": sum(f["cost"]["tokens"] for f in files_out),
+        "headline": _violation_headline(files_out),
     }
     per_session = {
         "session": {
@@ -3924,9 +4111,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     background: var(--bg); color: var(--text); font-size: 13px; line-height: 1.5; overflow: hidden;
+    display: flex; flex-direction: column;
   }
   header {
-    height: 50px; background: var(--panel); border-bottom: 1px solid var(--border);
+    height: 50px; flex-shrink: 0; background: var(--panel); border-bottom: 1px solid var(--border);
     display: flex; align-items: center; padding: 0 20px; gap: 30px;
   }
   header h1 { font-size: 14px; font-weight: 600; color: var(--text-bright); letter-spacing: 0.5px; }
@@ -3942,15 +4130,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   }
   nav button:hover { background: var(--panel-2); color: var(--text); }
   nav button.active { background: var(--panel-2); color: var(--text-bright); }
-  main { height: calc(100vh - 50px); display: flex; }
+  main { flex: 1; min-height: 0; display: flex; }
   .view { flex: 1; display: flex; height: 100%; }
   .view[hidden] { display: none; }
-
-  .file-tree { width: 260px; background: var(--panel); border-right: 1px solid var(--border); padding: 14px; overflow-y: auto; }
-  .file-tree h3 { font-size: 10px; text-transform: uppercase; color: var(--text-dim); letter-spacing: 0.5px; margin-bottom: 8px; }
-  .session-card { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; margin-bottom: 14px; font-size: 11px; }
-  .session-card .row { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; color: var(--text-dim); }
-  .session-card .row strong { color: var(--text); font-family: monospace; font-size: 10px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   .blocks-pane { flex: 1; overflow-y: auto; padding: 22px; }
   .pane-header { margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
@@ -3973,6 +4155,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .block.selected { border-color: var(--accent); background: var(--panel-2); }
 
   .block-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+  /* The status colour rules below override this default: same specificity,
+     later in the sheet, so a block title reads as its verdict. */
   .block-title { color: var(--text-bright); font-weight: 600; font-size: 13px; }
   .block-type { font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px; padding: 2px 6px; border-radius: 3px; font-weight: 700; }
   .block-type.rule { background: rgba(188,140,255,0.15); color: var(--purple); }
@@ -4001,21 +4185,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
      arrived" is a different finding from "arrived and was ignored". */
   .status-undelivered .status-dot { background: var(--purple); }
   .status-undelivered { color: var(--purple); }
-  .file-tree-item { font-family:monospace;font-size:11px;color:var(--text);padding:5px 8px;cursor:pointer;border-radius:4px;margin-bottom:3px;display:flex;justify-content:space-between;align-items:center;gap:6px; }
-  .file-tree-item:hover { background: var(--panel-2); }
-  .file-tree-item.active { background: var(--panel-2); color: var(--text-bright); }
-  .file-tree-item.not-loaded { opacity: 0.55; }
-  .file-tree-item .kind-tag { font-size: 9px; text-transform: uppercase; letter-spacing: 0.4px; padding: 1px 5px; border-radius: 3px; background: var(--panel); color: var(--text-dim); }
-  .file-tree-item .kind-tag.global { color: var(--accent); }
-  .file-tree-item .kind-tag.project { color: var(--green); }
-  .file-tree-item .kind-tag.skill { color: var(--purple); }
-  .file-tree-item .kind-tag.command { color: var(--amber); }
-  .file-tree-item .kind-tag.agent { color: #ff7b72; }
-  .file-tree-item .kind-tag.rule { color: var(--green); }
-  .file-tree-item .kind-tag.reference { color: var(--text-dim); }
-  .file-tree-item .kind-tag.read { color: #79c0ff; }       /* cyan */
-  .file-tree-item .kind-tag.preloaded { color: #79c0ff; }
-  .file-tree-item .kind-tag.attached { color: #ffa657; }   /* user-attached */
 
   /* Rule-check states. A red card is reserved for a violation that a reviewed
      checks file produced and that carries a citable span; everything softer
@@ -4037,12 +4206,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .rc-not-checkable { border-style: dashed; }
   .rc-conf { font-size: 9px; text-transform: uppercase; letter-spacing: 0.4px; border: 1px solid var(--border); color: var(--text-dim); padding: 0 4px; border-radius: 3px; margin-left: 6px; vertical-align: middle; }
 
-  .drift-badge {
-    display: inline-block; font-size: 9px; color: var(--amber);
-    border: 1px solid var(--amber); padding: 0 4px; border-radius: 3px;
-    margin-left: 4px; font-family: monospace; vertical-align: middle;
-    cursor: help;
-  }
   .source-tag {
     display: inline-block; font-size: 9px; color: var(--text-dim);
     margin-left: 4px; font-family: monospace; opacity: 0.7;
@@ -4062,15 +4225,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     margin-right: 6px; vertical-align: middle; flex-shrink: 0; }
   .loaded-dot.on  { background: var(--green); box-shadow: 0 0 0 1px var(--green); }
   .loaded-dot.off { background: transparent; box-shadow: inset 0 0 0 1px var(--gray); }
-
-  /* Group subheaders inside file tree */
-  .file-tree-group {
-    font-size: 9px; text-transform: uppercase; letter-spacing: 0.6px;
-    color: var(--text-dim); margin: 14px 0 4px; padding: 0 4px;
-    display: flex; justify-content: space-between; align-items: baseline;
-  }
-  .file-tree-group .count { font-family: monospace; font-size: 10px; color: var(--text-dim); }
-  .file-tree-group:first-of-type { margin-top: 6px; }
 
   /* Load filter chips */
   .load-filter {
@@ -4100,8 +4254,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   }
   .status-chip:hover { border-color: var(--text-dim); }
   .status-chip.active { border-color: currentColor; background: var(--panel); }
-  .file-section-header { font-family:monospace; font-size:11px; color:var(--text-dim); margin: 18px 0 6px; padding-bottom: 4px; border-bottom: 1px dashed var(--border); display:flex; justify-content:space-between; }
-  .file-section-header .name { color: var(--text-bright); }
   .file-hook-note { font-size: 11px; color: var(--text-dim); margin: -2px 0 8px; }
   .file-hook-note code { font-family: monospace; color: var(--text-bright); }
 
@@ -4132,17 +4284,52 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
   /* Session picker */
   .session-picker { display:flex; align-items:center; gap:10px; margin-left:auto; }
-  .session-picker select { background: var(--panel-2); color: var(--text-bright); border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; font-family: monospace; font-size: 11px; cursor: pointer; max-width: 380px; }
-  .session-picker select:hover { border-color: var(--accent); }
   .session-picker .count { font-size: 11px; color: var(--text-dim); }
-  .turn-bar { display:flex; align-items:center; gap:10px; padding: 6px 18px; border-bottom: 1px solid var(--border); background: var(--panel); font-size: 11px; }
-  .turn-bar .label { color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; font-size: 10px; }
-  .turn-bar select { background: var(--panel-2); color: var(--text-bright); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; font-family: monospace; font-size: 11px; cursor: pointer; max-width: 540px; }
-  .turn-bar select:hover { border-color: var(--accent); }
-  .turn-bar button { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 3px 8px; font-family: monospace; font-size: 11px; cursor: pointer; }
-  .turn-bar button:hover { border-color: var(--accent); }
-  .turn-bar .hint { color: var(--text-dim); font-size: 10px; }
-  .turn-bar.hidden { display: none; }
+
+  /* Drill-down: breadcrumb bar, collapsed ancestor bars, one row per child */
+  .crumb-bar { display:flex; align-items:center; gap:4px; flex-wrap:wrap; flex-shrink: 0; padding: 6px 18px; border-bottom: 1px solid var(--border); background: var(--panel); font-size: 11px; }
+  .crumb { background: none; border: none; padding: 2px 6px; border-radius: 4px; color: var(--text-dim); font-family: inherit; font-size: 11px; cursor: pointer; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .crumb:hover { background: var(--panel-2); color: var(--text-bright); }
+  .crumb.current { color: var(--text-bright); cursor: default; }
+  .crumb.current:hover { background: none; }
+  .crumb-sep { color: var(--gray); }
+
+  .ancestor { display:flex; align-items:center; gap:10px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 7px 12px; margin-bottom: 6px; font-size: 11px; cursor: pointer; }
+  .ancestor:hover { border-color: var(--accent); }
+  .ancestor.current { cursor: default; }
+  .ancestor.current:hover { border-color: var(--border); }
+  .ancestor .what { color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; font-size: 9px; width: 46px; flex-shrink: 0; }
+  .ancestor .who { color: var(--text-bright); font-family: monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ancestor .aside { margin-left: auto; color: var(--text-dim); font-family: monospace; flex-shrink: 0; padding-left: 10px; }
+
+  .drill-row { display:flex; align-items:center; gap:10px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 11px 14px; margin-bottom: 8px; cursor: pointer; }
+  .drill-row:hover { border-color: var(--accent); }
+  .drill-row.not-loaded { opacity: 0.6; }
+  .drill-row .title { color: var(--text-bright); font-size: 13px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .drill-row .sub { color: var(--text-dim); font-size: 11px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .drill-row .aside { margin-left: auto; color: var(--text-dim); font-family: monospace; font-size: 11px; flex-shrink: 0; }
+  .drill-row .chev { color: var(--text-dim); flex-shrink: 0; }
+  .level-header { display:flex; align-items:center; gap:6px; margin: 4px 0 8px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-dim); }
+  .empty-level { color: var(--text-dim); font-size: 12px; padding: 12px 2px; }
+  .drill-row .row-main { flex: 1; min-width: 0; }
+  .drill-row .row-top { display: flex; align-items: baseline; gap: 10px; }
+  .drill-row.violating { border-color: var(--red); }
+  /* Quiet rows are dimmed, never hidden: "nothing happened here" is an answer,
+     and hiding it would leave the reader unable to confirm it. */
+  .drill-row.quiet, .block.quiet { opacity: 0.55; }
+  .drill-row.quiet:hover, .block.quiet:hover { opacity: 1; }
+  .row-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+  .row-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 10px;
+    padding: 1px 6px; border-radius: 10px; background: var(--panel-2);
+    border: 1px solid var(--border); color: var(--text-dim); white-space: nowrap; }
+  .row-chip.violation { color: var(--red); border-color: var(--red); }
+  .row-chip.warn { color: var(--amber); border-color: var(--amber); }
+  .row-chip .status-dot { width: 6px; height: 6px; }
+  .group-header { display: flex; align-items: center; gap: 8px; margin: 16px 0 8px; font-size: 10px;
+    text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-dim); }
+  .group-header .count { font-family: monospace; color: var(--text-bright); }
+  .group-header .rule { flex: 1; height: 1px; background: var(--border); }
+  .block-reason { color: var(--text-dim); font-size: 11px; }
   .scope-badge { display: inline-block; padding: 2px 7px; border-radius: 10px; background: var(--panel-2); border: 1px solid var(--border); font-size: 10px; color: var(--text-dim); font-family: monospace; letter-spacing: 0.3px; }
   .scope-badge.turn { color: var(--accent); border-color: var(--accent); }
   .block .scope-badge { margin-left: 6px; }
@@ -4157,10 +4344,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .session-list-toggle { font-size: 11px; color: var(--accent); cursor: pointer; user-select: none; padding: 6px 0; }
   .session-list-toggle:hover { text-decoration: underline; }
 
-  .block-content { font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 12px; color: var(--text); white-space: pre-wrap; word-break: break-word; max-height: 80px; overflow: hidden; position: relative; }
-  .block.selected .block-content { max-height: none; }
-  .block-content::after { content: ''; position: absolute; bottom: 0; left: 0; right: 0; height: 24px; background: linear-gradient(transparent, var(--panel)); pointer-events: none; }
-  .block.selected .block-content::after { display: none; }
 
   .detail-pane { width: 420px; background: var(--panel); border-left: 1px solid var(--border); overflow-y: auto; padding: 22px; }
   .detail-pane.empty { display: flex; align-items: center; justify-content: center; color: var(--text-dim); font-size: 12px; text-align: center; padding: 40px; }
@@ -4440,20 +4623,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   </nav>
   <div class="session-picker">
     <span class="count" id="session-count"></span>
-    <select id="session-select"></select>
   </div>
 </header>
-<div class="turn-bar hidden" id="turn-bar">
-  <span class="label">Turn</span>
-  <select id="turn-select"></select>
-  <button id="turn-prev" title="Previous turn ([)">&larr;</button>
-  <button id="turn-next" title="Next turn (])">&rarr;</button>
-  <span class="hint">[ / ] to step · Aggregate &amp; per-turn views</span>
-</div>
+<div class="crumb-bar" id="crumb-bar"></div>
 
 <main>
   <section id="blocks-view" class="view">
-    <aside class="file-tree" id="file-tree"></aside>
     <div class="blocks-pane" id="blocks-pane"></div>
     <aside class="detail-pane empty" id="detail-pane">
       <div>Click a block to see how the agent treated it in this run.</div>
@@ -4511,10 +4686,10 @@ function scopeBadgeHtml(extraClass) {
   return `<span class="scope-badge ${turnCls} ${extraClass||''}">${escapeHtml(label)}</span>`;
 }
 
-function activeTurn() {
+function turnScope(turnId) {
   const A = active();
-  if (activeTurnId === 'all' || !A.turns) return A;
-  const t = A.turns.find(x => x.id === activeTurnId);
+  if (turnId === 'all' || !A.turns) return A;
+  const t = A.turns.find(x => x.id === turnId);
   if (!t) return A;
   return {
     session: { ...A.session,
@@ -4532,6 +4707,7 @@ function activeTurn() {
     turnCount: A.turnCount,
   };
 }
+function activeTurn() { return turnScope(activeTurnId); }
 function escapeHtml(s) {
   return (s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
@@ -4590,7 +4766,6 @@ function deliveredLinesLabel(d) {
 }
 
 let selectedBlockId = null;
-let selectedFilePath = null; // null = show all
 let showSessionList = false;
 let loadFilter = 'all'; // 'all' | 'loaded' | 'not-loaded'
 let statusFilter = null;  // null = every status; otherwise one status name
@@ -4608,121 +4783,442 @@ const STATUS_CHIP_LABEL = {
   'undelivered': 'never delivered'
 };
 
-function filteredFiles() {
+function loadFilteredFiles() {
   const files = activeTurn().contextFiles;
   if (loadFilter === 'loaded') return files.filter(f => f.loaded);
   if (loadFilter === 'not-loaded') return files.filter(f => !f.loaded);
   return files;
 }
 
-function renderSessionPicker() {
-  const sel = document.getElementById('session-select');
-  const count = document.getElementById('session-count');
-  count.textContent = `${DATA.sessions.length} session${DATA.sessions.length===1?'':'s'} for ${DATA.project.name}`;
-  sel.innerHTML = '';
-  DATA.sessions.forEach(s => {
-    const opt = document.createElement('option');
-    opt.value = s.id;
-    const when = (s.startTime || '').slice(0, 16).replace('T', ' ');
-    const prev = (s.promptPreview || '').slice(0, 60);
-    const su = usageOf(s);
-    opt.textContent = `${s.id.slice(0,8)} · ${when} · ${fmtDuration(s.durationSec)} · `
-      + `${fmtTokens(su.promptTokens)} in / ${fmtTokens(su.outputTokens)} out · ${prev}`;
-    if (s.id === activeSessionId) opt.selected = true;
-    sel.appendChild(opt);
-  });
-  sel.onchange = () => {
-    activeSessionId = sel.value;
-    selectedBlockId = null;
-    selectedFilePath = null;
-    activeTurnId = 'all';  // Per PRD: reset to "All turns" on session switch.
-    renderTurnPicker();
-    rerenderAll();
-  };
+function filteredFiles() {
+  // A status picked at the block level keeps applying one level up, so
+  // ascending after a filter shows the files that carry that status rather
+  // than silently widening back to everything.
+  if (!statusFilter) return loadFilteredFiles();
+  return loadFilteredFiles().filter(f => statusCountsOf(f)[statusFilter] > 0);
 }
 
-function renderTurnPicker() {
-  const bar = document.getElementById('turn-bar');
-  const sel = document.getElementById('turn-select');
-  const A = active();
-  const turns = A.turns || [];
-  // Hide chrome entirely for single-turn sessions — view stays byte-identical
-  // to the pre-turn-aware UI for the simple case.
-  if ((A.turnCount || turns.length) <= 1) {
-    bar.classList.add('hidden');
-    return;
-  }
-  bar.classList.remove('hidden');
-  sel.innerHTML = '';
-  const optAll = document.createElement('option');
-  optAll.value = 'all';
-  const au = usageOf(A);
-  optAll.textContent = `All turns (${A.turnCount}, aggregated) · `
-    + `${fmtTokens(au.promptTokens)} in / ${fmtTokens(au.outputTokens)} out`;
-  if (activeTurnId === 'all') optAll.selected = true;
-  sel.appendChild(optAll);
-  turns.forEach(t => {
-    const opt = document.createElement('option');
-    opt.value = t.id;
-    const calls = t.counts && t.counts.totalToolCalls != null ? t.counts.totalToolCalls : 0;
-    const tu = usageOf(t);
-    const prev = (t.promptPreview || t.userPrompt || '').slice(0, 80);
-    opt.textContent = `Turn ${t.index + 1} of ${A.turnCount} · ${calls} call${calls===1?'':'s'} · `
-      + `${fmtTokens(tu.promptTokens)} in / ${fmtTokens(tu.outputTokens)} out · ${prev}`;
-    if (t.id === activeTurnId) opt.selected = true;
-    sel.appendChild(opt);
+// Mirrors ACTIVE_BLOCK_STATUSES in build_real_view.py. A file's own active flag
+// is baked; block rows have to split themselves, so keep the two sets in step.
+const ACTIVE_STATUSES = new Set(['used', 'used-partial', 'ignored',
+                                 'possibly-referenced', 'undelivered']);
+
+function statusCountsOf(f) { return (f.rollup && f.rollup.statusCounts) || {}; }
+
+// Sums the baked per-file tallies. Nothing is re-derived from block statuses
+// here, so a turn's chips can never disagree with the file rows beneath it.
+function scopeStatusCounts(files) {
+  const out = {};
+  files.forEach(f => {
+    const sc = statusCountsOf(f);
+    Object.keys(sc).forEach(k => { out[k] = (out[k] || 0) + sc[k]; });
   });
-  sel.onchange = () => {
-    activeTurnId = sel.value;
-    selectedBlockId = null;
-    selectedFilePath = null;
-    rerenderAll();
-  };
+  return out;
 }
 
-function stepTurn(direction) {
-  const A = active();
-  const turns = A.turns || [];
-  if (turns.length <= 1) return;
-  // Order: 'all', turn-0, turn-1, ..., turn-(N-1).
-  const order = ['all', ...turns.map(t => t.id)];
-  const cur = order.indexOf(activeTurnId);
-  if (cur === -1) return;
-  const next = (cur + direction + order.length) % order.length;
-  activeTurnId = order[next];
-  selectedBlockId = null;
-  selectedFilePath = null;
-  renderTurnPicker();
+// ---- Drill-down navigation -------------------------------------------------
+//
+// The Block Inspector is navigated by drilling: sessions -> turns -> files ->
+// blocks. `nav` is the whole path; the level is derived from it and never
+// stored, because a stored level drifts out of step with the path the moment
+// one is set without the other.
+//
+// `turnId === 'all'` is the session aggregate. A single-turn session gets it
+// too, since its aggregate *is* its only turn, which is how the turn level is
+// skipped for those sessions without inventing a second sentinel.
+const NAV_KEYS = ['sessionId', 'turnId', 'filePath', 'blockId'];
+let nav = { sessionId: null, turnId: null, filePath: null, blockId: null };
+
+function currentLevel() {
+  if (!nav.sessionId) return 'sessions';
+  if (!nav.turnId) return 'turns';
+  if (!nav.filePath) return 'files';
+  return 'blocks';
+}
+
+/** Merge a nav patch, clear every level below the shallowest key it touches, re-render. */
+function navigate(patch) {
+  const next = { ...nav };
+  let below = false;
+  NAV_KEYS.forEach(k => {
+    if (k in patch) { next[k] = patch[k] || null; below = true; }
+    else if (below) next[k] = null;
+  });
+  nav = next;
+  // activeTurnId is app-wide: Run Timeline, File Activity and the block-status
+  // totals all read it. Letting it drift from nav.turnId is what makes another
+  // tab silently show a different turn than the verdict just read.
+  // activeSessionId is deliberately not cleared at the sessions level: the
+  // other tabs always need some session to render.
+  if (nav.sessionId) activeSessionId = nav.sessionId;
+  activeTurnId = nav.turnId || 'all';
+  selectedBlockId = nav.blockId;
+  writeHash();
   rerenderAll();
 }
 
-function rerenderAll() {
-  renderFileTree();
-  renderBlocks();
-  renderDetail(null);
-  // re-render whichever view is currently visible
-  if (!document.getElementById('timeline-view').hidden) renderTimeline();
-  if (!document.getElementById('files-view').hidden) renderFiles();
-  if (!document.getElementById('duplications-view').hidden) renderDuplications();
+/** Open the given path node, i.e. list its children. */
+function navOpen(clears) { navigate({ [clears]: null }); }
+
+// Deep-link address for the current path, read back by navFromHash() on load.
+// replaceState rather than pushState: every drill step would otherwise land in
+// history and the back button would walk the whole descent one row at a time.
+// Wrapped because a file:// document is refused replaceState in some browsers,
+// and the throw would abort the navigation that was already applied.
+function writeHash() {
+  const parts = [];
+  if (nav.sessionId) parts.push('s=' + encodeURIComponent(nav.sessionId.slice(0, 8)));
+  if (nav.turnId) parts.push('t=' + encodeURIComponent(nav.turnId));
+  if (nav.filePath) parts.push('f=' + encodeURIComponent(nav.filePath));
+  if (nav.blockId) parts.push('b=' + encodeURIComponent(nav.blockId));
+  // An empty path drops the hash entirely instead of leaving a bare '#'.
+  const href = parts.length ? '#' + parts.join('&') : location.pathname + location.search;
+  try { history.replaceState(null, '', href); } catch (e) { /* file:// */ }
 }
 
-function renderFileTree() {
-  const el = document.getElementById('file-tree');
-  const A = activeTurn();
-  const s = A.session;
-  let html = `
-    <h3>Session</h3>
-    <div class="session-card">
-      <div class="row"><span>project</span><strong title="${escapeHtml(s.cwd)}">${escapeHtml(s.project)}</strong></div>
-      <div class="row"><span>branch</span><strong title="${escapeHtml(s.branch)}">${escapeHtml((s.branch||'').slice(0,28))}</strong></div>
-      <div class="row"><span>session</span><strong>${escapeHtml((s.id||'').slice(0,8))}…</strong></div>
-      <div class="row"><span>cli version</span><strong>${escapeHtml(s.version)}</strong></div>
-      <div class="row"><span>duration</span><strong>${fmtDuration(s.durationSec)}</strong></div>
+function hashParams() {
+  const out = {};
+  (location.hash || '').replace(/^#/, '').split('&').forEach(part => {
+    const i = part.indexOf('=');
+    if (i <= 0) return;
+    // A link mangled in transit carries a broken escape like `%zz`, and an
+    // unguarded decodeURIComponent throws it straight out of boot - blanking
+    // the page instead of falling back to the nearest valid ancestor.
+    try { out[part.slice(0, i)] = decodeURIComponent(part.slice(i + 1)); } catch (e) { /* skip */ }
+  });
+  return out;
+}
+
+/**
+ * Resolve the location hash to a nav path, stopping at the first level that
+ * does not exist in this page's data. A link to a session, turn, file or block
+ * that was never baked here must open its nearest valid ancestor: erroring or
+ * blanking the pane leaves the reader with no way back.
+ */
+function navFromHash() {
+  const q = hashParams();
+  const path = { sessionId: null, turnId: null, filePath: null, blockId: null };
+  if (!q.s) return path;
+  const ids = DATA.sessions.map(s => s.id);
+  // The hash carries an 8-char prefix, but an exact id pasted by hand must not
+  // lose to some other session that happens to share those 8 characters.
+  const sid = ids.find(id => id === q.s) || ids.find(id => id.startsWith(q.s));
+  const P = sid ? DATA.perSession[sid] : null;
+  if (!P) return path;
+  path.sessionId = sid;
+
+  if (!q.t) return path;
+  const turn = q.t === 'all' ? null : (P.turns || []).find(t => t.id === q.t);
+  if (q.t !== 'all' && !turn) return path;
+  path.turnId = q.t;
+
+  if (!q.f) return path;
+  const files = (turn ? turn.contextFiles : P.contextFiles) || [];
+  const file = files.find(f => f.path === q.f);
+  if (!file) return path;
+  path.filePath = file.path;
+
+  if (q.b && (file.blocks || []).some(b => b.id === q.b)) path.blockId = q.b;
+  return path;
+}
+
+// `[` / `]` step the deepest node the path names, and Escape drops it. Siblings
+// are listed in the order the level renders them, filters applied: stepping
+// onto a row the reader cannot see reads as the page losing its place.
+function siblings() {
+  if (nav.blockId) {
+    const f = activeTurn().contextFiles.find(x => x.path === nav.filePath);
+    if (!f) return null;
+    const blocks = statusFilter ? f.blocks.filter(b => b.status === statusFilter) : f.blocks;
+    return { key: 'blockId',
+             ids: blocks.filter(b => ACTIVE_STATUSES.has(b.status))
+                        .concat(blocks.filter(b => !ACTIVE_STATUSES.has(b.status)))
+                        .map(b => b.id) };
+  }
+  if (nav.filePath) {
+    const files = filteredFiles();
+    return { key: 'filePath',
+             ids: files.filter(f => f.rollup && f.rollup.active)
+                       .concat(files.filter(f => !(f.rollup && f.rollup.active)))
+                       .map(f => f.path) };
+  }
+  if (nav.turnId) return { key: 'turnId', ids: ['all'].concat((active().turns || []).map(t => t.id)) };
+  if (nav.sessionId) return { key: 'sessionId', ids: DATA.sessions.map(s => s.id) };
+  return null;
+}
+
+function stepSibling(delta) {
+  const s = siblings();
+  if (!s || !s.ids.length) return;
+  const i = s.ids.indexOf(nav[s.key]);
+  // A filter can hide the current node from its own list; start at the near end
+  // rather than refusing to move at all.
+  const next = i < 0 ? (delta > 0 ? 0 : s.ids.length - 1) : i + delta;
+  // Clamped, not wrapped: silently jumping from the last row back to the first
+  // is indistinguishable from having never moved.
+  if (next < 0 || next >= s.ids.length) return;
+  navigate({ [s.key]: s.ids[next] });
+}
+
+function ascendLevel() {
+  const s = siblings();
+  if (!s) return;
+  // A single-turn session has no turn level on the way down (renderSessionsLevel
+  // drops straight into its files), so going up must not invent one: the reader
+  // would land on a list holding the same turn spelled two ways.
+  if (s.key === 'turnId' && (active().turnCount || 0) <= 1) return navigate({ sessionId: null });
+  navigate({ [s.key]: null });
+}
+
+document.addEventListener('keydown', e => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+  if (e.key === '[') stepSibling(-1);
+  else if (e.key === ']') stepSibling(1);
+  else if (e.key === 'Escape') {
+    // An open help popover is the innermost thing on screen, so Escape closes
+    // it first; ascending out from under it would leave it floating over a
+    // level it does not belong to.
+    const pop = document.getElementById('help-popover');
+    if (pop) pop.remove(); else ascendLevel();
+  }
+  else return;
+  e.preventDefault();
+});
+
+function turnLabel(turnId) {
+  const total = active().turnCount || 0;
+  if (!turnId || turnId === 'all') {
+    return total <= 1 ? 'Turn 1 of 1' : `All turns (${total})`;
+  }
+  const t = (active().turns || []).find(x => x.id === turnId);
+  return t ? `Turn ${t.index + 1} of ${total}` : `All turns (${total})`;
+}
+
+function blockTitleOf(blockId) {
+  const b = activeTurn().contextFiles.flatMap(f => f.blocks).find(x => x.id === blockId);
+  return b ? b.title : blockId;
+}
+
+// One entry per non-null level. `clears` is the nav field a click drops, which
+// is always the one *below* the entry: opening a node means listing its
+// children. An entry whose `clears` field is already null is where you are.
+function navPath() {
+  const path = [{ label: `${DATA.sessions.length} session${DATA.sessions.length===1?'':'s'}`, clears: 'sessionId' }];
+  if (!nav.sessionId) return path;
+  path.push({ label: nav.sessionId.slice(0, 8), clears: 'turnId' });
+  if (!nav.turnId) return path;
+  path.push({ label: turnLabel(nav.turnId), clears: 'filePath' });
+  if (!nav.filePath) return path;
+  path.push({ label: nav.filePath.split('/').pop(), clears: 'blockId' });
+  if (!nav.blockId) return path;
+  path.push({ label: blockTitleOf(nav.blockId), clears: null });
+  return path;
+}
+
+function isHere(clears) { return !clears || !nav[clears]; }
+
+function renderBreadcrumb() {
+  const el = document.getElementById('crumb-bar');
+  el.innerHTML = navPath().map(c => {
+    const here = isHere(c.clears);
+    const attr = here ? '' : ` data-clears="${c.clears}" title="Back to this level"`;
+    return `<button class="crumb ${here ? 'current' : ''}"${attr}>${escapeHtml(c.label)}</button>`;
+  }).join('<span class="crumb-sep">&rsaquo;</span>');
+}
+
+// `aside` and `extra` are raw HTML so a bar can carry a coloured span; every
+// caller escapes what it interpolates. `what` and `who` are plain text.
+function ancestorRow(clears, what, who, aside, extra) {
+  const here = isHere(clears);
+  const attr = here ? '' : ` data-clears="${clears}" title="Back to this level"`;
+  return `
+    <div class="ancestor ${here ? 'current' : ''}"${attr}>
+      <span class="what">${escapeHtml(what)}</span>
+      <span class="who">${escapeHtml(who)}</span>
+      <span class="aside">${aside || ''}</span>
     </div>
-    <h3 style="display:flex;align-items:center">
+    ${extra || ''}`;
+}
+
+// One collapsed bar per level above the current one, each clickable to pop
+// back to it. The session card that used to live in the file-tree aside is
+// folded into the session bar.
+function renderAncestors() {
+  if (!nav.sessionId) return '';
+  const A = active();
+  const s = A.session;
+  const su = usageOf(A);
+  let html = ancestorRow('turnId', 'session', `${(s.id||'').slice(0,8)}… · ${s.project}`,
+    `${escapeHtml((s.branch || 'no branch').slice(0,28))} · ${escapeHtml(s.version || '')} · ${fmtDuration(s.durationSec)} · ${fmtTokens(su.promptTokens)} in`);
+  if (!nav.turnId) return html;
+
+  const scope = turnScope(nav.turnId);
+  const tu = usageOf(scope);
+  const calls = (scope.counts && scope.counts.totalToolCalls) || 0;
+  html += ancestorRow('filePath', 'turn', turnLabel(nav.turnId),
+    `${calls} call${calls===1?'':'s'} · ${fmtTokens(tu.promptTokens)} in · ${scope.contextFiles.length} context files`);
+  if (!nav.filePath) return html;
+
+  const f = scope.contextFiles.find(x => x.path === nav.filePath);
+  if (!f) return html;
+  const delivery = f.delivery ? ` · <span style="color:var(--purple)">${escapeHtml(deliveredLinesLabel(f.delivery))}</span>` : '';
+  html += ancestorRow('blockId', 'file', f.path,
+    `${f.blocks.length} block${f.blocks.length===1?'':'s'}${f.loaded ? '' : ' · not loaded'}${delivery}`,
+    hookNote(f));
+  return html;
+}
+
+// Plain-English "why is this file here", from the harness's own load record.
+function hookNote(f) {
+  if (!f.hook) return '';
+  const h = f.hook;
+  const code = s => `<code>${escapeHtml(s)}</code>`;
+  const globs = Array.isArray(h.globs) ? h.globs.join(', ') : h.globs;
+  let text;
+  if (h.loadReason === 'path_glob_match') {
+    text = h.triggerFile
+      ? `This rule loaded because Claude touched ${code(h.triggerFile)}`
+      : (globs ? `This rule loaded because a file matching ${code(globs)} was touched`
+               : 'This rule loaded because a file it watches was touched');
+  } else if (h.loadReason === 'session_start') {
+    text = 'Loaded at session start';
+  } else if (h.loadReason === 'nested_traversal') {
+    text = h.triggerFile
+      ? `Loaded on the way to ${code(h.triggerFile)}`
+      : 'Loaded while walking the directory tree';
+  } else if (h.loadReason === 'include') {
+    text = 'Pulled in by another instruction file';
+  } else if (h.loadReason === 'compact') {
+    text = 'Reloaded after the context was compacted';
+  } else if (h.loadReason) {
+    text = `Loaded (${escapeHtml(h.loadReason)})`;
+  } else {
+    text = 'Recorded as loaded by the harness';
+  }
+  if (h.memoryType) text += ` · ${escapeHtml(h.memoryType)} memory`;
+  return `<div class="file-hook-note">${text}</div>`;
+}
+
+/** One drill row. `chips` is raw HTML; every other field is escaped here. */
+function drillRow(patch, o) {
+  return `
+    <div class="drill-row ${o.cls || ''}" data-nav="${escapeHtml(JSON.stringify(patch))}" title="${escapeHtml(o.tip || o.title)}">
+      <div class="row-main">
+        <div class="row-top">
+          <span class="title ${o.titleCls || ''}">${escapeHtml(o.title)}</span>
+          <span class="aside">${escapeHtml(o.aside || '')}</span>
+        </div>
+        ${o.sub ? `<div class="sub">${escapeHtml(o.sub)}</div>` : ''}
+        ${o.chips ? `<div class="row-chips">${o.chips}</div>` : ''}
+      </div>
+      <span class="chev">&rsaquo;</span>
+    </div>`;
+}
+
+// Severity order, not STATUS_ORDER: these chips are capped at a handful per row,
+// and STATUS_ORDER ranks `ignored` fourth, so a row with three warmer statuses
+// would drop its violation chip - the one finding that must never go missing.
+const ROW_CHIP_ORDER = ['ignored', 'undelivered', 'used', 'used-partial',
+                        'possibly-referenced', 'unused', 'dormant', 'not-loaded'];
+
+// Reporting chips, not the filter chips: statusChipsHtml() renders buttons that
+// change the filter, these are spans that only state what is there.
+function rowStatusChips(counts, limit) {
+  return ROW_CHIP_ORDER.filter(st => (counts[st] || 0) > 0).slice(0, limit).map(st =>
+    `<span class="row-chip status-${st}"><span class="status-dot"></span>${counts[st]} ${STATUS_CHIP_LABEL[st]}</span>`
+  ).join('');
+}
+
+function metaChip(text, cls) {
+  return `<span class="row-chip ${cls || ''}">${escapeHtml(text)}</span>`;
+}
+
+function groupHeader(name, n) {
+  return `<div class="group-header"><span>${name}</span><span class="count">${n}</span><span class="rule"></span></div>`;
+}
+
+// Baked as dict(most_common()), so key order is already busiest-first.
+function toolMixLabel(counts) {
+  const mix = (counts && counts.toolCalls) || {};
+  return Object.keys(mix).slice(0, 3).map(n => `${n}×${mix[n]}`).join(' ');
+}
+
+function renderLevel() {
+  switch (currentLevel()) {
+    case 'sessions': return renderSessionsLevel();
+    case 'turns': return renderTurnsLevel();
+    case 'files': return renderFilesLevel();
+    default: return renderBlocksLevel();
+  }
+}
+
+function renderSessionsLevel() {
+  const rows = DATA.sessions.map(s => {
+    const turns = (DATA.perSession[s.id] || {}).turnCount || 0;
+    const su = usageOf(s);
+    const when = (s.startTime || '').slice(0, 16).replace('T', ' ');
+    const violating = !!s.headline && s.headline !== 'nothing violated';
+    // A single-turn session has no turn worth choosing, so drop straight into
+    // its file list with the turn implied.
+    const patch = turns <= 1 ? { sessionId: s.id, turnId: 'all' } : { sessionId: s.id };
+    const chips = (s.headline ? metaChip(s.headline, violating ? 'violation' : '') : '')
+      + metaChip(`${turns} turn${turns===1?'':'s'}`)
+      + metaChip(`${s.toolCalls} tool call${s.toolCalls===1?'':'s'}`)
+      + metaChip(`${s.filesEdited} file${s.filesEdited===1?'':'s'} edited`);
+    return drillRow(patch, {
+      title: `${s.id.slice(0, 8)} · ${when}`,
+      sub: s.promptPreview || '(no user prompt)',
+      aside: `${fmtDuration(s.durationSec)} · ${fmtTokens(su.promptTokens)} in`,
+      chips: chips,
+      tip: `${s.id} · ${s.headline || ''}`,
+    });
+  }).join('');
+  return rows || '<div class="empty-level">No sessions found for this project.</div>';
+}
+
+function renderTurnsLevel() {
+  const A = active();
+  const s = DATA.sessions.find(x => x.id === A.session.id) || {};
+  let html = turnRow({ turnId: 'all' }, `All turns (${A.turnCount}, aggregated)`, A,
+                     'Session-wide verdicts, combined across every turn.', s.headline);
+  (A.turns || []).forEach(t => {
+    html += turnRow({ turnId: t.id }, `Turn ${t.index + 1} of ${A.turnCount}`, t,
+                    t.promptPreview || t.userPrompt || '(no user prompt)', t.headline);
+  });
+  return html;
+}
+
+function turnRow(patch, label, scope, prompt, headline) {
+  const u = usageOf(scope);
+  const files = scope.contextFiles || [];
+  const live = files.filter(f => f.rollup && f.rollup.active).length;
+  const counts = scopeStatusCounts(files);
+  const mix = toolMixLabel(scope.counts);
+  // The aggregate carries its duration on the session record; a turn carries
+  // its own.
+  const dur = scope.durationSec != null ? scope.durationSec
+            : ((scope.session && scope.session.durationSec) || 0);
+  const chips = rowStatusChips(counts, 3)
+    + metaChip(`${live} of ${files.length} context files live`)
+    + (mix ? metaChip(mix) : '');
+  return drillRow(patch, {
+    title: label,
+    sub: prompt,
+    aside: `${fmtDuration(dur)} · ${fmtTokens(u.promptTokens)} in`,
+    chips: chips,
+    cls: (counts['ignored'] || 0) > 0 ? 'violating' : '',
+    tip: headline ? `${label} — ${headline}` : label,
+  });
+}
+
+function renderFilesLevel() {
+  let html = `
+    <div class="level-header">
       <span>Context files</span>
       <span class="help-trigger" data-help="context-files" title="What are these files?">?</span>
-    </h3>
+    </div>
     <div class="load-filter" id="load-filter">
       <button data-load="all" class="${loadFilter==='all'?'active':''}" title="Show all files">All</button>
       <button data-load="loaded" class="${loadFilter==='loaded'?'active':''}" title="Only files loaded into context this run">
@@ -4732,78 +5228,130 @@ function renderFileTree() {
         <span class="loaded-dot off"></span>Not loaded
       </button>
     </div>
-    <div class="file-tree-item ${selectedFilePath===null?'active':''}" data-file="">
-      <span>📂 all files</span>
-      <span style="color:var(--text-dim)">${filteredFiles().reduce((a,f)=>a+f.blocks.length,0)}</span>
-    </div>
   `;
+  // Counted over the load-filtered set, not the whole scope: chips that count
+  // blocks in files the level is not showing filter to nothing when clicked.
+  html += statusChipsHtml(scopeStatusCounts(loadFilteredFiles()), 'file');
+  const files = filteredFiles();
+  if (!files.length) return html + '<div class="empty-level">No context files match these filters.</div>';
+  // Both groups always render, even when empty: an empty Active group is the
+  // finding, and a toggle would let the reader miss it.
+  const warm = files.filter(f => f.rollup && f.rollup.active);
+  const cold = files.filter(f => !(f.rollup && f.rollup.active));
+  // With a filter on, an empty group means "nothing matched", not "nothing
+  // happened"; saying the latter would be a false finding.
+  const filtered = !!statusFilter || loadFilter !== 'all';
+  html += groupHeader('Active', warm.length)
+    + (warm.length ? warm.map(f => fileRow(f, false)).join('')
+       : `<div class="empty-level">${filtered ? 'No file matches the current filter.'
+            : 'Nothing was read, edited or referenced here.'}</div>`);
+  html += groupHeader('Quiet', cold.length)
+    + (cold.length ? cold.map(f => fileRow(f, true)).join('')
+       : `<div class="empty-level">${filtered ? 'No file matches the current filter.'
+            : 'Every file in scope did something.'}</div>`);
+  return html;
+}
 
-  const visible = filteredFiles();
-  const groups = [
-    { id: 'project', label: 'Project', files: visible.filter(f => f.group === 'project') },
-    { id: 'global',  label: 'Global',  files: visible.filter(f => f.group === 'global') },
-    { id: 'read',    label: 'Read this run', files: visible.filter(f => f.group === 'read') },
-  ];
-  groups.forEach(g => {
-    if (!g.files.length) return;
-    const loadedCount = g.files.filter(f => f.loaded).length;
-    const groupTokens = g.files.reduce((a, f) => a + costOf(f).tokens, 0);
-    html += `
-      <div class="file-tree-group">
-        <span>${g.label}</span>
-        <span class="count">${loadedCount}/${g.files.length} loaded${groupTokens ? ' · ' + fmtTokens(groupTokens) : ''}</span>
+function fileRow(f, quiet) {
+  const c = costOf(f);
+  const chips = rowStatusChips(statusCountsOf(f), 3)
+    + (f.drift ? metaChip('disk drifted from the session snapshot', 'warn') : '');
+  const cls = `${quiet ? 'quiet' : ''} ${f.loaded ? '' : 'not-loaded'}`;
+  return drillRow({ filePath: f.path }, {
+    title: f.path,
+    sub: (f.rollup && f.rollup.summary) || '',
+    aside: `${f.blocks.length} block${f.blocks.length===1?'':'s'}${c.tokens ? ' · ' + fmtTokens(c.tokens) : ''}`,
+    chips: chips,
+    cls: cls,
+    tip: `${f.path} · ${f.scope ? f.scope + ' ' : ''}${f.kind}${f.loaded ? '' : ' · not loaded this run'}`
+       + `${f.source ? ' · source: ' + f.source : ''}${c.tokens ? ' · ' + costTitle(c) : ''}`,
+  });
+}
+
+function renderBlocksLevel() {
+  const f = activeTurn().contextFiles.find(x => x.path === nav.filePath);
+  if (!f) return '<div class="empty-level">That file is not in this scope.</div>';
+  // A file with no headings at all parses to no blocks, and blaming that on the
+  // status filter would send the reader hunting for a filter to clear.
+  if (!f.blocks.length) return '<div class="empty-level">This file has no headed sections to assess.</div>';
+  let html = statusChipsHtml(statusCountsOf(f));
+  const blocks = statusFilter ? f.blocks.filter(b => b.status === statusFilter) : f.blocks;
+  if (!blocks.length) return html + '<div class="empty-level">No blocks with that status in this file.</div>';
+  const warm = blocks.filter(b => ACTIVE_STATUSES.has(b.status));
+  const cold = blocks.filter(b => !ACTIVE_STATUSES.has(b.status));
+  html += groupHeader('Active', warm.length)
+    + (warm.length ? warm.map(b => blockRow(b, false)).join('')
+       : `<div class="empty-level">${statusFilter ? 'No section matches the current filter.'
+            : 'No section of this file was tied to anything the agent did.'}</div>`);
+  html += groupHeader('Quiet', cold.length)
+    + (cold.length ? cold.map(b => blockRow(b, true)).join('')
+       : `<div class="empty-level">${statusFilter ? 'No section matches the current filter.'
+            : 'Every section of this file was tied to something.'}</div>`);
+  return html;
+}
+
+function blockRow(b, quiet) {
+  return `
+    <div class="block ${selectedBlockId === b.id ? 'selected' : ''} ${quiet ? 'quiet' : ''}" data-block="${escapeHtml(b.id)}">
+      <div class="block-header">
+        <span class="block-type ${b.type}">${b.type}</span>
+        <span class="block-title status-${b.status}">${escapeHtml(b.title)}</span>
+        <span class="block-status status-${b.status}">
+          <span class="status-dot"></span>${blockStatusLabel(b.status)}
+        </span>
+        ${scopeBadgeHtml()}
       </div>
-    `;
-    g.files.forEach(f => {
-      const cls = f.loaded ? '' : 'not-loaded';
-      const active = selectedFilePath === f.path ? 'active' : '';
-      const dotCls = f.loaded ? 'on' : 'off';
-      const dotTitle = f.loaded ? 'Loaded into context this run' : 'On disk but not loaded this run';
-      const drift = f.drift ? `<span class="drift-badge" title="Disk has changed since this session — content shown reflects the snapshot the agent saw.">⚠ drift</span>` : '';
-      const titleAttr = `${escapeHtml(f.path)}${f.loaded?'':' (not loaded this run)'}${f.source ? ' · source: '+f.source : ''}${f.drift?' · disk drifted from session snapshot':''}`;
-      const c = costOf(f);
-      const costTag = c.tokens
-        ? `<span class="cost-tag" title="${costTitle(c)}">${fmtTokens(c.tokens)}</span>`
-        : '';
-      html += `
-        <div class="file-tree-item ${cls} ${active}" data-file="${escapeHtml(f.path)}" title="${titleAttr}">
-          <span style="display:inline-flex;align-items:center;min-width:0">
-            <span class="loaded-dot ${dotCls}" title="${dotTitle}"></span>
-            <span class="kind-tag ${f.kind}">${f.kind}</span>
-            <span style="margin-left:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(f.path.split('/').pop())}</span>
-            ${drift}
-          </span>
-          <span style="display:inline-flex;align-items:center;flex-shrink:0;margin-left:6px">
-            ${costTag}
-            <span style="color:var(--text-dim);margin-left:6px">${f.blocks.length}</span>
-          </span>
-        </div>
-      `;
-    });
-  });
-  el.innerHTML = html;
-  el.querySelectorAll('.file-tree-item').forEach(item => {
-    item.addEventListener('click', () => {
-      const fp = item.dataset.file;
-      selectedFilePath = fp || null;
-      renderFileTree();
-      renderBlocks();
-    });
-  });
-  el.querySelectorAll('#load-filter button').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      loadFilter = btn.dataset.load;
-      // If the currently selected file is no longer visible, clear the file filter.
-      if (selectedFilePath) {
-        const stillVisible = filteredFiles().some(f => f.path === selectedFilePath);
-        if (!stillVisible) selectedFilePath = null;
-      }
-      renderFileTree();
-      renderBlocks();
-    });
-  });
-  attachHelpTriggers(el);
+      <div class="block-reason">${escapeHtml(b.reason || '')}</div>
+    </div>`;
+}
+
+// The same chip bar filters files at one level and blocks at the next, so it
+// has to name what a click will actually hide.
+function statusChipsHtml(statusCounts, unit) {
+  const what = unit === 'file' ? 'files carrying a block' : 'blocks';
+  return `
+    <div class="status-chips">
+      <span class="caption">Block status summary:</span>
+      ${statusFilter ? `<button class="status-chip" data-status="">clear filter</button>` : ''}
+      ${STATUS_ORDER.filter(st => statusCounts[st] > 0).map(st => `
+        <button class="status-chip status-${st} ${statusFilter === st ? 'active' : ''}" data-status="${st}"
+                title="Show only ${what} with status ${st}">
+          <span class="status-dot"></span>${statusCounts[st]} ${STATUS_CHIP_LABEL[st]}
+        </button>`).join('')}
+    </div>`;
+}
+
+// In per-turn scope, "unused" / "dormant" mean the block was loaded but not
+// referenced *in this turn* — the same block may have been used in a different
+// turn. Relabel so a per-turn cold reading is not mistaken for a session-wide
+// "never triggered" verdict.
+function blockStatusLabel(status) {
+  const inTurn = activeTurnId !== 'all' && (active().turnCount || 0) > 1;
+  return {
+    'used': 'used',
+    'used-partial': 'partial compliance',
+    'possibly-referenced': 'possibly referenced — weak evidence',
+    'ignored': 'rule applied but ignored',
+    'unused': inTurn ? 'loaded — not referenced in this turn' : 'never triggered',
+    'dormant': inTurn ? 'loaded — preconditions unmet this turn' : 'dormant — preconditions unmet',
+    'not-loaded': 'not loaded into context',
+    'undelivered': 'never reached the model — file truncated'
+  }[status] || status;
+}
+
+function renderSessionCount() {
+  document.getElementById('session-count').textContent =
+    `${DATA.sessions.length} session${DATA.sessions.length===1?'':'s'} for ${DATA.project.name}`;
+}
+
+function rerenderAll() {
+  renderBreadcrumb();
+  renderBlocks();
+  renderDetail(nav.blockId);
+  // re-render whichever view is currently visible
+  if (!document.getElementById('timeline-view').hidden) renderTimeline();
+  if (!document.getElementById('files-view').hidden) renderFiles();
+  if (!document.getElementById('duplications-view').hidden) renderDuplications();
 }
 
 const HELP_CONTENT = {
@@ -5064,147 +5612,58 @@ function renderRuleCheck(rc) {
   </div>`;
 }
 
+const LEVEL_HEADER = {
+  sessions: ['Sessions in this project', 'Pick a session to see how its context was used.'],
+  turns: ['Turns in this session', 'Pick a turn to scope every panel to it, or take the session aggregate.'],
+  files: ['Context files in scope', 'Every file that could have steered this scope. Pick one for its blocks.'],
+  blocks: ['Blocks in this file', 'Click a block for the trace evidence behind its verdict.'],
+};
+
 function renderBlocks() {
   const el = document.getElementById('blocks-pane');
-  const A = activeTurn();
-  const c = A.counts;
-  const u = usageOf(A);
-  const visibleFiles = filteredFiles();
-  const filteredFilesList = selectedFilePath
-    ? visibleFiles.filter(f => f.path === selectedFilePath)
-    : visibleFiles;
-  const allBlocks = filteredFilesList.flatMap(f => f.blocks);
-  const statusCounts = {};
-  STATUS_ORDER.forEach(st => { statusCounts[st] = allBlocks.filter(b => b.status === st).length; });
-
+  const level = currentLevel();
+  const [title, subtitle] = LEVEL_HEADER[level];
   let html = `
     <div class="pane-header">
-      <h2>Your CLAUDE.md, evaluated against this run</h2>
-      <div class="subtitle">Real data from <code>${escapeHtml(A.session.id)}</code> · click a block for the trace evidence</div>
+      <h2>${title}</h2>
+      <div class="subtitle">${subtitle}</div>
     </div>
-    <div class="run-bar">
-      <div class="label">User prompt ${scopeBadgeHtml()}</div>
-      <div class="prompt">${escapeHtml(A.session.userPrompt || '(no user prompt — likely a /clear or system-init session)')}</div>
-      <div class="meta">
-        <span>📁 ${escapeHtml(A.session.cwd)}</span>
-        <span>🌿 ${escapeHtml(A.session.branch || 'no branch')}</span>
-        <span>⏱ ${fmtDuration(A.session.durationSec)}</span>
-      </div>
-    </div>
-    <div class="summary-strip">
-      <div class="stat"><div class="v">${c.events}</div><div class="k">events</div></div>
-      <div class="stat"><div class="v">${c.assistantMessages}</div><div class="k">assistant turns</div></div>
-      <div class="stat"><div class="v">${c.totalToolCalls}</div><div class="k">tool calls</div></div>
-      <div class="stat"><div class="v">${c.filesRead}</div><div class="k">files read</div></div>
-      <div class="stat"><div class="v">${c.filesEdited}</div><div class="k">files edited</div></div>
-      <div class="stat" title="Prompt tokens actually reported by the API: fresh input + cache reads + cache writes, over ${u.requests} request${u.requests===1?'':'s'}">
-        <div class="v">${fmtTokens(u.promptTokens)}</div>
-        <div class="k">tokens in · ${cachedSharePct(u)}% cached</div>
-      </div>
-      <div class="stat" title="Output tokens reported by the API${u.thinkingTokens ? `, including ${u.thinkingTokens.toLocaleString()} thinking tokens` : ''}">
-        <div class="v">${fmtTokens(u.outputTokens)}</div>
-        <div class="k">tokens out</div>
-      </div>
-    </div>
-    <div class="status-chips">
-      <span class="caption">Block status summary:</span>
-      ${statusFilter ? `<button class="status-chip" data-status="">clear filter</button>` : ''}
-      ${STATUS_ORDER.filter(st => statusCounts[st] > 0).map(st => `
-        <button class="status-chip status-${st} ${statusFilter === st ? 'active' : ''}" data-status="${st}"
-                title="Show only blocks with status ${st}">
-          <span class="status-dot"></span>${statusCounts[st]} ${STATUS_CHIP_LABEL[st]}
-        </button>`).join('')}
-    </div>
+    ${renderAncestors()}
   `;
-
-  // In per-turn scope, "unused" / "dormant" mean the block was loaded but
-  // not referenced *in this turn* — the same block may have been used in a
-  // different turn. Relabel so users don't mistake a per-turn cold reading
-  // for a session-wide "never triggered" verdict.
-  const inTurn = activeTurnId !== 'all' && (active().turnCount || 0) > 1;
-  const statusLabel = {
-    'used': 'used',
-    'used-partial': 'partial compliance',
-    'possibly-referenced': 'possibly referenced — weak evidence',
-    'ignored': 'rule applied but ignored',
-    'unused': inTurn ? 'loaded — not referenced in this turn' : 'never triggered',
-    'dormant': inTurn ? 'loaded — preconditions unmet this turn' : 'dormant — preconditions unmet',
-    'not-loaded': 'not loaded into context',
-    'undelivered': 'never reached the model — file truncated'
-  };
-
-  // Plain-English "why is this file here", from the harness's own load record.
-  function hookNote(f) {
-    if (!f.hook) return '';
-    const h = f.hook;
-    const code = s => `<code>${escapeHtml(s)}</code>`;
-    const globs = Array.isArray(h.globs) ? h.globs.join(', ') : h.globs;
-    let text;
-    if (h.loadReason === 'path_glob_match') {
-      text = h.triggerFile
-        ? `This rule loaded because Claude touched ${code(h.triggerFile)}`
-        : (globs ? `This rule loaded because a file matching ${code(globs)} was touched`
-                 : 'This rule loaded because a file it watches was touched');
-    } else if (h.loadReason === 'session_start') {
-      text = 'Loaded at session start';
-    } else if (h.loadReason === 'nested_traversal') {
-      text = h.triggerFile
-        ? `Loaded on the way to ${code(h.triggerFile)}`
-        : 'Loaded while walking the directory tree';
-    } else if (h.loadReason === 'include') {
-      text = 'Pulled in by another instruction file';
-    } else if (h.loadReason === 'compact') {
-      text = 'Reloaded after the context was compacted';
-    } else if (h.loadReason) {
-      text = `Loaded (${escapeHtml(h.loadReason)})`;
-    } else {
-      text = 'Recorded as loaded by the harness';
-    }
-    if (h.memoryType) text += ` · ${escapeHtml(h.memoryType)} memory`;
-    return `<div class="file-hook-note">${text}</div>`;
+  if (level !== 'sessions') {
+    const A = activeTurn();
+    const c = A.counts;
+    const u = usageOf(A);
+    html += `
+      <div class="run-bar">
+        <div class="label">User prompt ${scopeBadgeHtml()}</div>
+        <div class="prompt">${escapeHtml(A.session.userPrompt || '(no user prompt — likely a /clear or system-init session)')}</div>
+        <div class="meta">
+          <span>📁 ${escapeHtml(A.session.cwd)}</span>
+          <span>🌿 ${escapeHtml(A.session.branch || 'no branch')}</span>
+          <span>⏱ ${fmtDuration(A.session.durationSec)}</span>
+        </div>
+      </div>
+      <div class="summary-strip">
+        <div class="stat"><div class="v">${c.events}</div><div class="k">events</div></div>
+        <div class="stat"><div class="v">${c.assistantMessages}</div><div class="k">assistant turns</div></div>
+        <div class="stat"><div class="v">${c.totalToolCalls}</div><div class="k">tool calls</div></div>
+        <div class="stat"><div class="v">${c.filesRead}</div><div class="k">files read</div></div>
+        <div class="stat"><div class="v">${c.filesEdited}</div><div class="k">files edited</div></div>
+        <div class="stat" title="Prompt tokens actually reported by the API: fresh input + cache reads + cache writes, over ${u.requests} request${u.requests===1?'':'s'}">
+          <div class="v">${fmtTokens(u.promptTokens)}</div>
+          <div class="k">tokens in · ${cachedSharePct(u)}% cached</div>
+        </div>
+        <div class="stat" title="Output tokens reported by the API${u.thinkingTokens ? `, including ${u.thinkingTokens.toLocaleString()} thinking tokens` : ''}">
+          <div class="v">${fmtTokens(u.outputTokens)}</div>
+          <div class="k">tokens out</div>
+        </div>
+      </div>
+    `;
   }
-
-  filteredFilesList.forEach(f => {
-    const blocks = statusFilter ? f.blocks.filter(b => b.status === statusFilter) : f.blocks;
-    if (!blocks.length) return;
-    if (filteredFilesList.length > 1 || !selectedFilePath) {
-      const notLoadedHint = f.loaded ? '' : (
-        f.kind === 'skill'   ? ' · skill not invoked' :
-        f.kind === 'command' ? ' · command not invoked' :
-        f.kind === 'agent'   ? ' · subagent not used' :
-        f.kind === 'rule'    ? ' · rule never loaded this session' : ' · not loaded'
-      );
-      const scope = f.scope ? `${f.scope} ` : '';
-      const dotCls = f.loaded ? 'on' : 'off';
-      html += `
-        <div class="file-section-header">
-          <span class="name">
-            <span class="loaded-dot ${dotCls}" style="margin-right:6px"></span>
-            <span class="kind-tag ${f.kind}" style="margin-right:6px;padding:1px 5px;border-radius:3px;background:var(--panel-2);font-size:9px;text-transform:uppercase">${scope}${f.kind}</span>${escapeHtml(f.path)}
-          </span>
-          <span>${blocks.length}${statusFilter ? ` of ${f.blocks.length}` : ''} blocks${notLoadedHint}${f.delivery ? ` · <span style="color:var(--purple)">${deliveredLinesLabel(f.delivery)}</span>` : ''}</span>
-        </div>
-        ${hookNote(f)}
-      `;
-    }
-    blocks.forEach(b => {
-      const sel = selectedBlockId === b.id ? 'selected' : '';
-      html += `
-        <div class="block ${sel}" data-block="${b.id}">
-          <div class="block-header">
-            <span class="block-type ${b.type}">${b.type}</span>
-            <span class="block-title">${escapeHtml(b.title)}</span>
-            <span class="block-status status-${b.status}">
-              <span class="status-dot"></span>${statusLabel[b.status] || b.status}
-            </span>
-            ${scopeBadgeHtml()}
-          </div>
-          <div class="block-content">${escapeHtml(b.content)}</div>
-        </div>
-      `;
-    });
-  });
+  html += renderLevel();
   el.innerHTML = html;
+  attachHelpTriggers(el);
 }
 
 function renderDetail(blockId) {
@@ -5366,41 +5825,23 @@ function renderDetail(blockId) {
 }
 
 function openBlock(blockId) {
-  // Find which file owns this block; expand its filter view, switch to Block Inspector,
-  // scroll to the block, render its detail. Block ids may be aggregate-style
-  // (no prefix) or per-turn (`turn{N}-...`). The Duplicates panel is session-
-  // scoped and emits aggregate ids, so jumping into a turn-scoped view would
-  // show stale chrome — switch back to "All turns" to land on the right block.
+  // Block ids are either aggregate-style (no prefix) or per-turn
+  // (`turn{N}-...`). The Duplicates panel is session-scoped and emits aggregate
+  // ids, so a jump from it has to land back on the session aggregate or the id
+  // resolves to nothing.
   const aggregateBlock = !/^turn\d+-/.test(blockId);
-  if (aggregateBlock && activeTurnId !== 'all') {
-    activeTurnId = 'all';
-    renderTurnPicker();
-  }
-  const A = activeTurn();
+  const turnId = aggregateBlock ? 'all' : activeTurnId;
+  const scope = turnScope(turnId);
   let owningFile = null;
-  for (const f of A.contextFiles) {
+  for (const f of scope.contextFiles) {
     if (f.blocks.some(b => b.id === blockId)) { owningFile = f; break; }
   }
   if (!owningFile) return;
-  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
-  document.querySelector('nav button[data-view="blocks"]').classList.add('active');
-  document.getElementById('blocks-view').hidden = false;
-  document.getElementById('timeline-view').hidden = true;
-  document.getElementById('files-view').hidden = true;
-  if (document.getElementById('duplications-view')) document.getElementById('duplications-view').hidden = true;
-  if (document.getElementById('compare-view')) document.getElementById('compare-view').hidden = true;
-  selectedBlockId = blockId;
-  selectedFilePath = null; // show all so we can scroll to it
-  // If the load filter would hide this block's owning file, drop the filter so we can navigate.
-  if ((loadFilter === 'loaded' && !owningFile.loaded) ||
-      (loadFilter === 'not-loaded' && owningFile.loaded)) {
-    loadFilter = 'all';
-  }
   const target = owningFile.blocks.find(b => b.id === blockId);
+  // A status filter that excludes the block we are jumping to would hide it.
   if (statusFilter && target && target.status !== statusFilter) statusFilter = null;
-  renderFileTree();
-  renderBlocks();
-  renderDetail(blockId);
+  showView('blocks');
+  navigate({ sessionId: activeSessionId, turnId, filePath: owningFile.path, blockId });
   setTimeout(() => {
     const node = document.querySelector(`.block[data-block="${CSS.escape(blockId)}"]`);
     if (node) node.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -5414,7 +5855,7 @@ function renderTimeline() {
 
   let html = `
     <div class="pane-header">
-      <h2>Run timeline (${tl.length} events)</h2>
+      <h2>Run timeline (${tl.length} events) ${scopeBadgeHtml()}</h2>
       <div class="subtitle">Chronological trace of every assistant message and tool call. Click a row to expand.</div>
     </div>
     <div class="timeline-filter" id="filter">
@@ -5476,8 +5917,13 @@ function renderDuplications() {
   // Per PRD: duplicates are session-scoped (content overlap is meaningful
   // across the whole investigation, not per-turn). The label tells users why
   // this panel ignores the turn picker on purpose.
+  // Naming the active turn scope only to say it is not applied: a bare
+  // "Turn 3 of 6" badge here would claim a per-turn analysis nobody computed,
+  // and a bare "session-scope" leaves the reader wondering whether their turn
+  // scope is in play.
+  const ignored = activeTurnId === 'all' ? '' : ` · ignores ${escapeHtml(scopeLabel() || '')}`;
   const sessionScopeBadge = (A.turnCount || 0) > 1
-    ? `<span class="scope-badge" title="Duplicate detection runs across the whole session — the turn picker doesn't apply here.">session-scope</span>`
+    ? `<span class="scope-badge" title="Duplicate detection runs across the whole session — the turn picker doesn't apply here.">session-scope${ignored}</span>`
     : '';
   let html = `
     <div class="pane-header">
@@ -5556,7 +6002,7 @@ function renderFiles() {
   };
   let html = `
     <div class="pane-header">
-      <h2>File activity</h2>
+      <h2>File activity ${scopeBadgeHtml()}</h2>
       <div class="subtitle">Which files the agent read and edited during this run.</div>
     </div>
     <h3 style="font-size:11px;text-transform:uppercase;color:var(--text-dim);letter-spacing:0.5px;margin-bottom:8px">Reads (${activeTurn().fileActivity.reads.length} unique files)</h3>
@@ -5674,16 +6120,19 @@ function renderCompare() {
   el.innerHTML = html;
 }
 
+function showView(v) {
+  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('active', b.dataset.view === v));
+  document.getElementById('blocks-view').hidden       = v !== 'blocks';
+  document.getElementById('timeline-view').hidden     = v !== 'timeline';
+  document.getElementById('files-view').hidden        = v !== 'files';
+  document.getElementById('duplications-view').hidden = v !== 'duplications';
+  document.getElementById('compare-view').hidden      = v !== 'compare';
+}
+
 document.querySelectorAll('nav button').forEach(btn => {
   btn.addEventListener('click', () => {
-    document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
     const v = btn.dataset.view;
-    document.getElementById('blocks-view').hidden       = v !== 'blocks';
-    document.getElementById('timeline-view').hidden     = v !== 'timeline';
-    document.getElementById('files-view').hidden        = v !== 'files';
-    document.getElementById('duplications-view').hidden = v !== 'duplications';
-    document.getElementById('compare-view').hidden      = v !== 'compare';
+    showView(v);
     if (v === 'timeline') renderTimeline();
     if (v === 'files') renderFiles();
     if (v === 'duplications') renderDuplications();
@@ -5693,6 +6142,11 @@ document.querySelectorAll('nav button').forEach(btn => {
 
 if (DATA.compare) document.getElementById('compare-tab').hidden = false;
 
+document.getElementById('crumb-bar').addEventListener('click', e => {
+  const crumb = e.target.closest('.crumb[data-clears]');
+  if (crumb) navOpen(crumb.dataset.clears);
+});
+
 document.getElementById('blocks-pane').addEventListener('click', e => {
   const chip = e.target.closest('.status-chip');
   if (chip) {
@@ -5701,31 +6155,23 @@ document.getElementById('blocks-pane').addEventListener('click', e => {
     renderBlocks();
     return;
   }
-  const b = e.target.closest('.block');
-  if (b) {
-    selectedBlockId = b.dataset.block;
-    document.querySelectorAll('.block').forEach(x => x.classList.toggle('selected', x.dataset.block === selectedBlockId));
-    renderDetail(selectedBlockId);
+  const load = e.target.closest('#load-filter button');
+  if (load) {
+    loadFilter = load.dataset.load;
+    renderBlocks();
+    return;
   }
+  const ancestor = e.target.closest('.ancestor[data-clears]');
+  if (ancestor) { navOpen(ancestor.dataset.clears); return; }
+  const row = e.target.closest('.drill-row');
+  if (row) { navigate(JSON.parse(row.dataset.nav)); return; }
+  const block = e.target.closest('.block');
+  if (block) navigate({ blockId: block.dataset.block });
 });
 
-renderSessionPicker();
-renderTurnPicker();
-renderFileTree();
-renderBlocks();
-renderDetail(null);
-
-document.getElementById('turn-prev').addEventListener('click', () => stepTurn(-1));
-document.getElementById('turn-next').addEventListener('click', () => stepTurn(1));
-
-document.addEventListener('keydown', (e) => {
-  // Don't hijack typing in form fields.
-  const tag = (e.target && e.target.tagName) || '';
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-  if (e.metaKey || e.ctrlKey || e.altKey) return;
-  if (e.key === '[') { e.preventDefault(); stepTurn(-1); }
-  else if (e.key === ']') { e.preventDefault(); stepTurn(1); }
-});
+renderSessionCount();
+// A deep link if the URL carries a resolvable one, otherwise the session list.
+navigate(navFromHash());
 </script>
 </body>
 </html>
