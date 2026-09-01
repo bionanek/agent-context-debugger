@@ -107,7 +107,7 @@ New areas go in `tests/test_<area>.py` in the same style. Verifying a change mea
 
 ## Architecture
 
-`build_real_view.py` is a single ~4k-line script structured as a linear pipeline. The numbered comment banners inside the file (`# ---------- 1. parse CLAUDE.md ----------` etc.) are the canonical section map — follow them when navigating. Two small stdlib-only modules sit beside it: `ctxlog_facts.py` (reads the hook log at `~/.claude/ctxlog/<session>.jsonl`) and `rule_checks.py` (compiled rule checking, see below).
+`build_real_view.py` is a single ~7k-line script structured as a linear pipeline. The numbered comment banners inside the file (`# ---------- 1. parse CLAUDE.md ----------` etc.) are the canonical section map — follow them when navigating. Two small stdlib-only modules sit beside it: `ctxlog_facts.py` (reads the hook log at `~/.claude/ctxlog/<session>.jsonl`) and `rule_checks.py` (compiled rule checking, see below).
 
 Pipeline, in order:
 
@@ -157,8 +157,8 @@ Pipeline, in order:
 
 ### Where things live in the script
 
-- CLI args: `parse_args` (~line 1714).
-- HTML/CSS/JS template: `HTML_TEMPLATE` raw string starting around line 1965 to EOF.
+- CLI args: `parse_args` (~line 3320).
+- HTML/CSS/JS template: `HTML_TEMPLATE` raw string starting around line 4560 to EOF.
 - Multi-session baking is on by default (`--all-sessions`, capped at `--max-sessions 20`). The active session is marked `activeSessionId`.
 
 ### The Blocks view is a drill-down
