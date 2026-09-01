@@ -75,6 +75,17 @@ Do NOT build comment or string guards into your patterns. The checker strips com
 
 Your own verification of these tests does not count. The consuming tool re-runs every self-test with its own matcher and discards any check that fails, so write patterns whose behaviour follows from the vocabulary table above rather than from how you would implement it.
 
+## What the consuming tool enforces
+
+Assume none of this is negotiable at check time:
+
+- Every check is re-run against its own `should_match` and `should_not_match` cases with the consumer's matcher. A check that disagrees with its own self-tests is discarded and its rule reported as not checkable. Both lists must be non-empty.
+- `confidence` must be exactly `high`, `medium` or `low`; a missing or invented value discards the check.
+- A violation is reported only when the pattern matches both the raw text and the comment- and string-stripped text. When the two disagree - the usual cause being a hit that lives only inside a comment - the result is `unclear` and nothing is reported.
+- A violation must carry a citable span: file path, line, and the matched text. `required_pattern` fires on absence and so has nothing to quote; the consumer cites the first line of the hunk instead, which is weak. Prefer a kind that has something to point at.
+- A `ctx-allow` marker in the code at the violation site (same line or the line above, optionally naming your check's `id`) downgrades a finding to acknowledged. Do not try to encode exceptions in your pattern.
+- Optionally include `rule_key`: the consumer computes the same key from the rule's heading and text, and skips your check if the rule has since been edited. Omit it if you cannot compute it; the consumer then binds your check by `rule_ref` alone.
+
 ## Output
 
 Return JSON only, no prose around it.
@@ -92,6 +103,7 @@ Return JSON only, no prose around it.
       "pattern": "<Python regex>",
       "applies_to": ["**/*.ts", "**/*.tsx"],
       "confidence": "high|medium|low",
+      "rule_key": "<optional: 16-hex key of the rule's heading + text>",
       "message": "<what the developer is told when this fires>",
       "self_test": {
         "should_match": ["..."],

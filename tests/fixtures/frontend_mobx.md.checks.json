@@ -1,0 +1,94 @@
+{
+  "source": "tests/fixtures/frontend_mobx.md",
+  "checks": [
+    {
+      "id": "no-observer-with-memo",
+      "rule_ref": "Observer components",
+      "rule_text": "Never combine observer() and memo() on the same component.",
+      "domain": "source",
+      "kind": "forbidden_co_occurrence",
+      "pattern": "observer\\(",
+      "with_pattern": "\\bmemo\\(",
+      "applies_to": [
+        "**/*.tsx"
+      ],
+      "confidence": "high",
+      "message": "observer() already memoises; combining it with memo() is forbidden.",
+      "self_test": {
+        "should_match": [
+          "export default memo(observer(Panel));"
+        ],
+        "should_not_match": [
+          "export default observer(Panel);",
+          "// memo(observer(Panel)) was the old shape",
+          "const doc = \"memo(observer(Panel))\";",
+          "export default observer(useMemoisedPanel);"
+        ]
+      },
+      "ignore_strings": true
+    },
+    {
+      "id": "persist-after-observable",
+      "rule_ref": "Store construction",
+      "rule_text": "Call makePersistable after makeAutoObservable.",
+      "domain": "source",
+      "kind": "required_order",
+      "first_pattern": "makeAutoObservable\\(",
+      "second_pattern": "makePersistable\\(",
+      "applies_to": [
+        "**/*.ts",
+        "**/*.tsx"
+      ],
+      "confidence": "medium",
+      "message": "makePersistable must come after makeAutoObservable.",
+      "self_test": {
+        "should_match": [
+          "    makePersistable(this, {});\n    makeAutoObservable(this);"
+        ],
+        "should_not_match": [
+          "    makeAutoObservable(this);\n    makePersistable(this, {});",
+          "// makePersistable(this) then makeAutoObservable(this) is wrong",
+          "    makeAutoObservable(this);"
+        ]
+      }
+    },
+    {
+      "id": "no-cross-store-singleton-import",
+      "rule_ref": "Store boundaries",
+      "rule_text": "Never import another store's singleton directly.",
+      "domain": "source",
+      "kind": "forbidden_pattern",
+      "pattern": "^import\\s+\\{[^}]*\\b\\w+StoreInstance\\b",
+      "applies_to": [
+        "**/*.ts",
+        "**/*.tsx"
+      ],
+      "confidence": "medium",
+      "message": "Reach other stores through the root store, not their singleton.",
+      "self_test": {
+        "should_match": [
+          "import { authStoreInstance } from '../auth/store';"
+        ],
+        "should_not_match": [
+          "import { AuthStore } from '../auth/store';",
+          "import { useRootStore } from '../root';",
+          "// import { authStoreInstance } from '../auth/store';",
+          "const hint = \"import { authStoreInstance }\";"
+        ]
+      },
+      "ignore_strings": true
+    }
+  ],
+  "not_checkable": [
+    {
+      "rule_ref": "Keyed state",
+      "rule_text": "Use Observable Maps for keyed state.",
+      "why": "States a positive practice with no detectable failure signature."
+    },
+    {
+      "rule_ref": "Readability",
+      "rule_text": "Keep stores small and readable.",
+      "why": "Matter of degree and taste."
+    }
+  ]
+}

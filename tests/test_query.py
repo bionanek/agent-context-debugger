@@ -207,6 +207,31 @@ def test_query_block_prints_verdict_reason_and_moments():
     assert "~/.claude/CLAUDE.md" in text
 
 
+def test_query_block_reports_a_rule_that_could_not_be_checked():
+    """Silence in the CLI reads as "the rule was followed", so it must say so."""
+    blk = _blk("claude-md-0-talk", "Talk")
+    blk["ruleCheck"] = {"state": "not-checkable", "source": "none", "confidence": "low",
+                        "findings": [], "notCheckable": [{"why": "matter of judgment"}],
+                        "rejected": [], "stale": [], "checksApplied": []}
+    data = _data((_summary(SID), _session(SID, files=[_file("~/.claude/CLAUDE.md", [blk])])))
+    text = _joined(brv.run_query(data, [SID, "claude-md-0-talk"]))
+    assert "not-checkable" in text
+    assert "matter of judgment" in text
+
+
+def test_query_block_cites_the_span_of_a_violation():
+    blk = _blk("claude-md-0-talk", "Talk", status="ignored", reason="Rule check fired")
+    blk["ruleCheck"] = {
+        "state": "violated", "source": "checks-file", "confidence": "high",
+        "findings": [{"checkId": "no-reaction", "state": "violated", "confidence": "high",
+                      "path": "/repo/src/P.tsx", "line": 12, "match": "reaction(",
+                      "message": "forbidden", "kind": "forbidden_pattern"}],
+        "notCheckable": [], "rejected": [], "stale": [], "checksApplied": ["no-reaction"]}
+    data = _data((_summary(SID), _session(SID, files=[_file("~/.claude/CLAUDE.md", [blk])])))
+    text = _joined(brv.run_query(data, [SID, "claude-md-0-talk"]))
+    assert "no-reaction" in text and "/repo/src/P.tsx:12" in text
+
+
 def test_turn_scoped_block_resolves_from_the_session_address():
     out = brv.run_query(_simple_data(), [SID, "turn1-claude-md-0-talk"])
     text = _joined(out)

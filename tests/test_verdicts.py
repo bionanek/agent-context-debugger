@@ -1,7 +1,7 @@
 """Tests for evidence tiering in the verdict pipeline (Phase 6).
 
 The distinction under test is *strong* evidence (a trigger that fired, a
-satisfied path-table row, end-of-message compliance, a negative-rule outcome)
+satisfied path-table row, end-of-message compliance)
 versus *weak* evidence (a bare command mention, loose keyword overlap). Weak
 evidence may only ever produce `possibly-referenced`; handing out the green
 `used` for it is the bug these guard against.
@@ -76,11 +76,18 @@ def test_fired_trigger_still_scores_used():
     assert v["status"] == "used"
 
 
-def test_violated_negative_rule_still_scores_ignored():
+def test_a_prose_negation_never_scores_ignored_on_its_own():
+    """Phase 9 removed the "never X" shell predicate: the word after `never`
+    was matched against bash commands, which turned code rules into phantom
+    violations. A prose negation now only reaches a verdict through a compiled
+    checks file (see tests/test_rule_checks.py)."""
     events = [user_text("copy it", 1), bash("echo hi | pbcopy", 2)]
     v = brv.assess_block(block_from(NEGATIVE_MD), rule_file(),
                          trace_for(events, "copy it"))
-    assert v["status"] == "ignored"
+    assert v["status"] == "possibly-referenced"
+    # `echo` is a bare English-shaped word, so mechanical extraction refuses it
+    # rather than matching it against source text.
+    assert v["ruleCheck"]["state"] == "not-checkable"
 
 
 MIXED_MD = """## graphify

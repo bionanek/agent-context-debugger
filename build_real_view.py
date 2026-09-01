@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import ctxlog_facts
+import rule_checks
 
 DEFAULT_CLAUDE_MD = Path.home() / ".claude" / "CLAUDE.md"
 DEFAULT_SKILLS_DIR = Path.home() / ".claude" / "skills"
@@ -1635,24 +1636,12 @@ def derive_predicates(block):
                               + f"final paragraph ~{len(re.findall(r'[.!?]+', (t['last_assistant'].strip().split(chr(10)+chr(10))[-1] if t['last_assistant'].strip() else '')))} sentences")),
         })
 
-    # ----- negative rule: "never X", "don't X", "avoid X"  (very loose)
-    neg_phrases = re.findall(r"\bnever\s+`?([a-z][\w.-]*)`?", content_l)
-    for forbidden in set(neg_phrases):
-        if forbidden in {"use", "run", "do", "the", "a"}:
-            continue
-        predicates.append({
-            "kind": "negative-rule",
-            "strength": "strong",
-            "cmd": forbidden,
-            "label": f"never `{forbidden}`",
-            "applicable": (lambda t, c=forbidden: any(re.search(rf"\b{re.escape(c)}\b", bc) for bc in t["bash_cmds"])),
-            "matches":    (lambda t, c=forbidden: not any(re.search(rf"\b{re.escape(c)}\b", bc) for bc in t["bash_cmds"])),
-            "describe":   (lambda t, c=forbidden:
-                           f"`{c}` " +
-                           ("appeared in bash — rule was VIOLATED"
-                            if any(re.search(rf"\b{re.escape(c)}\b", bc) for bc in t['bash_cmds'])
-                            else "did not appear in bash")),
-        })
+    # A "never X" rule used to become a shell-command predicate here: the word
+    # after `never` was looked up among the session's bash commands, so a rule
+    # reading "never import another store's singleton" reported a violation
+    # because `import` appeared inside a ripgrep command. Prose negations are
+    # now the job of `rule_checks`, which routes a rule by the objects it names
+    # and demands a citable span in the code before it accuses anyone.
 
     return predicates
 
@@ -1887,7 +1876,6 @@ def _moments_for_command_mention(block, file, trace, segs, predicates):
     """Emit ACTION moments for each Bash call invoking a mentioned command. Pair with intent."""
     moments = []
     cmds = sorted({p["cmd"] for p in predicates if p["kind"] == "command-mention"})
-    neg_cmds = {p["cmd"] for p in predicates if p["kind"] == "negative-rule"}
     keywords = _block_keywords(block["content"], trace["user_prompt"])
 
     bash_calls_in_segs = [(i, s) for i, s in enumerate(segs)
@@ -1907,12 +1895,9 @@ def _moments_for_command_mention(block, file, trace, segs, predicates):
                 moments.append(_moment(intent_t, "intent", None,
                                        "Agent reasoning",
                                        text=intent_text))
-            verdict = "no" if cmd in neg_cmds else "yes"
-            label = f"Bash ran `{cmd}`" + (" (rule violation)" if verdict == "no" else "")
-            kind = "violation" if verdict == "no" else "action"
             desc = s["input"].get("description") or ""
             text = (f"$ {bc[:400]}" + (f"\n# {desc}" if desc else ""))
-            moments.append(_moment(s["t"], kind, verdict, label, text=text))
+            moments.append(_moment(s["t"], "action", "yes", f"Bash ran `{cmd}`", text=text))
             if len(moments) > 30:
                 break
     return moments
@@ -2086,7 +2071,7 @@ def assemble_moments(block, file, trace, predicates):
         # global / project / rule / reference: derive from predicates
         if any(p["kind"] == "path-table" for p in predicates):
             moments.extend(_moments_for_path_table(block, file, trace, segs, predicates))
-        if any(p["kind"] == "command-mention" or p["kind"] == "negative-rule" for p in predicates):
+        if any(p["kind"] == "command-mention" for p in predicates):
             moments.extend(_moments_for_command_mention(block, file, trace, segs, predicates))
         if any(p["kind"] == "end-of-message" for p in predicates):
             moments.extend(_moments_for_end_of_message(block, file, trace, segs))
@@ -2445,7 +2430,7 @@ def assess_block(block, file, trace):
 
     moments = assemble_moments(block, file, trace, predicates)
 
-    return {
+    out = {
         "title": title,
         "type": block_type,
         "level": block["level"],
@@ -2455,6 +2440,53 @@ def assess_block(block, file, trace):
         "evidence": evidence,
         "moments": moments,
     }
+
+    rule_check = _rule_check_for(block, file, trace)
+    if rule_check:
+        out["ruleCheck"] = rule_check
+        _apply_rule_check(out, rule_check)
+    return out
+
+
+def _rule_check_for(block, file, trace):
+    """Run this block's compiled checks, if its document has any."""
+    corpus = trace.get("rule_corpus") or {"code": [], "commands": [], "paths": []}
+    loaded = rule_checks.checks_for_doc(file.get("abs_path") or "")
+    # Mechanical extraction only makes sense on a guidelines document. Reading
+    # a file does not make its prose a rule the agent agreed to follow.
+    fallback = file.get("kind") in ("global", "project", "rule")
+    return rule_checks.check_block(block, loaded, corpus, fallback=fallback)
+
+
+def _apply_rule_check(verdict, rule_check):
+    """Fold a rule-check result into the block's status, reason and evidence.
+
+    Only a violation an author signed off on turns the block red, and the
+    confidence consulted is that of the violating finding itself - never the
+    block's aggregate, which a bystander check could have raised. A mechanically
+    extracted fallback finding is low confidence by construction and stays a
+    note: a false red badge accuses the agent of misconduct it did not commit,
+    which is the failure this whole phase exists to prevent.
+    """
+    findings = rule_check["findings"]
+    violations = [f for f in findings
+                  if f["state"] == "violated" and f["confidence"] in ("high", "medium")]
+    if violations:
+        first = violations[0]
+        verdict["status"] = "ignored"
+        verdict["reason"] = (f"Rule check `{first['checkId']}` fired: "
+                             f"{first['path']}:{first['line']} — `{first['match'][:120]}`. "
+                             + (first["message"] or "This rule was broken in code written this run."))
+    for f in findings:
+        verdict["evidence"].append({
+            "label": f"rule check `{f['checkId']}` — {f['state']}",
+            "text": f"{f['path']}:{f['line']} — {f['match'][:200]}",
+        })
+    for nc in rule_check["notCheckable"]:
+        verdict["evidence"].append({
+            "label": "not mechanically checkable",
+            "text": nc.get("why", ""),
+        })
 
 
 CAUSAL_RE = re.compile(
@@ -2602,6 +2634,7 @@ def build_trace(events, calls, asst_segments, user_prompt):
     return {
         "bash_cmds": bash_cmds,
         "edits": edits,
+        "rule_corpus": rule_checks.build_corpus(calls),
         "all_assistant_text": all_assistant_text,
         "last_assistant": last_assistant,
         "cwd": cwd,
@@ -3268,8 +3301,19 @@ def query_block(sid, session_data, block_id, turn=None, field=None):
         f"title    {block.get('title', '')}",
         f"status   {block.get('status', '')}",
         f"reason   {_bounded(block.get('reason'), reason_cmd)}",
-        f"moments  {len(block.get('moments') or [])}",
     ]
+    # A rule that could not be checked has to say so here too: the CLI is the
+    # agent-facing view, and silence there reads as "the rule was followed".
+    rule_check = block.get("ruleCheck")
+    if rule_check:
+        lines.append(f"rule     {rule_check['state']} ({rule_check['confidence']} "
+                     f"confidence, {rule_check['source']})")
+        for f in rule_check.get("findings") or []:
+            lines.append(f"  [{f['state']}] {f['checkId']} — "
+                         f"{f['path']}:{f['line']} {f['match'][:120]}")
+        for nc in rule_check.get("notCheckable") or []:
+            lines.append(f"  [why] {nc.get('why', '')}")
+    lines.append(f"moments  {len(block.get('moments') or [])}")
     for m in block.get("moments") or []:
         text = _bounded(f"{m.get('label', '')} — {m.get('text', '')}", moments_cmd)
         lines.append(f"  [{_moment_verdict(m)}] {text}")
@@ -3972,6 +4016,26 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .file-tree-item .kind-tag.read { color: #79c0ff; }       /* cyan */
   .file-tree-item .kind-tag.preloaded { color: #79c0ff; }
   .file-tree-item .kind-tag.attached { color: #ffa657; }   /* user-attached */
+
+  /* Rule-check states. A red card is reserved for a violation that a reviewed
+     checks file produced and that carries a citable span; everything softer
+     must look softer, because a false accusation is the worst failure here. */
+  .rulecheck { border-radius: 6px; border: 1px solid var(--border); padding: 10px 12px; margin-bottom: 8px; background: var(--panel-2); }
+  .rulecheck .rc-state { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+  .rulecheck .rc-note { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+  .rulecheck .rc-span { font-family: monospace; font-size: 11px; margin-top: 6px; padding: 6px 8px; border-radius: 4px; background: var(--panel); border-left: 3px solid var(--border); white-space: pre-wrap; word-break: break-all; }
+  .rulecheck .rc-span .rc-path { color: var(--text-dim); }
+  .rc-violated { border-color: var(--red); }
+  .rc-violated .rc-state { color: var(--red); }
+  .rc-violated .rc-span { border-left-color: var(--red); }
+  .rc-acknowledged { border-color: var(--amber); }
+  .rc-acknowledged .rc-state { color: var(--amber); }
+  .rc-acknowledged .rc-span { border-left-color: var(--amber); }
+  .rc-unclear .rc-state { color: var(--amber); }
+  .rc-clear .rc-state { color: var(--green); }
+  .rc-not-exercised .rc-state, .rc-not-checkable .rc-state { color: var(--text-dim); }
+  .rc-not-checkable { border-style: dashed; }
+  .rc-conf { font-size: 9px; text-transform: uppercase; letter-spacing: 0.4px; border: 1px solid var(--border); color: var(--text-dim); padding: 0 4px; border-radius: 3px; margin-left: 6px; vertical-align: middle; }
 
   .drift-badge {
     display: inline-block; font-size: 9px; color: var(--amber);
@@ -4796,9 +4860,24 @@ const HELP_CONTENT = {
     <h5>Example</h5>
     <div>Verdict says <code>used-partial</code> on a "Copy to clipboard" rule because the agent ran <code>echo</code>. Read the block and you'll see the rule actually says <em>"never <code>echo</code> when piping to <code>pbcopy</code>"</em> — which the agent didn't actually do. The verdict is too strict; the timeline below confirms.</div>
   `,
+  'rulecheck': `
+    <h5>Where this comes from</h5>
+    <div>A rule document can carry a <em>checks file</em> beside it (<code>&lt;doc&gt;.checks.json</code>): each prose rule compiled once, ahead of time, into a deterministic pattern with its own self-tests. This tool never asks a model anything — at build time it re-runs every check's self-tests with its own matcher and throws out any check that fails, then applies the survivors to the code the agent wrote, the commands it ran, and the paths it touched.</div>
+    <h5>The states</h5>
+    <ul>
+      <li><b style="color:var(--red)">rule violated</b> — a check fired on written code, with the file, line and matched text cited below. Comments and string literals are stripped before any pattern runs, and the match must hold both with and without that stripping.</li>
+      <li><b style="color:var(--amber)">acknowledged</b> — the same match, but the code carries a <code>ctx-allow</code> marker at the site: a deliberate, documented exception.</li>
+      <li><b style="color:var(--amber)">unclear</b> — the strict and stripped views disagree (typically the only hit was inside a comment). Never counted as a violation.</li>
+      <li><b style="color:var(--green)">checked, no violation</b> — checks ran over code in their scope and found nothing.</li>
+      <li><b>checked nothing</b> — the session wrote none of the code this rule governs.</li>
+      <li><b>not mechanically checkable</b> — the rule needs judgment, types, or whole-file context. Most rules land here, by design. It does <em>not</em> mean the rule was followed.</li>
+    </ul>
+    <h5>Confidence</h5>
+    <div>Only a <code>high</code> or <code>medium</code> confidence violation from a reviewed checks file turns the block's verdict red. Patterns extracted mechanically from a document with no checks file are low confidence and stay a note.</div>
+  `,
   'verdict': `
     <h5>The verdict</h5>
-    <div>Our automatic conclusion about whether the agent followed this block this run. Evidence comes in two tiers: <em>strong</em> (a trigger the user actually typed, a path-table row whose command ran, an end-of-message rule, a forbidden command that did or didn't appear) and <em>weak</em> (a command the block merely names, loose keyword overlap). Only strong evidence can produce a green <code>used</code>. One of:</div>
+    <div>Our automatic conclusion about whether the agent followed this block this run. Evidence comes in two tiers: <em>strong</em> (a trigger the user actually typed, a path-table row whose command ran, an end-of-message rule) and <em>weak</em> (a command the block merely names, loose keyword overlap). Only strong evidence can produce a green <code>used</code>. One of:</div>
     <ul>
       <li><b style="color:var(--green)">used</b> — at least one applicable predicate fired</li>
       <li><b style="color:var(--amber)">used-partial</b> — some applicable predicates fired, others didn't</li>
@@ -4943,6 +5022,46 @@ function toggleHelpPopover(e) {
 function dismissHelpPopover(e) {
   const pop = document.getElementById('help-popover');
   if (pop && !pop.contains(e.target)) pop.remove();
+}
+
+const RULECHECK_LABEL = {
+  'violated': 'rule violated',
+  'acknowledged': 'violation acknowledged in the code',
+  'unclear': 'unclear — could not be confirmed',
+  'clear': 'checked, no violation found',
+  'not-exercised': 'checked nothing — the session wrote none of the code this rule governs',
+  'not-checkable': 'not mechanically checkable'
+};
+
+// A rule's verdict comes from a checks file authored beside the rule document
+// and re-validated against its own self-tests at build time. Anything that is
+// not a confirmed, citable violation must read as exactly that: a rule we
+// could not check is never shown as one that was followed.
+function renderRuleCheck(rc) {
+  const label = RULECHECK_LABEL[rc.state] || rc.state;
+  const conf = `<span class="rc-conf" title="Confidence of the check that produced this.">${escapeHtml(rc.confidence)} confidence</span>`;
+  let inner = `<div class="rc-state">${escapeHtml(label)}${rc.state === 'not-checkable' ? '' : conf}</div>`;
+  if (rc.source === 'fallback') {
+    inner += `<div class="rc-note">No checks file beside this document — these patterns were extracted mechanically from the rule's own backticked identifiers, so they are low confidence and never mark the block as violated.</div>`;
+  }
+  (rc.findings || []).forEach(f => {
+    const verb = f.state === 'violated' ? 'fired' : f.state === 'acknowledged' ? 'fired, suppressed at the site' : 'candidate, not confirmed';
+    inner += `<div class="rc-note"><code>${escapeHtml(f.checkId)}</code> ${escapeHtml(verb)}${f.message ? ' — ' + escapeHtml(f.message) : ''}</div>
+      <div class="rc-span"><span class="rc-path">${escapeHtml(f.path)}:${f.line}</span>  ${escapeHtml(f.match)}</div>`;
+  });
+  (rc.notCheckable || []).forEach(nc => {
+    inner += `<div class="rc-note">${escapeHtml(nc.ruleRef || '')}${nc.ruleRef ? ' — ' : ''}${escapeHtml(nc.why || '')}</div>`;
+  });
+  (rc.stale || []).forEach(st => {
+    inner += `<div class="rc-note"><code>${escapeHtml(st.id)}</code> skipped — ${escapeHtml(st.why)}</div>`;
+  });
+  return `<div class="detail-section">
+    <h4 style="display:flex;align-items:center">
+      <span>Rule check</span>
+      <span class="help-trigger" data-help="rulecheck" title="Where does this come from?">?</span>
+    </h4>
+    <div class="rulecheck rc-${escapeHtml(rc.state)}">${inner}</div>
+  </div>`;
 }
 
 function renderBlocks() {
@@ -5130,6 +5249,8 @@ function renderDetail(blockId) {
       <div class="reason ${b.status}">${escapeHtml(b.reason)}</div>
     </div>
   `;
+
+  if (b.ruleCheck) html += renderRuleCheck(b.ruleCheck);
 
   const ownerFile = activeTurn().contextFiles.find(f => f.blocks.some(x => x.id === b.id));
   const fileCost = costOf(ownerFile || {});
