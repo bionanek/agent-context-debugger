@@ -53,6 +53,11 @@ python3 build_real_view.py --query abc12345 turn-2 blocks
 python3 build_real_view.py --query abc12345 turn-2 files
 python3 build_real_view.py --query abc12345 turn2-users-jakuburban-claude-claude-md
 
+# 2c. the subagent runs the session spawned, then one of them
+python3 build_real_view.py --query abc12345 agents
+python3 build_real_view.py --query abc12345 turn-2 agents
+python3 build_real_view.py --query abc12345 agent-toolu_017xzfvjAFYgsyjCxkr3zzQQ
+
 # 3. one block's verdict, reason and moments (block ids come from step 2)
 python3 build_real_view.py --query abc12345 users-jakuburban-claude-claude-md-0-how-to-talk-to-me
 
@@ -67,9 +72,21 @@ A block's output includes its `rule` line - the rule-check state, its findings w
 A file's output includes its active/quiet group, its `rollup.summary`, how often
 the session read or edited it, its attributed cost, and its block list.
 
-An address is `sessions` | `<session-id-prefix> [turn-N] [turns|files|blocks|<file-id>|<block-id>]`.
+An agent's output includes its lane, the turn it was spawned in, its runtime,
+tokens and tool calls, every report-back it sent, the on-disk subagent
+transcript it names (which this tool deliberately does not read), and the two
+fields no other view shows: the `brief` the main agent wrote and the `result`
+that came back. `--field prompt` / `--field result` print either in full. The
+`agents` listing is in spawn order and names each agent's lane and the fan-out
+it was collapsed into, all read straight off the baked `agents` / `turnRows`,
+so the CLI and the page describe one picture.
+
+An address is `sessions` | `<session-id-prefix> [turn-N] [turns|files|blocks|agents|<file-id>|<block-id>|agent-<id>]`.
 A leaf token is resolved as a block id first and a file id second, so every id
 that resolved before the `files` level existed still resolves to the same block.
+An `agent-` token addresses a subagent run, but still falls through to the block
+and file lookups first: a file really can be called `agent-foo.md`, and its slug
+must stay reachable.
 An unknown id exits non-zero with the commands that list the valid ones.
 
 There is no linter config and no dependency beyond the Python 3 standard library.
@@ -96,7 +113,21 @@ Pipeline, in order:
 
 1. **Discovery** (`discover_all_transcripts`, `encode_cwd_for_projects`) — Claude Code stores transcripts at `~/.claude/projects/<encoded-cwd>/*.jsonl`, where the encoding replaces both `/` and `.` with `-` (so `/Users/x/famigo/.claude/worktrees` becomes `-Users-x-famigo--claude-worktrees`). Only top-level `*.jsonl` files are transcripts; sub-agent runs live in per-session subdirectories and are excluded by not recursing. There is no `isSidechain` check — the old first-line probe never matched anything.
 2. **CLAUDE.md parsing** (`parse_claude_md`, `classify_block`) — splits each `CLAUDE.md` into H1/H2 blocks, ignoring headings inside fenced code. Each block gets a `kind` (rule, skill-pointer, reference, etc.).
-3. **Transcript parsing** (`load_transcript`, `tool_calls`, `assistant_text_segments`, `first_real_user_prompt`). One classifier, `_real_user_prompt_text`, decides what counts as a real user prompt, and both turn splitting and first-prompt extraction go through it so they can never disagree. It flattens list-shaped `message.content` (the shape a pasted screenshot makes: an `image` item plus a `text` item) by joining the `text` items, and rejects tool-result lists, meta events, interrupt markers, `<local-command-stdout>` wrappers, and `<command-name>` wrappers for local commands (`/model`, `/config`, recognised by the stdout wrapper that follows them). Skill and slash-command wrappers still count.
+3. **Transcript parsing** (`load_transcript`, `tool_calls`, `assistant_text_segments`, `first_real_user_prompt`). One classifier, `_real_user_prompt_text`, decides what counts as a real user prompt, and both turn splitting and first-prompt extraction go through it so they can never disagree. It flattens list-shaped `message.content` (the shape a pasted screenshot makes: an `image` item plus a `text` item) by joining the `text` items, and rejects tool-result lists, meta events, interrupt markers, `<local-command-stdout>` wrappers, `<command-name>` wrappers for local commands (`/model`, `/config`, recognised by the stdout wrapper that follows them), and `<task-notification>` wrappers. Skill and slash-command wrappers still count.
+
+   **A task-notification is never a turn.** It arrives on the user channel but it is the *result half* of an `Agent` / `Task` / `Workflow` tool call, not something a human typed. Counting one inflated turn counts (48 turns became 24 on one real session) and stole the tool calls that followed it from the turn that earned them. The tag check lives in `_real_user_prompt_text` beside the caveat and interrupt rejections, and both it and `_task_notification_text` `lstrip()` first so the two classifiers can never disagree about the same event.
+3b. **Subagent runs** (`agent_runs`, `parse_task_notification`, `attach_subagent_transcripts`, script section `2a`) - pairs every spawn to its report-back by tool-use id and decides everything the views draw. Returns `agents`, the ordered `turnRows`, and a count of `unmatchedNotifications`.
+
+    The notification is generated text, so every tag is parsed with an explicit regex and a missing one is *unknown*, never an error: real sessions carry notifications with no `<tool-use-id>` at all, and one raise there would lose every agent in the session. **One spawn can notify more than once** (an agent notifies each time it stops with no live children and can be resumed), so a second notification appends to the same agent's `returns[]` rather than inventing a second agent. A notification naming a tool call that is not a spawn (a background `Bash`) is neither an agent nor unmatched; only one that ties to nothing at all is counted, and `main` prints a warning rather than swallowing it, because a lost pairing silently reports a finished agent as never returning.
+
+    **Lane and colour are baked, not derived in the browser.** An agent takes the lowest free lane on spawn and releases it on its *last* return, so an agent that never reports keeps its lane to the end of the session, which is what makes its unfinished track visible. Colour is `AGENT_PALETTE[colorIndex % 6]` in spawn order and means **identity, never direction**: with five agents in flight one hue makes the tracks impossible to tell apart, so direction is carried only by the icon and the badge. Computing any of this in JavaScript would let `--query` and the page describe the same session differently.
+
+    **A fan-out collapses only when every member returned before the next turn row**, never merely because it was spawned together (`_collapse_fanouts`). Keying on "spawned together" would bury the single case most worth seeing: the agent that did not come back.
+
+    **The subagent's own transcript is deliberately not loaded.** The harness writes it to `<session>/subagents/agent-<task-id>.jsonl`; its tool calls carry whole file contents and the report is already tens of megabytes. `attach_subagent_transcripts` resolves the path in Python and bakes it on each return record, so the agent screen and `--query` name the same file, and both say plainly that it is not baked in rather than implying completeness. A consequence worth stating: nested agents (an agent spawning its own children) live in that file, so every count here is main-thread spawns only.
+
+    Agent payload: each record in `perSession[id].agents` carries `id` (the spawn's tool-use id), `type`, `subagentType`, `name`, `prompt`, `promptPreview`, `spawnEventIdx`, `spawnTime`, `spawnTurnIndex`, `returns[]`, `status` (`returned` / `open`), `durationMs`, `tokens`, `toolUses`, `resultText`, `lane` and `colorIndex`. The last five come from the *latest* report only, which the agent screen says out loud for a multi-report agent. Each entry in `returns[]` carries `taskId`, `status`, `summary`, `resultText`, `tokens`, `toolUses`, `durationMs`, `eventIdx`, `time`, `turnIndex` and `transcriptPath`. `turnRows` is the ordered row sequence both the turns list and `--query` walk: `{kind: turn|spawn|return|spawn-group|return-group|dangling, ref|refs}`. Each turn payload gains `agentIds`, and `data.sessions[]` gains `agentCount`.
+
 4. **Usage extraction** (`usage_series`, `usage_totals`, `cache_breaks`, `usage_for_turn`) - reads the `usage` object every assistant event carries, which is the only permitted source for headline token numbers (char-count estimates may appear only where explicitly labelled as estimates). One series entry per *API request*, not per assistant event: the harness writes one response as several events sharing a `message.id` and repeating the same usage verbatim, so the series dedupes on that id and each entry carries its event index, which is how `usage_for_turn` gives each turn its share without ever counting a request twice. `cache_breaks` flags the requests where the cached prefix was lost and repaid (cache read collapses against the previous request while cache creation spikes); those become `cache-break` timeline rows via the same insertion helper compaction rows use.
 5. **Context-file loading** (`load_context_files`) — discovers every file the agent could plausibly have used: global `~/.claude/CLAUDE.md`, project `./CLAUDE.md`, skills under `~/.claude/skills/`, files the agent `Read`, files referenced via `@path` in CLAUDE.md, hook directive files, and pre-loaded attachments. Each is tagged with a `kind` and `scope` that drive grouping in the UI.
 
@@ -134,10 +165,11 @@ Pipeline, in order:
 
 The Blocks view navigates by descending sessions -> turns -> files -> blocks, one level per click, with a breadcrumb and a collapsed ancestor bar per level above the current one. There are no session or turn dropdowns and no file-tree aside; the file list is a level.
 
-- One state object, `nav = {sessionId, turnId, filePath, blockId}`. **Level is derived from it (`currentLevel()`), never stored.** `navigate(patch)` is the only writer: it merges the patch, nulls every deeper field, syncs `activeSessionId` / `activeTurnId`, rewrites the hash and re-renders.
+- One state object, `nav = {sessionId, turnId, agentId, filePath, blockId}`. **Level is derived from it (`currentLevel()`), never stored.** `navigate(patch)` is the only writer: it merges the patch, nulls every deeper field, syncs `activeSessionId` / `activeTurnId`, rewrites the hash and re-renders.
 - `activeTurnId` is **app-wide scope, not the Blocks view's alone**. Timeline, Files and Duplicates all read `activeTurn()`, so navigation that leaves it behind makes those tabs silently show a different turn than the verdict just read.
 - A session whose `turnCount` is 1 skips the turn level in both directions: descending into it lands on its file list, and ascending from that list leaves the session.
-- The hash is `#s=&t=&f=&b=`, written with `replaceState` (`pushState` would make the back button walk the descent one row at a time) and re-read at boot. Parsing never throws: each level resolves against the baked data or the walk stops there, because a blank pane leaves the reader no way back.
+- A subagent hangs off its turn **at the same rank as a context file**: `agentId` is a peer of `filePath`, not a level below it, which is why it is not in `NAV_KEYS` (the ranked walk cannot express two fields at one rank, so each of the two clears the other explicitly). `currentLevel()` returns `'agent'` when it is set, and the agent screen replaces the file list at its level rather than the whole layout, so the breadcrumb, ancestor bars and scope badge stay put. Both of an agent's tiles - the send-off and the report-back - carry the identical patch `{turnId: <spawn turn>, agentId}`: seeing the two as one run is the point. Escape from the agent screen goes back to the turns list, which is the only place it can be opened from.
+- The hash is `#s=&t=&a=&f=&b=`, written with `replaceState` (`pushState` would make the back button walk the descent one row at a time) and re-read at boot. `a=` and `f=` are peers and are never both written, so `navFromHash` resolves the agent first and returns. Parsing never throws: each level resolves against the baked data or the walk stops there, because a blank pane leaves the reader no way back. `navFromHash` adds the `agentId` key to the path **only when it resolves** - a patch merely *containing* `agentId` clears `filePath` and `blockId`, so returning a null one would strip every file deep link on boot.
 - Files and blocks render in an Active group above a Quiet one, from the baked `rollup.active` and the `ACTIVE_STATUSES` mirror of `ACTIVE_BLOCK_STATUSES`. Both are always rendered; it is a classification, not a filter.
 
 ### Rule checks (`rule_checks.py`)
@@ -170,5 +202,6 @@ A checks file is trusted repo content: its patterns run as written, with no time
 - Payload changes are **additive only**: every existing key in `data`, `data.sessions[]`, `data.perSession[]` and each turn record keeps its name, position and value, and new keys are appended. `tests/test_rollup.py::test_payload_is_purely_additive` holds the line against a committed golden payload. This replaces the older "single-turn output is byte-identical to before" invariant, which the drill-down deliberately broke: the payload is the stable contract, the rendered HTML is not.
 - Any value the UI shows must be **computed in Python and baked**. `--query` renders only what is already baked, so a rollup invented in JavaScript would put the CLI and the page in disagreement the moment someone asks the CLI the same question.
 - Block IDs use `file_slug(path) + "-" + index + "-" + title-slug`, and a context file's own `id` is the `file_slug` half (turn-scoped records prefix both with `turnN-`). Keep both stable across runs - block ids are how the frontend addresses a block and how the deep-link hash names one (`b=`), and file ids are how `--query` addresses a file. The hash's `f=` still carries the display path, which predates the file id.
+- Agent rows in the turns list are `.agent-row`, deliberately not `.drill-row`: the drill click handler parses `data-nav`, so a row that navigates nowhere must not match it. Lane occupancy per row is *computed* by walking the baked `turnRows` once (`laneLayout()`), never authored per row - authoring it is what broke tracks across other agents' rows in the prototype. A figure a notification never carried renders as an em dash, never as `0`.
 - The `kind`/`scope`/`group` taxonomy on context files drives the file grouping (read / project / global). New file sources should pick an existing kind before inventing a new one.
 - The escape pair `.replace("</", "<\\/")` and `.replace("<!--", "\\u003c!--")` in `main` is load-bearing — both sequences would otherwise break out of the `<script>` block. Don't remove.

@@ -220,6 +220,7 @@ LOCAL_COMMAND_STDOUT_RE = re.compile(r"<local-command-stdout>", re.DOTALL)
 # The CLI writes these markers as the whole user message when a run is cancelled.
 # Anchored so a prompt that merely quotes the marker still counts as typed text.
 INTERRUPT_MARKER_RE = re.compile(r"^\[Request interrupted by user[^\]]*\]$")
+TASK_NOTIFICATION_TAG = "<task-notification>"
 
 
 def _user_message_text(event):
@@ -287,6 +288,11 @@ def _real_user_prompt_text(event, next_event=None):
         args = args_match.group(1).strip() if args_match else ""
         return f"{name} {args}".strip() or None
     if c.startswith("<local-command-caveat>"):
+        return None
+    # A task-notification is the result half of an Agent tool call, delivered on
+    # the user channel. Counting it as a prompt carved off a phantom turn and
+    # stole the tool calls that followed from the turn that earned them.
+    if c.lstrip().startswith(TASK_NOTIFICATION_TAG):
         return None
     c = c.strip()
     if not c or INTERRUPT_MARKER_RE.match(c):
@@ -539,6 +545,303 @@ def turn_slice(events, calls, asst_segs, turn):
     calls_slice = tool_calls(events_slice)
     asst_slice = assistant_text_segments(events_slice)
     return events_slice, calls_slice, asst_slice
+
+
+# ---------- 2a. subagent runs ----------
+
+# `Workflow` reports through the same channel and fans out the same way, so it
+# is a spawn here in all but name.
+AGENT_TOOL_NAMES = ("Agent", "Task", "Workflow")
+
+_NOTIFICATION_TAGS = ("task-id", "tool-use-id", "status", "summary", "result",
+                      "subagent_tokens", "tool_uses", "duration_ms")
+_NOTIFICATION_TAG_RES = {
+    tag: re.compile(rf"<{tag}>(.*?)</{tag}>", re.DOTALL) for tag in _NOTIFICATION_TAGS
+}
+
+
+def _task_notification_text(event):
+    """The notification body of a user event, or None if it is not one."""
+    if not isinstance(event, dict) or event.get("type") != "user":
+        return None
+    text = _user_message_text(event)
+    if not isinstance(text, str) or not text.lstrip().startswith(TASK_NOTIFICATION_TAG):
+        return None
+    return text
+
+
+def parse_task_notification(text):
+    """Pull the tags out of a notification body.
+
+    This is generated text, so a missing tag is unknown rather than an error:
+    real sessions contain notifications with no `<tool-use-id>` at all, and one
+    raise there would lose every agent in the session.
+    """
+    out = {}
+    for tag, rx in _NOTIFICATION_TAG_RES.items():
+        m = rx.search(text)
+        out[tag] = m.group(1).strip() if m else None
+    for tag in ("subagent_tokens", "tool_uses", "duration_ms"):
+        try:
+            out[tag] = int(out[tag])
+        except (TypeError, ValueError):
+            out[tag] = None
+    return out
+
+
+# `Agent "X" finished`, `No completion record was found for background agent
+# "X"`. Some real report-backs carry no `<tool-use-id>` at all, and the name is
+# then the only handle back to the spawn.
+_AGENT_SUMMARY_RE = re.compile(r'\bagent\s+"([^"]+)"', re.IGNORECASE)
+
+
+def _open_spawn_named(agents, name):
+    """The earliest spawn with this name that has not reported yet.
+
+    A name is not unique: the same agent can be spawned twice in a session, so
+    pairing takes them in order. Insisting the run is still open stops a second
+    report landing on the one that already answered.
+    """
+    for a in agents:
+        if a["name"] == name and not a["returns"]:
+            return a
+    return None
+
+
+def _turn_index_for_event(turns, event_idx):
+    for t in turns:
+        if t["startEventIdx"] <= event_idx < t["endEventIdx"]:
+            return t["index"]
+    return None
+
+
+def agent_runs(events, turns):
+    """Pair every subagent spawn with its report-back, and order the rows.
+
+    Returns {"agents", "turnRows", "unmatchedNotifications"}. Pure: everything
+    the page and `--query` draw (lane, colour, grouping, order) is decided here,
+    because a browser-side derivation would let the two describe the same
+    session differently.
+    """
+    tool_names = {}
+    spawns = {}
+    agents = []
+    for idx, e in enumerate(events):
+        if e.get("type") != "assistant":
+            continue
+        content = e.get("message", {}).get("content", [])
+        if not isinstance(content, list):
+            continue
+        for c in content:
+            if not isinstance(c, dict) or c.get("type") != "tool_use":
+                continue
+            call_id = c.get("id")
+            if not call_id:
+                continue
+            tool_names[call_id] = c.get("name")
+            if c.get("name") not in AGENT_TOOL_NAMES or call_id in spawns:
+                continue
+            input_ = c.get("input") or {}
+            prompt = input_.get("prompt") or ""
+            description = (input_.get("description") or "").strip()
+            subagent_type = (input_.get("subagent_type") or "").strip()
+            agent = {
+                "id": call_id,
+                "type": c.get("name"),
+                "subagentType": subagent_type,
+                "name": description or subagent_type or c.get("name"),
+                "prompt": prompt,
+                "promptPreview": (prompt[:140] + "…") if len(prompt) > 140 else prompt,
+                "spawnEventIdx": idx,
+                "spawnTime": e.get("timestamp") or "",
+                "spawnTurnIndex": _turn_index_for_event(turns, idx),
+                "returns": [],
+                "status": "open",
+                "durationMs": None,
+                "tokens": None,
+                "toolUses": None,
+                "resultText": "",
+                "lane": 0,
+                "colorIndex": len(agents),
+            }
+            spawns[call_id] = agent
+            agents.append(agent)
+
+    unmatched = 0
+    returns = []  # (event_idx, agent_id, return_index)
+    for idx, e in enumerate(events):
+        text = _task_notification_text(e)
+        if text is None:
+            continue
+        fields = parse_task_notification(text)
+        call_id = fields["tool-use-id"]
+        agent = spawns.get(call_id) if call_id else None
+        if agent is None:
+            if call_id and call_id in tool_names:
+                # Names a tool call we can see that is not a spawn: a background
+                # shell reports through this same channel.
+                continue
+            named = _AGENT_SUMMARY_RE.search(fields["summary"] or "")
+            if not named:
+                # Monitor events, loop wake-ups and artifact-watch housekeeping
+                # all arrive here. None of them is an agent, so none is evidence
+                # of a pairing bug. `<task-type>` is deliberately not consulted:
+                # the CLI falls back to a raw discriminant for kinds it does not
+                # know, so any list of names written here would rot in silence.
+                continue
+            agent = _open_spawn_named(agents, named.group(1))
+            if agent is None:
+                # It says an agent finished and ties to nothing we saw spawn.
+                # That is worth a warning; staying quiet would hide a real
+                # pairing bug behind a session that merely looks tidy.
+                unmatched += 1
+                continue
+        record = {
+            "taskId": fields["task-id"] or "",
+            "status": fields["status"] or "",
+            "summary": fields["summary"] or "",
+            "resultText": fields["result"] or "",
+            "tokens": fields["subagent_tokens"],
+            "toolUses": fields["tool_uses"],
+            "durationMs": fields["duration_ms"],
+            "eventIdx": idx,
+            "time": e.get("timestamp") or "",
+            "turnIndex": _turn_index_for_event(turns, idx),
+        }
+        returns.append((idx, agent["id"], len(agent["returns"])))
+        agent["returns"].append(record)
+
+    for a in agents:
+        if not a["returns"]:
+            continue
+        last = a["returns"][-1]
+        a["status"] = "returned"
+        a["durationMs"] = last["durationMs"]
+        a["tokens"] = last["tokens"]
+        a["toolUses"] = last["toolUses"]
+        a["resultText"] = last["resultText"]
+
+    _assign_lanes(agents, returns)
+    rows = _agent_turn_rows(agents, turns, returns)
+    return {"agents": agents, "turnRows": rows, "unmatchedNotifications": unmatched}
+
+
+def attach_subagent_transcripts(agents, transcript_path):
+    """Name the on-disk file each report-back came from.
+
+    The harness writes a subagent's own run to
+    `<session>/subagents/agent-<task-id>.jsonl`. We never read it - its tool
+    calls carry whole file contents - so this name is the only trace of it in
+    the report, and it is resolved here rather than in the page so the CLI can
+    never name a different file than the screen does.
+    """
+    base = str(transcript_path.with_suffix("")) if transcript_path else ""
+    for a in agents:
+        for r in a["returns"]:
+            r["transcriptPath"] = (f"{base}/subagents/agent-{r['taskId']}.jsonl"
+                                   if base and r["taskId"] else "")
+
+
+def _assign_lanes(agents, returns):
+    """Lowest free lane on spawn, released on the agent's last return.
+
+    An agent that never reports keeps its lane to the end of the session, which
+    is exactly what makes its unfinished track visible.
+    """
+    last_return_idx = {}
+    for event_idx, agent_id, _ in returns:
+        last_return_idx[agent_id] = event_idx
+    by_id = {a["id"]: a for a in agents}
+    steps = [(a["spawnEventIdx"], 0, a["id"]) for a in agents]
+    steps += [(idx, 1, aid) for aid, idx in last_return_idx.items()]
+    occupied = {}  # lane -> agent id
+    for _, kind, agent_id in sorted(steps):
+        if kind == 0:
+            lane = 0
+            while lane in occupied:
+                lane += 1
+            occupied[lane] = agent_id
+            by_id[agent_id]["lane"] = lane
+        else:
+            occupied.pop(by_id[agent_id]["lane"], None)
+
+
+def _agent_turn_rows(agents, turns, returns):
+    """The ordered row sequence the turns list walks: turn rows and agent rows
+    interleaved in event order, with fan-outs collapsed where they resolved."""
+    entries = [(t["startEventIdx"], 0, {"kind": "turn", "ref": f"turn-{t['index']}"})
+               for t in turns]
+    entries += [(a["spawnEventIdx"], 1, {"kind": "spawn", "ref": a["id"]}) for a in agents]
+    entries += [(idx, 2, {"kind": "return", "ref": aid, "returnIndex": ri})
+                for idx, aid, ri in returns]
+    rows = [{"idx": idx, "row": row}
+            for idx, _, row in sorted(entries, key=lambda e: (e[0], e[1]))]
+
+    out = _collapse_fanouts(rows)
+    out += [{"kind": "dangling", "ref": a["id"]} for a in agents if a["status"] == "open"]
+    return out
+
+
+def _answering_positions(rows, members, boundary):
+    """Row positions of the returns that answered every member of a batch before
+    `boundary`, or None if any member is still missing at that point."""
+    hits = {}
+    for pos, entry in enumerate(rows):
+        row = entry["row"]
+        if row["kind"] != "return" or row["ref"] not in members:
+            continue
+        if boundary is not None and entry["idx"] >= boundary:
+            continue
+        hits.setdefault(row["ref"], []).append(pos)
+    if len(hits) != len(members):
+        return None
+    return {p for ps in hits.values() for p in ps}
+
+
+def _collapse_fanouts(rows):
+    """Collapse a run of consecutive spawns, and the returns that answered it,
+    into one `spawn-group` / `return-group` pair.
+
+    Keyed on "every member reported before the next turn row", never on "spawned
+    together": collapsing a batch one of whose members never came back would
+    bury the single case most worth seeing.
+    """
+    turn_idxs = [r["idx"] for r in rows if r["row"]["kind"] == "turn"]
+    groups = {}          # first spawn position -> members
+    spanned = set()      # spawn positions the group row replaces
+    dropped = set()      # return positions the group row replaces
+    closes = {}          # last dropped return position -> members
+    i = 0
+    while i < len(rows):
+        if rows[i]["row"]["kind"] != "spawn":
+            i += 1
+            continue
+        j = i
+        while j + 1 < len(rows) and rows[j + 1]["row"]["kind"] == "spawn":
+            j += 1
+        if j > i:
+            members = [rows[k]["row"]["ref"] for k in range(i, j + 1)]
+            boundary = next((t for t in turn_idxs if t > rows[j]["idx"]), None)
+            answered = _answering_positions(rows, members, boundary)
+            if answered is not None:
+                groups[i] = members
+                spanned.update(range(i, j + 1))
+                dropped.update(answered)
+                closes[max(answered)] = members
+        i = j + 1
+
+    out = []
+    for pos, entry in enumerate(rows):
+        if pos in groups:
+            out.append({"kind": "spawn-group", "refs": groups[pos]})
+        elif pos in spanned:
+            continue
+        elif pos in dropped:
+            if pos in closes:
+                out.append({"kind": "return-group", "refs": closes[pos]})
+        else:
+            out.append(entry["row"])
+    return out
 
 
 # ---------- 2b. token usage from message.usage ----------
@@ -3043,10 +3346,12 @@ def parse_args():
                         "Off by default: the compare payload is only emitted when asked for.")
     p.add_argument("--query", nargs="+", metavar="ADDRESS", default=None,
                    help="Read-only text query instead of an HTML build. Address: "
-                        "`sessions` | <session-id> [turn-N] [turns|blocks|<block-id>].")
+                        "`sessions` | <session-id> [turn-N] "
+                        "[turns|files|blocks|agents|<file-id>|<block-id>|agent-<id>].")
     p.add_argument("--field", type=str, default=None,
                    help="With --query: print one field in full, unbounded "
-                        "(block: title/status/reason/content/moments; session or turn: prompt).")
+                        "(block: title/status/reason/content/moments; agent: prompt/result; "
+                        "session or turn: prompt).")
     p.add_argument("--all", action="store_true",
                    help="With --query: print every row of a listing instead of the first "
                         f"{QUERY_ROW_LIMIT}.")
@@ -3237,7 +3542,7 @@ def query_turns(sid, session_data, show_all=False):
     for t in turns:
         rows.append(f"{t['id']}  {_when(t.get('startTime'))}  "
                     f"{(t.get('counts') or {}).get('totalToolCalls', 0)} calls  "
-                    f"{_usage_brief(t.get('usage'))}  "
+                    f"{_usage_brief(t.get('usage'))}  {_agents_note(t)}"
                     f"{_bounded(t.get('promptPreview'), _query_cmd(sid, t['id'], '--field prompt'))}")
     lines = [f"session {sid} — {len(turns)} turn(s)"]
     lines += _bounded_rows(rows, _query_cmd(sid, "turns", "--all"), show_all)
@@ -3250,7 +3555,7 @@ def query_turn(sid, turn, field=None):
     if field:
         return _query_field({"prompt": turn.get("userPrompt")}, field, ("prompt",))
     counts = turn.get("counts") or {}
-    return [
+    lines = [
         f"turn     {turn['id']} of session {sid}",
         f"when     {_when(turn.get('startTime'))}",
         f"calls    {counts.get('totalToolCalls', 0)} tool calls, "
@@ -3259,6 +3564,9 @@ def query_turn(sid, turn, field=None):
         f"prompt   {_bounded(turn.get('userPrompt'), _query_cmd(sid, turn['id'], '--field prompt'))}",
         f"next: {_query_cmd(sid, turn['id'], 'blocks')}",
     ]
+    if turn.get("agentIds"):
+        lines.append(f"      {_query_cmd(sid, turn['id'], 'agents')}")
+    return lines
 
 
 def _blocks_listing_cmd(sid, turn, *extra):
@@ -3351,6 +3659,134 @@ def query_file(sid, file_id, scope, file_rec, show_all=False):
     return lines
 
 
+# ---------- agents ----------
+#
+# The address token is `agent-` + the spawn's tool-use id, which is why the
+# prefix is stripped rather than being part of the id: baking a display-only
+# prefix into the record would put the CLI's name for an agent out of step with
+# the hash's `a=` and the page's row data.
+
+AGENT_ADDRESS_PREFIX = "agent-"
+QUERY_AGENT_FIELDS = ("prompt", "result")
+# A figure the notification never carried is a dash, never a zero: reporting an
+# agent that never reported as having used 0 tokens is a lie the reader cannot
+# see through.
+NO_FIGURE = "-"
+
+
+def _agent_address(agent_id):
+    return AGENT_ADDRESS_PREFIX + agent_id
+
+
+def _agents_note(turn):
+    n = len(turn.get("agentIds") or [])
+    if not n:
+        return ""
+    return f"{n} agent{'s' if n != 1 else ''}  "
+
+
+def _fmt_ms(ms):
+    return _fmt_dur(round(ms / 1000)) if isinstance(ms, (int, float)) else NO_FIGURE
+
+
+def _agent_status_label(agent):
+    return "returned" if agent.get("status") == "returned" else "no reply"
+
+
+def _agent_groups(session_data):
+    """agent id -> the batch it was collapsed into, read off the baked rows.
+
+    Grouping is decided once, in `_collapse_fanouts`; recomputing it here from
+    spawn times would let the CLI collapse a fan-out the page kept open.
+    """
+    out = {}
+    for row in session_data.get("turnRows") or []:
+        if row.get("kind") != "spawn-group":
+            continue
+        for ref in row.get("refs") or []:
+            out[ref] = row["refs"]
+    return out
+
+
+def _agents_listing_cmd(sid, turn, *extra):
+    return (_query_cmd(sid, turn["id"], "agents", *extra) if turn is not None
+            else _query_cmd(sid, "agents", *extra))
+
+
+def query_agents(sid, session_data, turn=None, show_all=False):
+    """List the scope's subagent runs in spawn order.
+
+    Spawn order is the order the turns list draws them in and the order their
+    lanes and colours were handed out, so the two views describe one picture.
+    """
+    agents = list(session_data.get("agents") or [])
+    if turn is not None:
+        wanted = set(turn.get("agentIds") or [])
+        agents = [a for a in agents if a["id"] in wanted]
+    groups = _agent_groups(session_data)
+    label = turn["id"] if turn is not None else "session scope"
+    rows = []
+    for a in agents:
+        members = groups.get(a["id"])
+        group = f"group of {len(members)}" if members else ""
+        spawn_turn = (f"turn-{a['spawnTurnIndex']}"
+                      if a.get("spawnTurnIndex") is not None else "no turn")
+        rows.append(
+            f"{_agent_address(a['id'])}  [{_agent_status_label(a)}]  "
+            f"{a.get('type', '')}/{a.get('subagentType') or NO_FIGURE}  "
+            f"{spawn_turn}  {_fmt_ms(a.get('durationMs'))}  "
+            f"{_fmt_tokens(a['tokens']) if a.get('tokens') is not None else NO_FIGURE}  "
+            f"lane {a.get('lane', 0)}  {group}  {a.get('name', '')}")
+    lines = [f"session {sid} — {label} — {len(agents)} subagent run(s)"]
+    lines += _bounded_rows(rows, _agents_listing_cmd(sid, turn, "--all"), show_all)
+    if agents:
+        lines.append(f"next: {_query_cmd(sid, _agent_address(agents[0]['id']))}")
+    return lines
+
+
+def _find_query_agent(session_data, agent_id):
+    for a in session_data.get("agents") or []:
+        if a["id"] == agent_id:
+            return a
+    return None
+
+
+def query_agent(sid, agent, field=None):
+    address = _agent_address(agent["id"])
+    if field:
+        return _query_field({"prompt": agent.get("prompt"),
+                             "result": agent.get("resultText")},
+                            field, QUERY_AGENT_FIELDS)
+    returns = agent.get("returns") or []
+    spawn_turn = (f"turn-{agent['spawnTurnIndex']}"
+                  if agent.get("spawnTurnIndex") is not None else "no turn")
+    lines = [
+        f"agent    {address}",
+        f"type     {agent.get('type', '')} ({agent.get('subagentType') or NO_FIGURE})",
+        f"name     {agent.get('name', '')}",
+        f"spawned  {spawn_turn}, lane {agent.get('lane', 0)}",
+        f"status   {_agent_status_label(agent)}",
+        f"runtime  {_fmt_ms(agent.get('durationMs'))}",
+        f"tokens   {_fmt_tokens(agent['tokens']) if agent.get('tokens') is not None else NO_FIGURE}",
+        f"calls    {agent['toolUses'] if agent.get('toolUses') is not None else NO_FIGURE} tool calls",
+        f"reports  {len(returns)}",
+    ]
+    for i, r in enumerate(returns):
+        lines.append(f"  #{i + 1}  [{r.get('status') or NO_FIGURE}]  "
+                     f"{_fmt_ms(r.get('durationMs'))}  "
+                     f"{_fmt_tokens(r['tokens']) if r.get('tokens') is not None else NO_FIGURE}  "
+                     f"{r.get('summary', '')}")
+        if r.get("transcriptPath"):
+            lines.append(f"      transcript {r['transcriptPath']} "
+                         f"(on disk, not baked into this report)")
+    # The brief is the instruction the main agent wrote on the reader's behalf,
+    # and no other view in the tool shows it.
+    lines.append(f"brief    {_bounded(agent.get('prompt'), _query_cmd(sid, address, '--field prompt'))}")
+    lines.append(f"result   {_bounded(agent.get('resultText'), _query_cmd(sid, address, '--field result'))}")
+    lines.append(f"next: {_query_cmd(sid, address, '--field prompt')}")
+    return lines
+
+
 def query_block(sid, session_data, block_id, turn=None, field=None):
     found = _find_query_block(session_data, block_id)
     if not found:
@@ -3421,16 +3857,29 @@ def run_query(data, address, field=None, show_all=False):
     if rest:
         raise QueryError(f"error: unexpected address `{' '.join(rest)}`. "
                          f"An address is <session> [turn-N] "
-                         f"[turns|files|blocks|<file-id>|<block-id>].")
-    if token in ("turns", "files", "blocks"):
+                         f"[turns|files|blocks|agents|<file-id>|<block-id>|agent-<id>].")
+    if token in ("turns", "files", "blocks", "agents"):
         if field:
-            raise QueryError(f"error: --field addresses one session, turn or block, "
-                             f"not the `{token}` listing.")
+            raise QueryError(f"error: --field addresses one session, turn, block "
+                             f"or agent, not the `{token}` listing.")
         if token == "turns":
             return query_turns(sid, session_data, show_all=show_all)
         if token == "files":
             return query_files(sid, session_data, turn=turn, show_all=show_all)
+        if token == "agents":
+            return query_agents(sid, session_data, turn=turn, show_all=show_all)
         return query_blocks(sid, session_data, turn=turn, show_all=show_all)
+    # An `agent-` token addresses a subagent run, but it falls through to the
+    # block and file lookups first if it names one of those: a file really can
+    # be called `agent-foo.md`, and its slug would otherwise become unreachable.
+    if token.startswith(AGENT_ADDRESS_PREFIX):
+        agent = _find_query_agent(session_data, token[len(AGENT_ADDRESS_PREFIX):])
+        if agent is not None:
+            return query_agent(sid, agent, field=field)
+        if (_find_query_block(session_data, token) is None
+                and _find_query_file(session_data, token) is None):
+            raise QueryError(f"error: session {sid} has no agent `{token}`. "
+                             f"List agents with: {_agents_listing_cmd(sid, turn)}")
     # A block id is tried first, so every id that resolved before this level
     # existed still resolves to the same block.
     if _find_query_block(session_data, token) is None:
@@ -3807,6 +4256,8 @@ def process_session(transcript_path, args):
     compactions = ((hook_facts or {}).get("compactions") or []) + compactions_from_transcript(events)
     turns = split_into_turns(events, [c.get("ts") for c in compactions])
     nonresident_by_turn, compaction_records = compute_residency(turns, compactions, hook_facts)
+    agent_data = agent_runs(events, turns)
+    attach_subagent_transcripts(agent_data["agents"], transcript_path)
     nonresident_by_request = _nonresident_by_request(series, turns, nonresident_by_turn)
 
     # Aggregate ("All turns") payload: keeps today's exact shape and behaviour.
@@ -3845,6 +4296,8 @@ def process_session(transcript_path, args):
             "timeline": p["timeline"],
             "fileActivity": p["fileActivity"],
             "headline": _violation_headline(p["contextFiles"]),
+            "agentIds": [a["id"] for a in agent_data["agents"]
+                         if a["spawnTurnIndex"] == t["index"]],
         })
         # Same rule as `delivery` and `hook`: keys appear only when there is
         # something to report, so sessions without compaction serialise as before.
@@ -3911,6 +4364,7 @@ def process_session(transcript_path, args):
         # Cheap enough for the picker; the per-file breakdown stays in per_session.
         "contextTokens": sum(f["cost"]["tokens"] for f in files_out),
         "headline": _violation_headline(files_out),
+        "agentCount": len(agent_data["agents"]),
     }
     per_session = {
         "session": {
@@ -3938,6 +4392,11 @@ def process_session(transcript_path, args):
         "duplicates": duplicates,
         "turns": turn_payloads,
         "turnCount": len(turn_payloads),
+        "agents": agent_data["agents"],
+        "turnRows": agent_data["turnRows"],
+        # Surfaced rather than swallowed: a notification that matches no spawn
+        # means an agent silently lost its result and reads as never returning.
+        "unmatchedNotifications": agent_data["unmatchedNotifications"],
     }
     summary["duplicatePairs"] = len(duplicates)
     summary["redundantPairs"] = sum(1 for d in duplicates if d["classification"] == "redundant")
@@ -4090,6 +4549,11 @@ def main():
         when = (s["startTime"] or "")[:16].replace("T", " ")
         print(f"  {marker} {s['id'][:10]}  {when}  {_fmt_dur(s['durationSec']):>7s}  "
               f"{s['events']:>4d} ev  {s['toolCalls']:>3d} tools  {s['promptPreview'][:60]}")
+    # Reported, never swallowed: an unmatched notification is an agent whose
+    # result was lost, and it renders as one that never came back.
+    orphans = sum(d.get("unmatchedNotifications", 0) for d in per_session_data.values())
+    if orphans:
+        print(f"Warning: {orphans} task-notification(s) matched no spawn in this build.")
 
 
 HTML_TEMPLATE = r"""<!DOCTYPE html>
@@ -4329,6 +4793,75 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-dim); }
   .group-header .count { font-family: monospace; color: var(--text-bright); }
   .group-header .rule { flex: 1; height: 1px; background: var(--border); }
+  .row-chip.good { color: var(--green); border-color: var(--green); }
+
+  /* Subagent lanes. The gutter is deliberately taller than the tile it sits
+     beside: the extra height is the tile's bottom margin, and it is what lets a
+     track run unbroken from one row into the next. */
+  .lane-row { display: flex; align-items: stretch; gap: 10px; }
+  .lane-gutter { display: flex; flex-shrink: 0; gap: 4px; position: relative; }
+  .lane-track { width: 12px; display: flex; flex-direction: column; align-items: center; position: relative; }
+  .lane-seg { flex: 1; width: 2px; }
+  .lane-dot { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); border-radius: 50%; box-sizing: border-box; }
+  .lane-elbow { position: absolute; top: 50%; transform: translateY(-50%); height: 2px; }
+  .lane-row > .drill-row, .lane-row > .agent-row { flex: 1; min-width: 0; }
+
+  .agent-row { display: flex; align-items: center; gap: 10px; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 8px; padding: 10px 13px; margin-bottom: 8px; }
+  .agent-row.group { cursor: pointer; }
+  .agent-row.group:hover { border-color: var(--accent); }
+  .agent-row.member { padding: 7px 13px; background: var(--bg); border-color: var(--panel-2); }
+  .agent-row.open-agent { border-color: rgba(210,153,34,0.4); }
+  .agent-row .agent-icon { font-size: 14px; flex-shrink: 0; width: 15px; text-align: center; }
+  .agent-row .agent-badge { font-size: 9px; text-transform: uppercase; letter-spacing: 0.7px;
+    font-weight: 700; padding: 2px 7px; border-radius: 3px; white-space: nowrap; flex-shrink: 0;
+    width: 62px; text-align: center; }
+  .agent-row .agent-tag { font-family: monospace; font-size: 10px; padding: 1px 6px;
+    border-radius: 3px; white-space: nowrap; flex-shrink: 0; background: transparent; border: 1px solid; }
+  .agent-row .row-main { flex: 1; min-width: 0; }
+  .agent-row .row-chips { margin-top: 0; flex-shrink: 0; }
+  .agent-row .title { color: var(--text-bright); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .agent-row.member .title { color: var(--text); }
+  .agent-row .sub { color: var(--text-dim); font-size: 11px; margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .agent-row.open-agent .sub { color: var(--amber); }
+  .agent-row .chev { color: var(--text-dim); flex-shrink: 0; }
+  .agent-row[data-nav] { cursor: pointer; }
+  .agent-row[data-nav]:hover { border-color: var(--accent); }
+
+  /* The agent screen. Two columns of equal width: the brief is worth as much
+     room as the result, and it is the one thing no other view shows. */
+  .agent-head { display: flex; align-items: center; gap: 12px; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 12px; }
+  .agent-head .agent-tag { font-family: monospace; font-size: 10px; padding: 1px 6px;
+    border-radius: 3px; white-space: nowrap; flex-shrink: 0; background: transparent; border: 1px solid; }
+  .agent-head .agent-badge { font-size: 9px; text-transform: uppercase; letter-spacing: 0.7px;
+    font-weight: 700; padding: 2px 7px; border-radius: 3px; white-space: nowrap; flex-shrink: 0; }
+  .agent-head-main { flex: 1; min-width: 0; }
+  .agent-head-title { color: var(--text-bright); font-size: 13px; }
+  .agent-head-sub { color: var(--text-dim); font-size: 11px; margin-top: 2px; }
+  .agent-stats { grid-template-columns: repeat(5, 1fr); }
+  .agent-strip-note { color: var(--amber); font-size: 11px; margin: -8px 0 14px; }
+  .agent-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+  .agent-panel { background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px 14px; margin-bottom: 12px; min-width: 0; }
+  .agent-split .agent-panel { margin-bottom: 0; }
+  .agent-panel-head { color: var(--text-bright); font-size: 12px; font-weight: 600; }
+  .agent-panel-note { color: var(--text-dim); font-size: 11px; margin-top: 4px; }
+  .agent-text { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px;
+    margin-top: 8px; padding: 10px 12px; font-family: monospace; font-size: 11px;
+    line-height: 1.55; white-space: pre-wrap; word-break: break-word;
+    max-height: 340px; overflow-y: auto; }
+  .agent-result-summary { color: var(--text); font-size: 11px; margin-top: 8px; font-style: italic; }
+  .agent-report { border-top: 1px solid var(--border); padding: 8px 0 0; margin-top: 8px; }
+  .agent-report-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 11px; }
+  .agent-report-n { font-family: monospace; color: var(--text-bright); }
+  .agent-report-status { color: var(--green); }
+  /* Anything but a clean completion is not green: the report is still there to read. */
+  .agent-report-status.other { color: var(--amber); }
+  .agent-report-meta { color: var(--text-dim); }
+  .agent-report-summary { color: var(--text-dim); font-size: 11px; margin-top: 2px; }
+  .agent-notloaded { border-style: dashed; }
+  .agent-notloaded code { font-family: monospace; font-size: 11px; color: var(--text); word-break: break-all; }
   .block-reason { color: var(--text-dim); font-size: 11px; }
   .scope-badge { display: inline-block; padding: 2px 7px; border-radius: 10px; background: var(--panel-2); border: 1px solid var(--border); font-size: 10px; color: var(--text-dim); font-family: monospace; letter-spacing: 0.3px; }
   .scope-badge.turn { color: var(--accent); border-color: var(--accent); }
@@ -4826,12 +5359,18 @@ function scopeStatusCounts(files) {
 // `turnId === 'all'` is the session aggregate. A single-turn session gets it
 // too, since its aggregate *is* its only turn, which is how the turn level is
 // skipped for those sessions without inventing a second sentinel.
+//
+// `agentId` is a peer of `filePath`, not a level below it: a subagent hangs off
+// the turn exactly as a context file does. That is why it is not in NAV_KEYS -
+// the ranked walk below cannot express two fields at one rank, so each of the
+// two clears the other explicitly.
 const NAV_KEYS = ['sessionId', 'turnId', 'filePath', 'blockId'];
-let nav = { sessionId: null, turnId: null, filePath: null, blockId: null };
+let nav = { sessionId: null, turnId: null, agentId: null, filePath: null, blockId: null };
 
 function currentLevel() {
   if (!nav.sessionId) return 'sessions';
   if (!nav.turnId) return 'turns';
+  if (nav.agentId) return 'agent';
   if (!nav.filePath) return 'files';
   return 'blocks';
 }
@@ -4844,12 +5383,22 @@ function navigate(patch) {
     if (k in patch) { next[k] = patch[k] || null; below = true; }
     else if (below) next[k] = null;
   });
+  if ('agentId' in patch) {
+    next.agentId = patch.agentId || null;
+    next.filePath = null;
+    next.blockId = null;
+  } else if ('filePath' in patch || 'turnId' in patch || 'sessionId' in patch) {
+    next.agentId = null;
+  }
   nav = next;
   // activeTurnId is app-wide: Run Timeline, File Activity and the block-status
   // totals all read it. Letting it drift from nav.turnId is what makes another
   // tab silently show a different turn than the verdict just read.
   // activeSessionId is deliberately not cleared at the sessions level: the
   // other tabs always need some session to render.
+  // Group expansion is keyed by position in one session's row sequence, so it
+  // has to go the moment another session's sequence takes over.
+  if (nav.sessionId && nav.sessionId !== activeSessionId) expandedGroups = {};
   if (nav.sessionId) activeSessionId = nav.sessionId;
   activeTurnId = nav.turnId || 'all';
   selectedBlockId = nav.blockId;
@@ -4869,6 +5418,9 @@ function writeHash() {
   const parts = [];
   if (nav.sessionId) parts.push('s=' + encodeURIComponent(nav.sessionId.slice(0, 8)));
   if (nav.turnId) parts.push('t=' + encodeURIComponent(nav.turnId));
+  // `a=` and `f=` are peers and never both set, so the hash names one or the
+  // other and navFromHash resolves them in the same order.
+  if (nav.agentId) parts.push('a=' + encodeURIComponent(nav.agentId));
   if (nav.filePath) parts.push('f=' + encodeURIComponent(nav.filePath));
   if (nav.blockId) parts.push('b=' + encodeURIComponent(nav.blockId));
   // An empty path drops the hash entirely instead of leaving a bare '#'.
@@ -4912,6 +5464,15 @@ function navFromHash() {
   if (q.t !== 'all' && !turn) return path;
   path.turnId = q.t;
 
+  // The agent key is only added to the patch when it resolves: `agentId` in a
+  // patch clears filePath and blockId, so carrying a null one here would strip
+  // every file deep link on boot.
+  if (q.a) {
+    const agent = (P.agents || []).find(a => a.id === q.a);
+    if (agent) path.agentId = agent.id;
+    return path;
+  }
+
   if (!q.f) return path;
   const files = (turn ? turn.contextFiles : P.contextFiles) || [];
   const file = files.find(f => f.path === q.f);
@@ -4935,6 +5496,9 @@ function siblings() {
                         .concat(blocks.filter(b => !ACTIVE_STATUSES.has(b.status)))
                         .map(b => b.id) };
   }
+  // Spawn order, which is the order the turns list shows them in and the order
+  // their colours were handed out.
+  if (nav.agentId) return { key: 'agentId', ids: (active().agents || []).map(a => a.id) };
   if (nav.filePath) {
     const files = filteredFiles();
     return { key: 'filePath',
@@ -4957,12 +5521,25 @@ function stepSibling(delta) {
   // Clamped, not wrapped: silently jumping from the last row back to the first
   // is indistinguishable from having never moved.
   if (next < 0 || next >= s.ids.length) return;
-  navigate({ [s.key]: s.ids[next] });
+  const id = s.ids[next];
+  // An agent belongs to the turn it was spawned in, so stepping to one has to
+  // carry the turn scope with it; leaving it behind would put another turn's
+  // name in the ancestor bar above this agent.
+  if (s.key === 'agentId') {
+    const a = agentById(id);
+    if (a) return navigate(agentNav(a));
+  }
+  navigate({ [s.key]: id });
 }
 
 function ascendLevel() {
   const s = siblings();
   if (!s) return;
+  // An agent is opened from the turns list, never from the file list beside it,
+  // so Escape has to put the reader back where the row was.
+  if (s.key === 'agentId') {
+    return (active().turnCount || 0) <= 1 ? navigate({ sessionId: null }) : navigate({ turnId: null });
+  }
   // A single-turn session has no turn level on the way down (renderSessionsLevel
   // drops straight into its files), so going up must not invent one: the reader
   // would land on a list holding the same turn spelled two ways.
@@ -5010,6 +5587,11 @@ function navPath() {
   path.push({ label: nav.sessionId.slice(0, 8), clears: 'turnId' });
   if (!nav.turnId) return path;
   path.push({ label: turnLabel(nav.turnId), clears: 'filePath' });
+  if (nav.agentId) {
+    const a = agentById(nav.agentId);
+    path.push({ label: `Agent: ${a ? a.name : nav.agentId}`, clears: null });
+    return path;
+  }
   if (!nav.filePath) return path;
   path.push({ label: nav.filePath.split('/').pop(), clears: 'blockId' });
   if (!nav.blockId) return path;
@@ -5017,7 +5599,10 @@ function navPath() {
   return path;
 }
 
-function isHere(clears) { return !clears || !nav[clears]; }
+// `!nav.agentId` because the agent screen sits below the turn while leaving
+// `filePath` empty: without it the turn bar would mark itself as where you are
+// and stop offering the way back down to its files.
+function isHere(clears) { return !clears || (!nav[clears] && !nav.agentId); }
 
 function renderBreadcrumb() {
   const el = document.getElementById('crumb-bar');
@@ -5149,6 +5734,7 @@ function renderLevel() {
   switch (currentLevel()) {
     case 'sessions': return renderSessionsLevel();
     case 'turns': return renderTurnsLevel();
+    case 'agent': return renderAgentLevel();
     case 'files': return renderFilesLevel();
     default: return renderBlocksLevel();
   }
@@ -5178,19 +5764,289 @@ function renderSessionsLevel() {
   return rows || '<div class="empty-level">No sessions found for this project.</div>';
 }
 
+// Colour means IDENTITY here, never direction: with five agents in flight one
+// hue made the tracks impossible to tell apart. Direction is carried by the
+// icon and the badge alone.
+const AGENT_PALETTE = ['#79c0ff', '#d2a8ff', '#7ee787', '#ffa657', '#f778ba', '#f2cc60'];
+const LANE_WIDTH = 12, LANE_GAP = 4, GUTTER_GAP = 10;
+const LANE_PITCH = LANE_WIDTH + LANE_GAP;
+// Direction tones. A group row speaks for several agents, so it takes one of
+// these instead of any member's identity colour.
+const SENT_TONE = '#58a6ff', BACK_TONE = '#3fb950', OPEN_TONE = '#d29922';
+
+function agentColor(a) { return AGENT_PALETTE[(a.colorIndex || 0) % AGENT_PALETTE.length]; }
+
+// A short handle for the agent, stable across runs. Most spawns name a subagent
+// type; the ones that do not fall back to their spawn ordinal, which is still
+// an identity the reader can match between the two tiles.
+function agentTag(a) {
+  if (a.subagentType) return a.subagentType;
+  if (a.type && a.type !== 'Agent') return a.type;
+  return '#' + ((a.colorIndex || 0) + 1);
+}
+
+function agentById(id) { return (active().agents || []).find(a => a.id === id) || null; }
+
+/** Where both of an agent's tiles lead: its own screen, scoped to its spawn turn. */
+function agentNav(a) {
+  const t = (active().turns || []).find(x => x.index === a.spawnTurnIndex);
+  return { turnId: t ? t.id : 'all', agentId: a.id };
+}
+
+// A notification can arrive without its duration tag, and "ran 0s" would be a
+// figure we never read.
+function ranPhrase(ms) {
+  return ms == null ? 'no run time reported' : `ran ${fmtDuration(Math.round(ms / 1000))}`;
+}
+
+function spawnTurnPhrase(a) {
+  return a.spawnTurnIndex == null ? 'sent off earlier in the session'
+                                  : `sent off in turn ${a.spawnTurnIndex + 1}`;
+}
+
+/**
+ * Walk the baked row sequence once, opening a lane on each spawn and closing it
+ * on the agent's last report. Every row then knows which lanes merely pass
+ * through it, which is what keeps a track unbroken across rows belonging to
+ * other agents. Authoring occupancy per row instead is exactly what made the
+ * first prototype unreadable.
+ */
+function laneLayout(rows, byId) {
+  const active = {};   // lane -> agent id currently holding it
+  const laid = [];
+  let maxLane = -1;
+  rows.forEach(r => {
+    const refs = r.refs || (r.kind === 'turn' ? [] : [r.ref]);
+    const mine = refs.map(id => byId[id]).filter(Boolean);
+    const before = Object.keys(active).map(Number);
+    const own = {}, laneColor = {};
+    mine.forEach(a => {
+      if (r.kind === 'spawn' || r.kind === 'spawn-group') {
+        active[a.lane] = a.id;
+        own[a.lane] = 'start';
+      } else {
+        // A collapsed batch reports on one row, so a lane freed mid-batch can
+        // already belong to a later spawn by the time this row draws. Claiming
+        // it would paint over a live track and break it; the row states its
+        // pairing in words regardless.
+        if (active[a.lane] !== a.id) return;
+        if (r.kind === 'dangling') {
+          own[a.lane] = 'open';
+          delete active[a.lane];
+        } else {
+          // One spawn can report several times; only its last report frees the
+          // lane, so an earlier one is a waypoint on a track that carries on.
+          const last = r.returnIndex == null || r.returnIndex >= (a.returns || []).length - 1;
+          own[a.lane] = last ? 'end' : 'mid';
+          if (last) delete active[a.lane];
+        }
+      }
+      laneColor[a.lane] = agentColor(a);
+    });
+    const after = Object.keys(active).map(Number);
+    const through = before.filter(l => after.includes(l) && !(l in own));
+    through.forEach(l => { const a = byId[active[l]]; if (a) laneColor[l] = agentColor(a); });
+    maxLane = Math.max(maxLane, ...before, ...after, ...Object.keys(own).map(Number));
+    laid.push({ row: r, agents: mine, own: own, through: through,
+                laneColor: laneColor, inFlight: before.length });
+  });
+  return { laid: laid, lanes: maxLane + 1 };
+}
+
+function laneCellHtml(lane, cell) {
+  const c = cell.laneColor[lane];
+  const kind = cell.own[lane];
+  let top = 'transparent', bot = 'transparent', dot = '';
+  if (kind) {
+    if (kind !== 'start') top = c;
+    if (kind !== 'end' && kind !== 'open') bot = c;
+    dot = kind === 'open'
+      ? `<span class="lane-dot" style="width:9px;height:9px;background:var(--bg);border:1px dashed ${c}"></span>`
+      : `<span class="lane-dot" style="width:8px;height:8px;background:${c}"></span>`;
+  } else if (cell.through.includes(lane)) {
+    top = c; bot = c;
+  }
+  return `<span class="lane-track">
+      <span class="lane-seg" style="background:${top}"></span>
+      <span class="lane-seg" style="background:${bot}"></span>${dot}
+    </span>`;
+}
+
+/** Wrap one tile in its gutter. `cell` null renders the gutter empty. */
+function laneWrap(cell, lanes, elbowColor, tileHtml) {
+  const width = lanes * LANE_WIDTH + (lanes - 1) * LANE_GAP;
+  const owned = cell ? Object.keys(cell.own).map(Number) : [];
+  // The elbow runs from the leftmost lane this row owns, across the gap, to the
+  // tile. On a group row it crosses its sibling tracks, which is what makes the
+  // several read as one handoff.
+  let elbow = '';
+  if (owned.length && elbowColor) {
+    const left = Math.min(...owned) * LANE_PITCH + (LANE_WIDTH / 2 - 1);
+    elbow = `<span class="lane-elbow" style="left:${left}px;width:${width - left + GUTTER_GAP}px;background:${elbowColor}"></span>`;
+  }
+  let tracks = '';
+  for (let l = 0; l < lanes; l++) {
+    tracks += cell ? laneCellHtml(l, cell) : '<span class="lane-track"></span>';
+  }
+  return `<div class="lane-row">
+      <div class="lane-gutter" style="width:${width}px">${elbow}${tracks}</div>
+      ${tileHtml}
+    </div>`;
+}
+
+function agentChips(list) {
+  return list.filter(Boolean).map(c => metaChip(c[0], c[1])).join('');
+}
+
+/** One agent tile. `o` is already-decided presentation, never raw payload. */
+function agentTile(o) {
+  return `<div class="agent-row ${o.cls || ''}" ${o.groupKey ? `data-group="${escapeHtml(o.groupKey)}"` : ''}
+      ${o.nav ? `data-nav="${escapeHtml(JSON.stringify(o.nav))}"` : ''}
+      style="border-left:3px solid ${o.edge}" title="${escapeHtml(o.tip || o.title)}">
+      <span class="agent-icon" style="color:${o.tone}">${o.icon}</span>
+      ${o.badge ? `<span class="agent-badge" style="color:${o.tone};background:${o.toneBg}">${o.badge}</span>` : ''}
+      <span class="agent-tag" style="color:${o.tagColor};border-color:${o.tagColor}">${escapeHtml(o.tag)}</span>
+      <div class="row-main">
+        <div class="title">${escapeHtml(o.title)}</div>
+        <div class="sub">${escapeHtml(o.sub)}</div>
+      </div>
+      ${o.chips ? `<div class="row-chips">${o.chips}</div>` : ''}
+      <span class="chev">${o.chev || '&rsaquo;'}</span>
+    </div>`;
+}
+
+function toneBgOf(tone) {
+  return tone === SENT_TONE ? 'rgba(88,166,255,0.12)'
+       : tone === OPEN_TONE ? 'rgba(210,153,34,0.12)' : 'rgba(63,185,80,0.12)';
+}
+
+function agentRow(cell, groupKey, expanded) {
+  const kind = cell.row.kind;
+  const group = kind === 'spawn-group' || kind === 'return-group';
+  const sent = kind === 'spawn' || kind === 'spawn-group';
+  const open = kind === 'dangling';
+  const tone = sent ? SENT_TONE : (open ? OPEN_TONE : BACK_TONE);
+  const badge = sent ? 'Sent off' : (open ? 'No reply' : 'Reported');
+  const icon = sent ? '↗' : (open ? '⋯' : '↘');
+  const a = cell.agents[0];
+  if (!a) return '';
+  const many = cell.agents.length;
+  const track = group ? tone : agentColor(a);
+  let title, sub, chips;
+  if (group && sent) {
+    title = `${many} agents sent off together`;
+    sub = cell.agents.map(x => x.name).join(' · ');
+    chips = '';
+  } else if (group) {
+    const timed = cell.agents.map(x => x.durationMs).filter(ms => ms != null);
+    const tokens = cell.agents.reduce((n, x) => n + (x.tokens || 0), 0);
+    title = `all ${many} reported back`;
+    sub = `${spawnTurnPhrase(a)}`
+        + (timed.length ? ` · slowest took ${fmtDuration(Math.round(Math.max(...timed) / 1000))}` : '');
+    chips = agentChips([[`${fmtTokens(tokens)} tokens between them`], [`${many} of ${many}`, 'good']]);
+  } else if (sent) {
+    title = a.name;
+    sub = `${a.subagentType || a.type}${a.promptPreview ? ' · ' + a.promptPreview : ''}`;
+    chips = '';
+  } else if (open) {
+    title = a.name;
+    sub = `${spawnTurnPhrase(a)} and never reported back before the session ended`;
+    chips = agentChips([['still open', 'warn']]);
+  } else {
+    const r = (a.returns || [])[cell.row.returnIndex || 0] || {};
+    const total = (a.returns || []).length;
+    title = a.name;
+    // The pairing must be readable in words: the track beside it is support,
+    // never the only way to see which turn this came from.
+    sub = `${spawnTurnPhrase(a)} · ${ranPhrase(r.durationMs)}`
+        + (total > 1 ? ` · report ${(cell.row.returnIndex || 0) + 1} of ${total}` : '');
+    chips = agentChips([r.tokens ? [`${fmtTokens(r.tokens)} tokens`] : null,
+                        r.toolUses ? [`${r.toolUses} tool calls`] : null]);
+  }
+  return agentTile({
+    cls: (group ? 'group' : '') + (open ? ' open-agent' : ''),
+    groupKey: group ? groupKey : null,
+    // Both of an agent's tiles lead to the same screen: seeing the send-off and
+    // the report-back as one run is the point of the pairing.
+    nav: group ? null : agentNav(a),
+    icon: icon, badge: badge, tone: tone, toneBg: toneBgOf(tone), edge: track,
+    tag: group ? `agents: ${many}` : `agent: ${agentTag(a)}`,
+    tagColor: track, title: title, sub: sub, chips: chips,
+    chev: group ? (expanded ? '⌄' : '›') : '›',
+    tip: group ? `${title} — click to list them` : `${a.type} · ${a.name}`,
+  });
+}
+
+/** The members of an expanded group, each in its own colour. */
+function agentMemberRows(cell, lanes) {
+  const sent = cell.row.kind === 'spawn-group';
+  return cell.agents.map(a => {
+    const c = agentColor(a);
+    // Under a send-off the group's lanes are open and carry straight through the
+    // member rows. Under a report-back they have already closed on the row
+    // above, so drawing them again would start five tracks out of nowhere and
+    // dead-end them under the last member.
+    const memberCell = { own: {}, through: sent ? Object.keys(cell.own).map(Number) : [],
+                         laneColor: cell.laneColor };
+    const sub = sent ? `${a.subagentType || a.type}${a.promptPreview ? ' · ' + a.promptPreview : ''}`
+                     : ranPhrase(a.durationMs)
+                       + (a.tokens ? ` · ${fmtTokens(a.tokens)} tokens` : '');
+    return laneWrap(memberCell, lanes, null, agentTile({
+      cls: 'member', icon: '', badge: '', tone: c, toneBg: 'transparent', edge: 'var(--border)',
+      tag: `agent: ${agentTag(a)}`, tagColor: c, title: a.name, sub: sub, chips: '',
+      nav: agentNav(a),
+    }));
+  }).join('');
+}
+
+// Which group rows are open. Keyed by position in the baked sequence, because
+// the same batch can spawn and report as two separate rows.
+let expandedGroups = {};
+
 function renderTurnsLevel() {
   const A = active();
   const s = DATA.sessions.find(x => x.id === A.session.id) || {};
-  let html = turnRow({ turnId: 'all' }, `All turns (${A.turnCount}, aggregated)`, A,
-                     'Session-wide verdicts, combined across every turn.', s.headline);
-  (A.turns || []).forEach(t => {
-    html += turnRow({ turnId: t.id }, `Turn ${t.index + 1} of ${A.turnCount}`, t,
-                    t.promptPreview || t.userPrompt || '(no user prompt)', t.headline);
+  const aggregate = turnRow({ turnId: 'all' }, `All turns (${A.turnCount}, aggregated)`, A,
+                            'Session-wide verdicts, combined across every turn.', s.headline);
+  const agents = A.agents || [];
+  const rows = A.turnRows || [];
+  // A session that spawned nothing renders exactly as it did before agents
+  // existed: an always-empty gutter column would be a standing reminder of
+  // nothing at all.
+  const plainTurn = (t, inFlight) =>
+    turnRow({ turnId: t.id }, `Turn ${t.index + 1} of ${A.turnCount}`, t,
+            t.promptPreview || t.userPrompt || '(no user prompt)', t.headline, inFlight);
+  if (!agents.length || !rows.length) {
+    return aggregate + (A.turns || []).map(t => plainTurn(t, 0)).join('');
+  }
+
+  const byId = {};
+  agents.forEach(a => { byId[a.id] = a; });
+  const turnById = {};
+  (A.turns || []).forEach(t => { turnById[t.id] = t; });
+  const layout = laneLayout(rows, byId);
+  const lanes = layout.lanes;
+  let html = laneWrap(null, lanes, null, aggregate);
+  layout.laid.forEach((cell, i) => {
+    if (cell.row.kind === 'turn') {
+      const t = turnById[cell.row.ref];
+      if (!t) return;
+      html += laneWrap(cell, lanes, null, plainTurn(t, cell.inFlight));
+      return;
+    }
+    if (!cell.agents.length) return;
+    const groupKey = String(i);
+    const expanded = !!expandedGroups[groupKey];
+    const group = cell.row.kind === 'spawn-group' || cell.row.kind === 'return-group';
+    const elbow = group ? (cell.row.kind === 'spawn-group' ? SENT_TONE : BACK_TONE)
+                        : agentColor(cell.agents[0]);
+    html += laneWrap(cell, lanes, elbow, agentRow(cell, groupKey, expanded));
+    if (group && expanded) html += agentMemberRows(cell, lanes);
   });
   return html;
 }
 
-function turnRow(patch, label, scope, prompt, headline) {
+function turnRow(patch, label, scope, prompt, headline, inFlight) {
   const u = usageOf(scope);
   const files = scope.contextFiles || [];
   const live = files.filter(f => f.rollup && f.rollup.active).length;
@@ -5202,7 +6058,8 @@ function turnRow(patch, label, scope, prompt, headline) {
             : ((scope.session && scope.session.durationSec) || 0);
   const chips = rowStatusChips(counts, 3)
     + metaChip(`${live} of ${files.length} context files live`)
-    + (mix ? metaChip(mix) : '');
+    + (mix ? metaChip(mix) : '')
+    + (inFlight ? metaChip(`${inFlight} agent${inFlight === 1 ? '' : 's'} still working`, 'warn') : '');
   return drillRow(patch, {
     title: label,
     sub: prompt,
@@ -5211,6 +6068,119 @@ function turnRow(patch, label, scope, prompt, headline) {
     cls: (counts['ignored'] || 0) > 0 ? 'violating' : '',
     tip: headline ? `${label} — ${headline}` : label,
   });
+}
+
+function agentStat(value, key, tip) {
+  return `<div class="stat" title="${escapeHtml(tip)}">
+      <div class="v">${escapeHtml(value)}</div><div class="k">${escapeHtml(key)}</div>
+    </div>`;
+}
+
+/** One report-back, as the notification described it. */
+function agentReportRow(r, i, total) {
+  const bits = [ranPhrase(r.durationMs),
+                r.tokens ? `${fmtTokens(r.tokens)} tokens` : null,
+                r.toolUses ? `${r.toolUses} tool calls` : null,
+                r.time ? r.time.slice(11, 19) : null].filter(Boolean);
+  return `<div class="agent-report">
+      <div class="agent-report-head">
+        <span class="agent-report-n">report ${i + 1} of ${total}</span>
+        <span class="agent-report-status ${r.status === 'completed' ? '' : 'other'}">${escapeHtml(r.status || 'no status reported')}</span>
+        <span class="agent-report-meta">${escapeHtml(bits.join(' · '))}</span>
+      </div>
+      <div class="agent-report-summary">${escapeHtml(r.summary || 'no summary reported')}</div>
+    </div>`;
+}
+
+/**
+ * The agent screen. It replaces the file list at its level rather than the whole
+ * layout, so the breadcrumb, the ancestor bars and the scope badge above it stay
+ * put and it reads as a peer of the file level.
+ */
+function renderAgentLevel() {
+  const a = agentById(nav.agentId);
+  if (!a) return '<div class="empty-level">That agent is not part of this session.</div>';
+  const returns = a.returns || [];
+  const open = a.status !== 'returned';
+  const tone = open ? OPEN_TONE : BACK_TONE;
+  const c = agentColor(a);
+  const shown = returns.length ? returns[returns.length - 1] : null;
+
+  const head = `
+    <div class="agent-head" style="border-left:3px solid ${c}">
+      <span class="agent-tag" style="color:${c};border-color:${c}">agent: ${escapeHtml(agentTag(a))}</span>
+      <div class="agent-head-main">
+        <div class="agent-head-title">${escapeHtml(a.name)}</div>
+        <div class="agent-head-sub">${escapeHtml(`${a.type} · ${spawnTurnPhrase(a)} · `
+          + (open ? 'never reported back' : `${returns.length} report${returns.length === 1 ? '' : 's'} back`))}</div>
+      </div>
+      <span class="agent-badge" style="color:${tone};background:${toneBgOf(tone)}">${open ? 'No reply' : 'Reported'}</span>
+    </div>`;
+
+  const stats = `
+    <div class="summary-strip agent-stats">
+      ${agentStat(a.durationMs == null ? '—' : fmtDuration(Math.round(a.durationMs / 1000)), 'wall time',
+                  'How long the subagent ran, as its own notification reported it.')}
+      ${agentStat(a.tokens == null ? '—' : fmtTokens(a.tokens), 'subagent tokens',
+                  "Tokens the subagent spent in its own context, as its notification reported them. They are not part of this session's token counts.")}
+      ${agentStat(a.toolUses == null ? '—' : String(a.toolUses), 'tool calls',
+                  "Tool calls the subagent made. None of them appear in this session's timeline: they happened in its own transcript.")}
+      ${agentStat(String(returns.length), returns.length === 1 ? 'report back' : 'reports back',
+                  'How many times this one spawn notified. An agent notifies each time it stops with no live children, so the same spawn can report more than once.')}
+      ${agentStat((a.resultText || '').length.toLocaleString(), 'result chars',
+                  "Size of the returned report, which is the part of the subagent's work that came back into this session's context.")}
+    </div>`;
+  // Without this the strip reads as the whole run: `durationMs`, `tokens` and
+  // `toolUses` are the *last* notification's figures, and an agent that was
+  // resumed reports each stretch separately.
+  const stripNote = returns.length > 1
+    ? `<div class="agent-strip-note">Reported ${returns.length} times. The figures above are from its latest report only; each report's own are listed below.</div>`
+    : '';
+
+  // The brief takes equal billing with the result on purpose: it is the
+  // instruction the main agent wrote on your behalf, and the only place in this
+  // report where you can read it.
+  const brief = `
+    <div class="agent-panel">
+      <div class="agent-panel-head">The brief it was given</div>
+      <div class="agent-panel-note">Written by the main agent, not by you. This is the whole prompt the subagent started from.</div>
+      <pre class="agent-text">${escapeHtml(a.prompt || '(the spawn carried no prompt)')}</pre>
+    </div>`;
+
+  const resultNote = open
+    ? 'This agent never reported back, so nothing came from it into this session.'
+    : (returns.length > 1
+        ? `Showing report ${returns.length} of ${returns.length}, the last one. The earlier ones are listed below.`
+        : 'The text the subagent handed back into this session.');
+  const result = `
+    <div class="agent-panel">
+      <div class="agent-panel-head">What came back</div>
+      <div class="agent-panel-note">${escapeHtml(resultNote)}</div>
+      ${shown && shown.summary ? `<div class="agent-result-summary">${escapeHtml(shown.summary)}</div>` : ''}
+      <pre class="agent-text">${escapeHtml(shown ? (shown.resultText || '(the notification carried no result)')
+                                                 : '(no report back)')}</pre>
+    </div>`;
+
+  const reports = returns.length
+    ? `<div class="agent-panel">
+         <div class="agent-panel-head">Reports back (${returns.length})</div>
+         ${returns.map((r, i) => agentReportRow(r, i, returns.length)).join('')}
+       </div>`
+    : '';
+
+  const paths = [];
+  returns.forEach(r => { if (r.transcriptPath && !paths.includes(r.transcriptPath)) paths.push(r.transcriptPath); });
+  const files = paths.length
+    ? paths.map(p => `<code>${escapeHtml(p)}</code>`).join(' ')
+    : '<em>this agent reported no task id, so its transcript cannot be named</em>';
+  const transcript = `
+    <div class="agent-panel agent-notloaded">
+      <div class="agent-panel-head">Its own transcript is not loaded</div>
+      <div class="agent-panel-note">Everything on this screen comes from the spawn and from anything the agent notified back. The subagent's own run is on disk and is deliberately not baked into this report: its tool calls carry whole file contents. Nothing here counts its nested spawns, reads or edits.</div>
+      <div class="agent-panel-note">${files}</div>
+    </div>`;
+
+  return head + stats + stripNote + `<div class="agent-split">${brief}${result}</div>` + reports + transcript;
 }
 
 function renderFilesLevel() {
@@ -5617,6 +6587,7 @@ const LEVEL_HEADER = {
   turns: ['Turns in this session', 'Pick a turn to scope every panel to it, or take the session aggregate.'],
   files: ['Context files in scope', 'Every file that could have steered this scope. Pick one for its blocks.'],
   blocks: ['Blocks in this file', 'Click a block for the trace evidence behind its verdict.'],
+  agent: ['Subagent run', 'The brief this agent was given, and what came back from it.'],
 };
 
 function renderBlocks() {
@@ -6161,6 +7132,15 @@ document.getElementById('blocks-pane').addEventListener('click', e => {
     renderBlocks();
     return;
   }
+  const group = e.target.closest('.agent-row[data-group]');
+  if (group) {
+    const k = group.dataset.group;
+    if (expandedGroups[k]) delete expandedGroups[k]; else expandedGroups[k] = true;
+    renderBlocks();
+    return;
+  }
+  const agentHit = e.target.closest('.agent-row[data-nav]');
+  if (agentHit) { navigate(JSON.parse(agentHit.dataset.nav)); return; }
   const ancestor = e.target.closest('.ancestor[data-clears]');
   if (ancestor) { navOpen(ancestor.dataset.clears); return; }
   const row = e.target.closest('.drill-row');

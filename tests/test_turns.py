@@ -384,3 +384,31 @@ def test_process_session_single_turn_backcompat(tmp_path, monkeypatch):
     # Aggregate top-level keys still present.
     for key in ("counts", "contextFiles", "timeline", "fileActivity", "duplicates"):
         assert key in per_session
+
+
+def task_notification(tool_use_id, i, **fields):
+    """A completed-agent report, which the harness writes on the user channel.
+
+    `fields` fill the optional tags (task_id, status, summary, result,
+    subagent_tokens, tool_uses, duration_ms); omitted ones are left out so
+    tests can exercise the missing-tag path. Pass tool_use_id=None for the
+    real shape that carries no tool-use id at all.
+    """
+    tags = []
+    if fields.get("task_id"):
+        tags.append(f"<task-id>{fields['task_id']}</task-id>")
+    if tool_use_id is not None:
+        tags.append(f"<tool-use-id>{tool_use_id}</tool-use-id>")
+    for tag, key in (("status", "status"), ("summary", "summary"), ("result", "result")):
+        if key in fields:
+            tags.append(f"<{tag}>{fields[key]}</{tag}>")
+    usage = "".join(
+        f"<{tag}>{fields[key]}</{tag}>"
+        for tag, key in (("subagent_tokens", "subagent_tokens"),
+                         ("tool_uses", "tool_uses"),
+                         ("duration_ms", "duration_ms"))
+        if key in fields)
+    if usage:
+        tags.append(f"<usage>{usage}</usage>")
+    body = "<task-notification>\n" + "\n".join(tags) + "\n</task-notification>"
+    return {"type": "user", "timestamp": _ts(i), "message": {"content": body}}

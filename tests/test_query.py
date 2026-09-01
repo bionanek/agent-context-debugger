@@ -53,7 +53,7 @@ def _file(path, blocks, loaded=True, kind="global", active=False, summary=None,
                        "summary": summary or "in context, nothing referenced it"}}
 
 
-def _turn(index, prompt, files=None, calls=0):
+def _turn(index, prompt, files=None, calls=0, agent_ids=None):
     return {
         "id": f"turn-{index}",
         "index": index,
@@ -66,10 +66,43 @@ def _turn(index, prompt, files=None, calls=0):
         "usage": brv.usage_totals([]),
         "contextFiles": files or [],
         "timeline": [],
+        "agentIds": agent_ids or [],
     }
 
 
-def _session(sid, prompt="fix the parser", files=None, turns=None):
+def _agent(aid, name="reviewer", turn_index=1, lane=0, status="returned",
+           duration_ms=156000, tokens=12400, tool_uses=7, prompt="review the diff",
+           result="found two bugs", subagent_type="code-reviewer", kind="Task",
+           returns=None):
+    if returns is None and status == "returned":
+        returns = [{"taskId": aid + "-task", "status": "completed", "summary": "done",
+                    "resultText": result, "tokens": tokens, "toolUses": tool_uses,
+                    "durationMs": duration_ms, "eventIdx": 5, "time": _ts(2),
+                    "turnIndex": turn_index,
+                    "transcriptPath": f"/tmp/{aid}/subagents/agent-{aid}-task.jsonl"}]
+    return {
+        "id": aid,
+        "type": kind,
+        "subagentType": subagent_type,
+        "name": name,
+        "prompt": prompt,
+        "promptPreview": prompt[:140],
+        "spawnEventIdx": 2,
+        "spawnTime": _ts(1),
+        "spawnTurnIndex": turn_index,
+        "returns": returns or [],
+        "status": status,
+        "durationMs": duration_ms if status == "returned" else None,
+        "tokens": tokens if status == "returned" else None,
+        "toolUses": tool_uses if status == "returned" else None,
+        "resultText": result if status == "returned" else "",
+        "lane": lane,
+        "colorIndex": lane,
+    }
+
+
+def _session(sid, prompt="fix the parser", files=None, turns=None,
+             agents=None, turn_rows=None):
     return {
         "session": {"id": sid, "project": "proj", "cwd": "/cwd", "branch": "main",
                     "version": "1", "userPrompt": prompt, "startTime": _ts(0),
@@ -81,6 +114,9 @@ def _session(sid, prompt="fix the parser", files=None, turns=None):
         "contextFiles": files or [],
         "turns": turns or [],
         "turnCount": len(turns or []),
+        "agents": agents or [],
+        "turnRows": turn_rows or [],
+        "unmatchedNotifications": 0,
     }
 
 
@@ -502,3 +538,147 @@ def test_cmd_query_end_to_end_reaches_a_block(tmp_path, monkeypatch, capsys):
     blocks = capsys.readouterr().out
     assert not out.exists()
     assert "[" in blocks
+
+
+# ---------- agents ----------
+
+A1 = "toolu_agent_one"
+A2 = "toolu_agent_two"
+A3 = "toolu_agent_three"
+
+
+def _agents_data():
+    """Two agents that fanned out and resolved inside turn 1, one still open."""
+    a1 = _agent(A1, name="reviewer", lane=0)
+    a2 = _agent(A2, name="tester", lane=1, duration_ms=42000, tokens=3200,
+                tool_uses=2, prompt="run the suite", result="all green")
+    a3 = _agent(A3, name="stragler", turn_index=2, lane=0, status="open")
+    rows = [
+        {"kind": "turn", "ref": "turn-1"},
+        {"kind": "spawn-group", "refs": [A1, A2]},
+        {"kind": "return-group", "refs": [A1, A2]},
+        {"kind": "turn", "ref": "turn-2"},
+        {"kind": "spawn", "ref": A3},
+        {"kind": "dangling", "ref": A3},
+    ]
+    turns = [_turn(1, "fix the parser", calls=3, agent_ids=[A1, A2]),
+             _turn(2, "now the tests", calls=1, agent_ids=[A3])]
+    return _data((_summary(SID), _session(SID, turns=turns, agents=[a1, a2, a3],
+                                          turn_rows=rows)))
+
+
+def test_query_agents_lists_every_agent_with_type_tag_turn_duration_tokens_status():
+    out = brv.run_query(_agents_data(), [SID, "agents"])
+    rows = [ln for ln in out if ln.startswith("agent-")]
+    assert len(rows) == 3
+    first = rows[0]
+    assert A1 in first
+    assert "Task" in first and "code-reviewer" in first
+    assert "turn-1" in first
+    assert "2m36s" in first
+    assert "12k" in first
+    assert "returned" in first
+    assert "no reply" in rows[2]
+
+
+def test_agents_listing_follows_spawn_order_and_names_lane_and_group():
+    """The page draws lanes and collapses fan-outs from the same baked rows."""
+    out = brv.run_query(_agents_data(), [SID, "agents"])
+    rows = [ln for ln in out if ln.startswith("agent-")]
+    assert [A1 in rows[0], A2 in rows[1], A3 in rows[2]] == [True, True, True]
+    assert "lane 0" in rows[0] and "lane 1" in rows[1]
+    assert "group" in rows[0] and "group" in rows[1]
+    assert "group" not in rows[2]
+
+
+def test_agents_listing_names_the_next_command():
+    out = brv.run_query(_agents_data(), [SID, "agents"])
+    assert f"--query {SID} agent-{A1}" in _joined(out)
+
+
+def test_agent_listing_is_capped_and_names_the_all_flag():
+    agents = [_agent(f"toolu_a{i}") for i in range(brv.QUERY_ROW_LIMIT + 5)]
+    data = _data((_summary(SID), _session(SID, agents=agents)))
+    out = brv.run_query(data, [SID, "agents"])
+    assert f"--query {SID} agents --all" in _joined(out)
+    assert len([ln for ln in out if ln.startswith("agent-")]) == brv.QUERY_ROW_LIMIT
+
+    full = brv.run_query(data, [SID, "agents"], show_all=True)
+    assert len([ln for ln in full if ln.startswith("agent-")]
+               ) == brv.QUERY_ROW_LIMIT + 5
+
+
+def test_query_agents_under_a_turn_lists_only_that_turns_agents():
+    out = brv.run_query(_agents_data(), [SID, "turn-2", "agents"])
+    rows = [ln for ln in out if ln.startswith("agent-")]
+    assert len(rows) == 1 and A3 in rows[0]
+
+
+def test_query_agent_prints_the_brief_and_the_result():
+    text = _joined(brv.run_query(_agents_data(), [SID, f"agent-{A1}"]))
+    assert "review the diff" in text
+    assert "found two bugs" in text
+    assert "reviewer" in text
+    assert "turn-1" in text
+
+
+def test_query_agent_names_the_unbaked_subagent_transcript():
+    text = _joined(brv.run_query(_agents_data(), [SID, f"agent-{A1}"]))
+    assert "subagents/agent-" in text
+    assert "not baked" in text
+
+
+def test_query_agent_that_never_reported_says_so_without_inventing_figures():
+    text = _joined(brv.run_query(_agents_data(), [SID, f"agent-{A3}"]))
+    assert "no reply" in text.lower()
+    assert "0 tokens" not in text
+
+
+def test_long_brief_is_elided_with_the_exact_full_command():
+    long_prompt = "y" * (brv.QUERY_FIELD_LIMIT + 400)
+    a = _agent(A1, prompt=long_prompt)
+    data = _data((_summary(SID), _session(SID, agents=[a])))
+    text = _joined(brv.run_query(data, [SID, f"agent-{A1}"]))
+    assert f"--query {SID} agent-{A1} --field prompt" in text
+    assert "400 more chars" in text
+
+
+def test_agent_field_flag_prints_the_whole_value_unbounded():
+    long_result = "z" * (brv.QUERY_FIELD_LIMIT + 400)
+    a = _agent(A1, result=long_result)
+    data = _data((_summary(SID), _session(SID, agents=[a])))
+    out = brv.run_query(data, [SID, f"agent-{A1}"], field="result")
+    assert out == [long_result]
+
+
+def test_unknown_agent_id_raises_with_the_agents_listing_command():
+    with pytest.raises(brv.QueryError) as e:
+        brv.run_query(_agents_data(), [SID, "agent-nope"])
+    assert f"--query {SID} agents" in str(e.value)
+
+
+def test_field_on_the_agents_listing_raises():
+    with pytest.raises(brv.QueryError):
+        brv.run_query(_agents_data(), [SID, "agents"], field="prompt")
+
+
+def test_query_turns_marks_turns_that_spawned_agents():
+    out = brv.run_query(_agents_data(), [SID, "turns"])
+    rows = [ln for ln in out if ln.startswith("turn-")]
+    assert "2 agents" in rows[0]
+    assert "1 agent" in rows[1]
+
+
+def test_query_turn_names_the_agents_command_when_it_spawned_any():
+    text = _joined(brv.run_query(_agents_data(), [SID, "turn-1"]))
+    assert f"--query {SID} turn-1 agents" in text
+
+
+def test_unknown_agent_id_fails_the_command_naming_the_listing(tmp_path, monkeypatch):
+    """main() turns a QueryError into a non-zero exit, so the message is the fix."""
+    path = _fixture_transcript(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    out = tmp_path / "out.html"
+    with pytest.raises(brv.QueryError) as e:
+        brv.cmd_query(_QueryArgs(path, out, ["cafe1234", "agent-nope"]))
+    assert "agents" in str(e.value)
