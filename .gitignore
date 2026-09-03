@@ -3,6 +3,10 @@
 # and a copy of whatever was said in those sessions.
 agent-context-ide-real.html
 
+# Scratch tree the snapshot harness restores frozen inputs into before re-baking.
+# Regenerated on every capture/verify; the frozen inputs themselves are tracked.
+snapshots/.restore/
+
 __pycache__/
 .pytest_cache/
 .venv/

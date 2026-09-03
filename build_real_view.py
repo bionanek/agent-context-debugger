@@ -5,6 +5,7 @@ and emit a self-contained HTML view with the data baked in.
 """
 import argparse
 import difflib
+import functools
 import json
 import os
 import re
@@ -502,12 +503,19 @@ def combine_verdicts(statuses):
       USED family    : 'used', 'used-partial', 'ignored', 'possibly-referenced'
       NOT-USED family: 'undelivered', 'unused', 'dormant', 'not-loaded'
 
-    'ignored' takes precedence over 'used' because an ignored verdict is a
-    rule violation — silently aggregating it into 'used' would hide signal
-    the investigator came for. 'used' beats 'used-partial', which beats
-    'possibly-referenced': the weak-evidence status is the least the block
-    could have done, so any turn with real evidence outranks it. Within the
-    NOT-USED family we prefer the most informative label that appears.
+    'ignored' no longer outranks compliance outright: mixed turns combine to
+    'used-partial'. One mis-scored turn used to repaint a session over a dozen
+    provably compliant ones, and 'ignored' at session scope has to mean what
+    it says — the rule applied and was satisfied nowhere. The violation is not
+    hidden by the downgrade: 'used-partial' is not green, its reason counts
+    the turns, and the violating turn stays red at turn scope. Every 'ignored'
+    reaching this point was exercised, because `assess_block` scores an
+    applicable-but-unexercised rule 'dormant' (see `_is_exercised`).
+
+    'used' beats 'used-partial', which beats 'possibly-referenced': the
+    weak-evidence status is the least the block could have done, so any turn
+    with real evidence outranks it. Within the NOT-USED family we prefer the
+    most informative label that appears.
 
     Single-turn input passes through unchanged so single-turn sessions
     remain byte-identical to the pre-turn-aware build.
@@ -517,6 +525,8 @@ def combine_verdicts(statuses):
     if len(statuses) == 1:
         return statuses[0]
     if "ignored" in statuses:
+        if "used" in statuses or "used-partial" in statuses:
+            return "used-partial"
         return "ignored"
     if "used" in statuses:
         return "used"
@@ -528,6 +538,38 @@ def combine_verdicts(statuses):
         if fallback in statuses:
             return fallback
     return statuses[0]
+
+
+COMBINED_MEANINGS = {
+    "used": "the rule applied and was satisfied wherever it was exercised.",
+    "used-partial": "satisfied in some turns and unsatisfied in others.",
+    "ignored": "the rule applied and was satisfied in no turn.",
+    "possibly-referenced": "weak co-occurrence evidence only, in every turn that had any.",
+    "undelivered": "the block never reached the model.",
+    "unused": "no predicate fired and no keyword overlap, in any turn.",
+    "dormant": "the rule's preconditions were never met.",
+    "not-loaded": "the file was not in context in any turn.",
+}
+
+# Not the template's STATUS_ORDER, which ranks the chips by severity: this one
+# only fixes the order of the tally inside a combined reason.
+COMBINED_TALLY_ORDER = ("used", "used-partial", "ignored", "possibly-referenced",
+                        "undelivered", "unused", "dormant", "not-loaded")
+
+
+def combined_reason(status, statuses):
+    """Reason text for an aggregate block, written from the combined status.
+
+    The aggregate keeps its own session-wide moments and evidence, but its
+    reason was recomputed independently of the combine rule, so one real
+    record read "status ignored" above "1 predicate(s) applied and were
+    satisfied" — three realities in one row. Deriving the sentence from the
+    same statuses the status came from is the only way the two cannot drift.
+    """
+    counts = {s: statuses.count(s) for s in COMBINED_TALLY_ORDER if s in statuses}
+    tally = ", ".join(f"{n} {s}" for s, n in counts.items())
+    return (f"Combined from {len(statuses)} turns ({tally}) — "
+            + COMBINED_MEANINGS.get(status, "see the per-turn verdicts."))
 
 
 def turn_slice(events, calls, asst_segs, turn):
@@ -1386,6 +1428,46 @@ def _is_triggered(name, user_prompt):
     return re.search(pattern, user_prompt, re.I) is not None
 
 
+def _trigger_evidence(cmd, trace):
+    """The record showing `/cmd` was invoked this scope, strongest first.
+
+    Returns ("skill", call) / ("wrapper", segment) / ("prompt", None), or
+    (None, None). The trigger predicate and the skill/command moments builder
+    must ask this one question: the predicate used to run a bare substring
+    test of its own, so a prompt reading `/implement-plan-workflow` scored the
+    `/implement-plan` pointer green while the moment card beside it said,
+    correctly, that the command was never invoked. Two matchers for one
+    question is what let the badge and the card contradict each other.
+    """
+    name = (cmd or "").strip().lstrip("/").lower()
+    if not name:
+        return (None, None)
+    for c in trace.get("calls") or ():
+        if c["name"] != "Skill":
+            continue
+        if (c["input"].get("skill") or "").strip().lstrip("/").lower() == name:
+            return ("skill", c)
+    for w in trace.get("cmd_wrappers") or ():
+        if (w.get("name") or "").lower() == name:
+            return ("wrapper", w)
+    if _is_triggered(name, trace.get("user_prompt") or ""):
+        return ("prompt", None)
+    return (None, None)
+
+
+def _describe_trigger(cmd, trace):
+    """Evidence line for a trigger predicate: which record shows the call."""
+    source, rec = _trigger_evidence(cmd, trace)
+    if source == "skill":
+        return f"`Skill` tool invoked `{cmd}`"
+    if source == "wrapper":
+        return f"User typed `{cmd}` as a slash command"
+    if source == "prompt":
+        return f"User prompt: `{(trace.get('user_prompt') or '')[:100]}` — contains `{cmd}`"
+    return (f"`{cmd}` was not invoked this run — prompt: "
+            f"`{(trace.get('user_prompt') or '')[:100]}`")
+
+
 def _skill_tool_names(calls):
     """Names the model passed to the `Skill` tool, lowercased.
 
@@ -1479,9 +1561,20 @@ def _resolve_at_refs(blocks, search_roots):
     return resolved
 
 
-def load_context_files(events, calls, project_dir, args, user_prompt, hook_facts=None):
+def load_context_files(events, calls, project_dir, args, user_prompt, hook_facts=None,
+                       skill_listing=None):
     """Transcript-first loader. Use harness-recorded attachments where present;
     fall back to filesystem path conventions otherwise.
+
+    `skill_listing` overrides the listing found in `events` with the session's
+    own `{"present", "entries"}`. The harness injects that listing once, so a
+    later turn's event slice does not contain it - and a skill with no SKILL.md
+    on disk exists *only* in the listing, so without the override it appears in
+    the payload of the turn that carries the attachment and nowhere else. That
+    turn is normally the first, before the skill was invoked, which is how two
+    skills that drove fifteen turns of a real session were reported as never
+    loaded. Skills that do resolve on disk are unaffected: the path-convention
+    fallback finds them in every turn.
 
     `hook_facts` is the ctxlog log for this session (None when the session
     predates the hooks). Where it names a file, it is ground truth and beats
@@ -1636,9 +1729,13 @@ def load_context_files(events, calls, project_dir, args, user_prompt, hook_facts
     # ===== Skills =====
     skill_call_names = _skill_tool_names(calls)
     wrapper_names = _command_wrapper_names(events)
-    if attach["skill_listing_present"]:
+    listing_present = (skill_listing["present"] if skill_listing is not None
+                       else attach["skill_listing_present"])
+    listing_entries = (skill_listing["entries"] if skill_listing is not None
+                       else attach["skill_listing"])
+    if listing_present:
         # Authoritative: only show skills the harness listed.
-        for entry in attach["skill_listing"]:
+        for entry in listing_entries:
             name = entry["name"]
             md_path = None
             for cand in (
@@ -1773,13 +1870,114 @@ def load_context_files(events, calls, project_dir, args, user_prompt, hook_facts
 # ---------- 4. predicate-based block assessment ----------
 
 CODE_EXT = re.compile(r"\.(?:ts|tsx|js|jsx|py|md|go|rs|rb|java|css|html|json|sh)\b")
-SUMMARY_KEYWORDS = ("summary", "files changed", "what changed", "in summary", "to recap")
+
+# Filename-shaped token, for deciding whether a backticked bare word names a
+# file the block is pointing at.
+_FILENAME_TOKEN = re.compile(r"[\w./~@-]+\.[A-Za-z]\w{0,4}")
+
+# A fence body is not an inline code span. The single-backtick scan reads
+# ```bash\n… as one span whose first word is `bash`, which is how a fence's
+# language tag became "the command the rule is about".
+_FENCE_RE = re.compile(r"```([^\n`]*)\n(.*?)```", re.S)
+# Only an explicitly shell-tagged fence is a source of commands. An untagged
+# fence is as often another language or plain prose, and reading `import re` as
+# a program is exactly the noise this tier is being cleaned of.
+_SHELL_FENCE_LANGS = frozenset({"bash", "sh", "shell", "zsh", "console", "shell-session"})
+
+# Words that look like commands inside backticks but are not: plain English a
+# rule backticks for emphasis, the nouns every technical document uses for a
+# field or a value, common data-format names, and shell keywords. One
+# Architecture block in this repo derived 50 "command" predicates this way,
+# each then reporting "`in` ran 12× this session".
+#
+# What is deliberately *gone* from here: the entries that were only ever this
+# tool's own vocabulary - `argparse`, `claude.md`, `skill.md`, and its verdict
+# statuses (`used`, `dormant`, `undelivered`, …). A list curated against one
+# repo's documents is the same reverse-engineering the retired strong
+# predicates were, and it grows by one entry per false positive for ever.
+# What stays is a shape filter (`_looks_like_command_word`) plus the words no
+# shape test can separate from a program name.
+#
+# The list is still English, and knowingly so: deriving stopwords from the
+# user's own corpus is the lexical tier's job, not this tier's. It is safe to
+# be wrong here in a way it is not safe to be wrong in the strong tier - a
+# command mention can only ever reach `possibly-referenced`, so a leftover
+# false positive claims the block was referenced and can never accuse it.
+NON_CMDS = frozenset({
+    "the", "a", "an", "and", "or", "if", "see", "use", "any", "all", "rule", "always",
+    "never", "must", "i", "you", "we", "it", "is", "are", "was", "were", "this",
+    "that", "these", "those", "trigger", "yaml", "json", "md", "ts", "tsx", "py",
+    "from", "into", "with", "when", "then", "else", "than", "what", "which",
+    "while", "where", "here", "there", "runs", "skips", "only", "also", "each",
+    "every", "same", "such", "some", "none", "both", "before", "after", "above",
+    "below", "first", "last", "next", "does", "done", "will", "would", "should",
+    "could", "have", "has", "been", "being", "your", "their", "them", "they",
+    "data", "type", "name", "kind", "path", "text", "label", "title", "value",
+    "index", "count", "content", "status", "reason", "scope", "group", "file",
+    "line", "role", "level", "input", "output", "field", "block", "turn",
+    # shell keywords: a fenced loop's `done` is not a program
+    "do", "fi", "esac", "elif", "eof",
+})
+
+# Below this a token is far more often prose than a program. It costs the weak
+# tier `gh`, `git` and `jq`, and that is the right trade: a command mention can
+# never reach a hard verdict anyway, so all a short false positive can do is
+# claim the block was referenced when nothing tied it to the run.
+_MIN_CMD_LEN = 4
+
+_INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
+# A quoted example may wrap across a line, so a quote span is allowed to cross
+# newlines and is length-bounded instead: pairing every `"` in a long document
+# would eventually swallow a real declaration. The cost of a wrong pairing is
+# one missing predicate - `dormant`, an honest refusal - never a false
+# accusation, which is why the bound is generous rather than tight.
+_QUOTED_RE = re.compile(r"\"[^\"]{1,200}\"", re.S)
+
+# A trigger declaration in any language: a short label, a colon, and the
+# backticked slash command standing alone to the end of the line. The English
+# cues beside it (`Trigger:`, "types `/x`") only ever named the same
+# harness-defined identifier, so keying on them alone meant a Polish or
+# Japanese skill pointer derived nothing and scored `unused` while its skill was
+# demonstrably running. The line must *end* at the command: "links to:
+# `/deployment`, `/deployment/calibrate…`" is a list of routes, and one real doc
+# on this machine turns exactly that shape into a command that does not exist.
+_TRIGGER_DECL = r"[^\n:`]{1,40}:[ \t]*`(/[a-z][\w-]*)`[ \t]*\.?[ \t]*(?:\n|$)"
+
+
+def _example_spans(text):
+    """Ranges holding a quoted example rather than a live instruction.
+
+    Documentation *about* the trigger syntax quotes it - `Trigger: /foo`, "when
+    the user types `/x`" - and this repo's own Architecture section therefore
+    derived live predicates that reported "`/foo` not invoked this run" about a
+    command that does not exist. A real declaration writes the phrase bare and
+    backticks the command alone, so it survives this filter.
+
+    A quote span may cross a line, because a quoted sentence wraps, but never a
+    *blank* line and never more than 200 characters. Both bounds exist to keep
+    one stray apostrophe-style quote from pairing with a much later one and
+    swallowing a real declaration whole - measured: without the blank-line
+    bound, an unbalanced quote three paragraphs above a `Trigger:` line deleted
+    its predicate, which is a worse error than the one being fixed.
+    """
+    quoted = [m.span() for m in _QUOTED_RE.finditer(text)
+              if "\n\n" not in m.group(0)]
+    return [m.span() for m in _INLINE_CODE_RE.finditer(text)] + quoted
+
+
+def _in_span(pos, spans):
+    return any(start <= pos < end for start, end in spans)
 
 
 def _extract_backtick_tokens(text):
-    """Return tokens inside backticks that look like commands or command fragments."""
+    """Return inline-code spans that look like commands or command fragments.
+
+    Fenced blocks are removed first; `_extract_fenced_commands` reads those,
+    where a line's first word is a command by position rather than by shape.
+    """
+    prose = _FENCE_RE.sub("\n", text)
     out = []
-    for m in re.finditer(r"`([^`]+)`", text):
+    for m in re.finditer(r"`([^`]+)`", prose):
         token = m.group(1).strip()
         if not token:
             continue
@@ -1787,7 +1985,332 @@ def _extract_backtick_tokens(text):
     return out
 
 
-def derive_predicates(block):
+# A markdown table row. Its cells are data - one column of the retired
+# gh-account table held the repo names `figma` and `formic`, both harvested as
+# programs, so every bash line naming the repo looked like a hit on a rule
+# about GitHub accounts. A cell is excluded from the *command* harvest only:
+# `_named_paths` still reads tables, because a rule really can put the file it
+# governs in one.
+_TABLE_ROW_RE = re.compile(r"^[ \t]*\|.*$", re.M)
+
+
+def _strip_table_rows(text):
+    return _TABLE_ROW_RE.sub("", text)
+
+
+def _looks_like_command_word(word):
+    """Is this bare backticked word plausibly a program name?
+
+    The shape rules carry most of the weight, because a wordlist cannot keep up
+    with a dense technical document: this repo's own Architecture block put 167
+    inline spans through here, nearly all of them identifiers. A program name
+    is lower-case, separates with `-` rather than `_`, and does not end on a
+    separator - so `activeSessionId`, `abs_path` and `agent-` are prose about
+    code, while `pytest`, `yarn`, `type-check` and `python3` survive.
+    """
+    return (bool(re.fullmatch(r"[a-z][a-z0-9.-]*[a-z0-9]", word))
+            and len(word) >= _MIN_CMD_LEN
+            and word.lower() not in NON_CMDS)
+
+
+def _fenced_commands(text, langs):
+    """Whole commands out of fenced examples, e.g. `yarn type-check`.
+
+    Extraction used to keep a token's first word only, so the famigo quality
+    gate's real command - multi-token and fenced - was never recognised while
+    the fence's `bash` tag became a predicate about nothing: 21 actual gate runs
+    stayed invisible. The *length* filter that guards inline spans is
+    deliberately not applied to the first word here, because a shell fence's
+    first word is a command by position (`gh`, `git`, `jq`); `NON_CMDS` still
+    is, or a fenced `for f in *; do …; done` contributes `done` as a program.
+
+    `langs` restricts which fences are read; None reads every fence, which is
+    only safe for a caller that then demands the command have run verbatim.
+    """
+    out = []
+    for lang, body in _FENCE_RE.findall(text):
+        if langs is not None and lang.strip().lower() not in langs:
+            continue
+        for raw in body.splitlines():
+            line = raw.strip().lstrip("$").strip()
+            # A documented command is routinely annotated in place
+            # (`just palletizer-hmi-lint    # eslint + tsc`), and keeping the
+            # comment makes the whole line fail the shape test.
+            line = re.sub(r"\s+#.*$", "", line).strip()
+            if not line or line.startswith("#"):
+                continue
+            for part in re.split(r"&&|\|\||[|;]", line):
+                cmd = " ".join(part.split())
+                if not re.fullmatch(r"[a-z][\w.-]*(?:\s+[-\w./=:@,+]+)*", cmd):
+                    continue
+                if cmd.split()[0].lower() in NON_CMDS:
+                    continue
+                out.append(cmd)
+    return out
+
+
+def _extract_fenced_commands(text):
+    """Commands from explicitly shell-tagged fences (the weak tier's source)."""
+    return _fenced_commands(text, _SHELL_FENCE_LANGS)
+
+
+def _shell_write_targets(cmd):
+    """Files a bash command authors, through a heredoc redirect or `tee`.
+
+    Only those two forms count. A session that shipped a three-commit feature
+    through `cat > file <<'EOF'` was reported as having changed nothing at all,
+    but treating every `>` as an edit would count captured command output as
+    source, so two narrowings apply. A heredoc's redirect is read from the
+    *first line* only - it may sit on either side of the marker
+    (`cat > f <<'EOF'` and `cat <<'EOF' > f` are both real), while the redirect
+    in `python3 - <<'PY' … PY > out.json` sits on the closing line and captures
+    the script's output rather than authoring a file. And a target must look
+    like source (`CODE_EXT`), or `yarn build | tee build.log` registers as
+    authoring code - and a rule about summarising a code change then judges the
+    wording of a turn that only ran a build.
+    """
+    if not cmd:
+        return []
+    out = []
+    if "<<" in cmd:
+        out += [m.group(1) for m in
+                re.finditer(r">>?\s*['\"]?([^\s'\"|;&<>]+)", cmd.split("\n", 1)[0])]
+    out += [m.group(1) for m in
+            re.finditer(r"\btee\b(?:\s+-\S+)*\s+['\"]?([^\s'\"|;&<>]+)", cmd)]
+    return [p for p in out if CODE_EXT.search(Path(p).name) and not p.startswith("/dev/")]
+
+
+def _written_paths(trace):
+    """Every path this scope wrote, documentation included.
+
+    Cached on the trace by `build_trace`: the path-join predicates ask for it
+    once per named path per predicate call, and re-deriving it re-scans every
+    bash command in the session each time.
+    """
+    cached = trace.get("written_paths")
+    if cached is not None:
+        return cached
+    out = [c["input"].get("file_path") or "" for c in trace["edits"]]
+    for bc in trace["bash_cmds"]:
+        out += _shell_write_targets(bc)
+    return [p for p in out if p]
+
+
+# ----- structural evidence: what the run wrote, and where -----
+# The judging used to read the agent's prose and its bash commands and nothing
+# else, so a rule the agent demonstrably obeyed - appending to the file the
+# rule names, reproducing the template the rule spells out - scored `unused`
+# with a reason denying compliance. These helpers are the join between a
+# block's text and the run's own artifacts.
+
+# A path a rule names, out of the block's backticked tokens. Backticks only:
+# a rule that tells you which file to append to writes it in code font, while
+# harvesting bare filenames from prose would tie any block that merely
+# mentions CLAUDE.md to every session that edited it.
+_PATH_TOKEN_RE = re.compile(r"[\w.~@/-]+")
+
+_EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
+
+
+def _named_paths(content):
+    """Paths this block names, as written."""
+    out = []
+    for tok in _extract_backtick_tokens(content):
+        tok = tok.strip().rstrip("/")
+        # A placeholder or a glob names no file, so there is nothing to join;
+        # `<encoded-project-path>` would otherwise match on its literal text.
+        if not tok or "<" in tok or "*" in tok:
+            continue
+        if not _PATH_TOKEN_RE.fullmatch(tok):
+            continue
+        if "/" not in tok and not _FILENAME_TOKEN.fullmatch(tok):
+            continue
+        out.append(tok)
+    return out
+
+
+def _path_components(p):
+    """Known path components, dropping the ones this tool cannot resolve.
+
+    A shell-written path is routinely `$M/ERRORS.md`: the variable's value
+    lived in the same command and nothing here expands it. Dropping the
+    unknown segment and comparing what is left is the honest best effort -
+    treating `$M` as a literal directory name means the rule that names
+    ERRORS.md never meets the ERRORS.md the agent appended to.
+    """
+    return [c for c in str(p).replace("\\", "/").split("/")
+            if c not in ("", ".", "~") and "$" not in c]
+
+
+def _run_contains(long, short):
+    return bool(short) and any(long[i:i + len(short)] == short
+                               for i in range(len(long) - len(short) + 1))
+
+
+def _path_names_target(named, written):
+    """Do a path a block names and a path a tool call carried mean one file?
+
+    Both sides are resolved first, the way `_resolve_key` does for activity.
+    Resolution alone is not enough here: the block's side is often relative
+    (`docs/decisions/DECISIONS.md`), and resolving that against *this
+    process's* cwd rather than the session's would report every file as
+    untouched, which looks plausible. So a contiguous run of path components
+    is the fallback, which also lets `~/.claude/ERRORS.md` meet the absolute
+    path the harness recorded without this code knowing whose home it was.
+    Containment is tested in both directions because either side can be the
+    partial one - a relative tool input, or a path whose unresolvable
+    segments `_path_components` dropped.
+    """
+    if not named or not written:
+        return False
+    if _resolve_key(os.path.expanduser(named)) == _resolve_key(written):
+        return True
+    a, b = _path_components(named), _path_components(written)
+    return _run_contains(b, a) or _run_contains(a, b)
+
+
+def _named_path_writes(named_paths, trace):
+    """(named path, written path) pairs where the run wrote what a block named.
+
+    Deduped: a file edited six times, or named twice by one block, is one
+    piece of evidence, and the evidence line otherwise repeats the same path
+    until it is unreadable.
+    """
+    written = _written_paths(trace)
+    out = []
+    for n in named_paths:
+        for w in written:
+            if _path_names_target(n, w) and (n, w) not in out:
+                out.append((n, w))
+    return out
+
+
+# A heredoc body, up to its closing marker. Real appends are cut short by the
+# transcript often enough that a missing marker takes the rest of the command
+# rather than yielding nothing.
+_HEREDOC_RE = re.compile(r"<<-?\s*['\"]?(\w+)['\"]?\s*?\n(.*?)(?:\n\s*\1\s*$|\Z)",
+                         re.S | re.M)
+
+
+def _written_chunks(calls):
+    """Text this scope wrote into files: {path, text, t} per write.
+
+    The keyword fallback reads `all_assistant_text` only, so a template
+    reproduced in the file the agent wrote - the entire point of a template
+    block - counted for nothing. Heredoc bodies count too, for the same reason
+    `_shell_write_targets` exists: the memory-rule anchor appended its
+    templated entry with `cat >> $M/ERRORS.md <<'EOF'`, and a reader who only
+    knows about the edit tools sees a session that wrote nothing.
+    """
+    out = []
+    for c in calls:
+        if c["name"] == "Bash":
+            cmd = c["input"].get("command", "")
+            targets = _shell_write_targets(cmd)
+            if not targets:
+                continue
+            bodies = [b for _marker, b in _HEREDOC_RE.findall(cmd) if b.strip()]
+            # One command can author two files; pair them off only when the
+            # counts agree, or a two-heredoc command cites the wrong file.
+            paired = zip(targets, bodies) if len(targets) == len(bodies) \
+                else ((targets[0], b) for b in bodies)
+            for path, body in paired:
+                out.append({"path": path, "text": body, "t": c.get("ts")})
+            continue
+        if c["name"] not in _EDIT_TOOLS:
+            continue
+        inp = c["input"]
+        path = inp.get("file_path") or ""
+        texts = [inp.get(k) for k in ("content", "new_string", "new_source")]
+        for e in inp.get("edits") or ():
+            if isinstance(e, dict):
+                texts.append(e.get("new_string"))
+        for t in texts:
+            if isinstance(t, str) and t.strip():
+                out.append({"path": path, "text": t, "t": c.get("ts")})
+    return out
+
+
+# A bold label survives being filled in (`**Decided:**` stays put while what
+# follows it is replaced); the prose around a placeholder does not.
+_BOLD_LABEL_RE = re.compile(r"^\*\*[^*\n]{1,40}\*\*:?")
+_LIST_MARKER_RE = re.compile(r"^(?:[-*+]\s+|\d+[.)]\s+)")
+_PLACEHOLDER_RE = re.compile(r"<[^<>\n]{1,60}>|YYYY|MM-DD|\.\.\.|…")
+_MIN_LITERAL_LEN = 10
+
+
+def _template_literals(content):
+    """Literal fragments of a template this block spells out.
+
+    Markdown structure only - a bold label and a heading line - because those
+    are what a filled-in copy still carries verbatim. A heading holding a
+    placeholder is dropped whole (`# Plan: <Feature Name>` is never reproduced
+    as written, so searching for it could only ever miss), while a bold label
+    keeps just its prefix, which is the half that is not filler.
+    """
+    out = []
+    for raw in content.splitlines():
+        line = _LIST_MARKER_RE.sub("", raw.strip())
+        m = _BOLD_LABEL_RE.match(line)
+        if m and len(m.group(0)) >= 6:
+            out.append(m.group(0))
+            continue
+        if _PLACEHOLDER_RE.search(line):
+            continue
+        if re.match(r"#{1,6}\s+\S", line) and len(line) >= _MIN_LITERAL_LEN:
+            out.append(line)
+    return sorted(set(out))
+
+
+def _template_echo_hits(literals, trace, min_literals=2, exclude_path=None):
+    """Files this scope wrote that reproduce the block's template.
+
+    Returns [{path, t, literals}]. Two literals in one file is the floor: a
+    single common heading (`## Approach`) is a coincidence between two
+    markdown documents, not a template being followed.
+
+    `exclude_path` is the block's own document. Editing the rule file itself
+    rewrites the template's own text, so without this a session that merely
+    updated CLAUDE.md would read as having followed every template in it.
+    """
+    if not literals:
+        return []
+    excluded = _resolve_key(os.path.expanduser(exclude_path)) if exclude_path else None
+    by_path = {}
+    for ch in trace.get("written_chunks") or ():
+        if excluded and _resolve_key(ch["path"]) == excluded:
+            continue
+        hit = [lit for lit in literals if lit in ch["text"]]
+        if not hit:
+            continue
+        rec = by_path.setdefault(ch["path"], {"path": ch["path"], "t": ch["t"],
+                                              "literals": []})
+        rec["literals"] = sorted(set(rec["literals"]) | set(hit))
+    return [r for r in by_path.values() if len(r["literals"]) >= min_literals]
+
+
+def _command_echo_count(cmd, bash_cmds):
+    """How many bash commands contain this whole prescribed command verbatim.
+
+    Bounded on the right so `yarn test` counts `yarn test --watch=false` (the
+    prescribed command did run) but not `yarn testing`.
+    """
+    if not cmd:
+        return 0
+    pattern = r"\b" + re.escape(cmd) + r"(?![\w-])"
+    return sum(1 for bc in bash_cmds if re.search(pattern, bc))
+
+
+def _describe_skill_execution(name, trace):
+    source, _rec = _trigger_evidence(name, trace)
+    if source == "skill":
+        return f"`Skill` tool invoked `/{name}` — this block was part of what ran"
+    if source == "wrapper":
+        return f"User invoked `/{name}` as a slash command — this block was part of what ran"
+    return f"No record of `/{name}` being invoked this run"
+
+
+def derive_predicates(block, file=None):
     """Inspect block content and return a list of predicate dicts.
 
     Each predicate has:
@@ -1807,6 +2330,20 @@ def derive_predicates(block):
     command-mention `matches` unconditionally, so before tiering, any block
     naming a command that ran anywhere in the session scored `used`. Weak
     evidence is capped at `possibly-referenced` by `assess_block`.
+
+    The structural kinds (`skill-invocation`, `writes-to-named-path`,
+    `template-echo`, `command-echo`) are *credit-only*: their `applicable` is
+    the signal itself and their `matches` is unconditionally true, so they can
+    lift a block but never accuse one. That is the honest shape - a session
+    that never appended to ERRORS.md may have had nothing worth logging, and
+    reading that silence as a violation is the mirror of the blind spot they
+    exist to close. Their strength is nonetheless `strong`: each is a
+    harness-defined record (a Skill call, a tool-call file path, a bash
+    command) tied to something the block itself names, not a word that
+    happened to co-occur.
+
+    `file` is optional and only supplies the skill/command name, so callers
+    that judge a bare block (duplicate classification) keep working.
     """
     content = block["content"]
     title = block["title"]
@@ -1814,87 +2351,129 @@ def derive_predicates(block):
     content_l = content.lower()
     predicates = []
 
-    # ----- trigger phrase: "Trigger: /foo" or "When the user types `/foo`"
+    # ----- trigger declaration: the slash command this block says invokes it
     trigger_cmds = set()
-    for m in re.finditer(r"trigger:\s*`?(/[a-z][\w-]*)`?", content, re.I):
-        trigger_cmds.add(m.group(1).lower())
-    for m in re.finditer(r"types\s+`(/[a-z][\w-]*)`", content, re.I):
-        trigger_cmds.add(m.group(1).lower())
+    examples = _example_spans(content)
+    for pattern in (_TRIGGER_DECL, r"trigger:\s*`?(/[a-z][\w-]*)`?",
+                    r"types\s+`(/[a-z][\w-]*)`"):
+        for m in re.finditer(pattern, content, re.I):
+            # A declaration quoted whole is documentation about the syntax, not
+            # an instruction. See `_example_spans`.
+            if _in_span(m.start(), examples):
+                continue
+            trigger_cmds.add(m.group(1).lower())
     for cmd in trigger_cmds:
         predicates.append({
             "kind": "trigger",
             "strength": "strong",
             "cmd": cmd,
             "label": f"trigger {cmd}",
-            "applicable": (lambda t, c=cmd: bool(t["user_prompt"]) and c in t["user_prompt"].lower()),
-            "matches":    (lambda t, c=cmd: bool(t["user_prompt"]) and c in t["user_prompt"].lower()),
-            "describe":   (lambda t, c=cmd: f"User prompt: `{(t['user_prompt'] or '')[:100]}` — "
-                                            + ("contains" if (t["user_prompt"] and c in t["user_prompt"].lower()) else "does not contain")
-                                            + f" `{c}`"),
+            "applicable": (lambda t, c=cmd: _trigger_evidence(c, t)[0] is not None),
+            "matches":    (lambda t, c=cmd: _trigger_evidence(c, t)[0] is not None),
+            "describe":   (lambda t, c=cmd: _describe_trigger(c, t)),
         })
 
-    # ----- path table: cwd-conditional rules
-    # Detect markdown tables that look like the project-routing pattern.
-    if re.search(r"\|\s*Project path contains\s*\|", content, re.I) or re.search(r"project path contains", content_l):
-        # parse table rows
-        rows = []
-        for line in content.splitlines():
-            cols = [c.strip() for c in line.strip().strip("|").split("|")]
-            if len(cols) >= 3 and not all(set(c) <= set("-: ") for c in cols):
-                rows.append(cols)
-        # drop header + separator
-        data_rows = []
-        for cols in rows:
-            joined = " ".join(cols).lower()
-            if "project path contains" in joined or "required" in joined or "switch command" in joined:
-                continue
-            # extract path-token from first col (between backticks if present)
-            m = re.search(r"`([^`]+)`", cols[0])
-            path_token = m.group(1) if m else cols[0]
-            # extract a shell command from any cell
-            cmd = ""
-            for c in cols:
-                cm = re.search(r"`([^`]+)`", c)
-                if cm and any(s in cm.group(1) for s in [" ", "-"]):
-                    cmd = cm.group(1)
-                    break
-            data_rows.append({"path_token": path_token, "cmd": cmd})
+    # A cwd-conditional rule ("in this repo, use that account") used to be
+    # read straight out of a markdown table whose header this tool matched
+    # literally - one user's own gh-account table, and the only shape it ever
+    # recognised. It was wrong in both directions on every session audited:
+    # the row's account name substring-matched an unrelated `git log --author=`
+    # flag for a false green, and the literal switch string it demanded could
+    # not express "check, and switch only if needed" for a false red. Such a
+    # rule is now `tool_never_without_prior` in a compiled checks file, where
+    # the ordering is decided over the tool log and every finding cites the
+    # call that went wrong.
 
-        if data_rows:
-            tokens = [r["path_token"] for r in data_rows]
-            cmds = [r["cmd"] for r in data_rows if r["cmd"]]
-            predicates.append({
-                "kind": "path-table",
-                "strength": "strong",
-                "label": "cwd vs path table",
-                "applicable": (lambda t, toks=tokens: any(tok and tok in t["cwd"] for tok in toks)),
-                "matches":    (lambda t, cs=cmds: any(c and any(c in bc for bc in t["bash_cmds"]) for c in cs)),
-                "describe":   (lambda t, toks=tokens, cs=cmds:
-                               f"cwd `{t['cwd']}` matches: " +
-                               (", ".join(tk for tk in toks if tk and tk in t["cwd"]) or "(none)") +
-                               f"; matching commands ran: " +
-                               (", ".join(c for c in cs if any(c in bc for bc in t["bash_cmds"])) or "(none)")),
-            })
+    # ----- an executed skill or command: its own blocks were what ran
+    if file and file.get("kind") in ("skill", "command") and file.get("name"):
+        name = file["name"]
+        predicates.append({
+            "kind": "skill-invocation",
+            "strength": "strong",
+            "cmd": f"/{name}",
+            "label": f"skill /{name} executed",
+            # A prompt that merely mentions `/name` is deliberately not
+            # enough. It is the weakest of the three loading signals - a guess
+            # about intent - and letting it carry a verdict would turn every
+            # block of a skill green because the user typed its name.
+            "applicable": (lambda t, n=name: _trigger_evidence(n, t)[0] in ("skill", "wrapper")),
+            "matches":    (lambda t: True),
+            "describe":   (lambda t, n=name: _describe_skill_execution(n, t)),
+        })
+
+    # ----- writes to a path the block names
+    named_paths = _named_paths(content)
+    if named_paths:
+        predicates.append({
+            "kind": "writes-to-named-path",
+            "strength": "strong",
+            "label": "wrote a file the block names",
+            "applicable": (lambda t, ps=named_paths: bool(_named_path_writes(ps, t))),
+            "matches":    (lambda t: True),
+            "describe":   (lambda t, ps=named_paths: (
+                              "wrote " + ", ".join(dict.fromkeys(
+                                  f"`{w}`" for _n, w in _named_path_writes(ps, t)))
+                              if _named_path_writes(ps, t)
+                              else "none of " + ", ".join(f"`{p}`" for p in ps) + " was written this run")),
+        })
+
+    # ----- template the block spells out, reproduced in a written file
+    literals = _template_literals(content)
+    if len(literals) >= 2:
+        own = (file or {}).get("abs_path")
+        predicates.append({
+            "kind": "template-echo",
+            "strength": "strong",
+            "label": "template reproduced in a written file",
+            "applicable": (lambda t, ls=literals, o=own: bool(_template_echo_hits(ls, t, exclude_path=o))),
+            "matches":    (lambda t: True),
+            "describe":   (lambda t, ls=literals, o=own: (
+                              "; ".join(f"`{h['path']}` carries "
+                                        + ", ".join(f"`{lit}`" for lit in h["literals"][:4])
+                                        for h in _template_echo_hits(ls, t, exclude_path=o))
+                              or "no file written this run reproduces the template")),
+        })
 
     # ----- command mention: backtick'd command tokens, or known shell commands in prose
     cmd_tokens = set()
-    for tok in _extract_backtick_tokens(content):
+    for tok in _extract_backtick_tokens(_strip_table_rows(content)):
         # only care about things that look like commands (single word, lowercase, no slashes-leading)
         first = tok.split()[0]
         if first.startswith("/"):
             continue
-        if re.fullmatch(r"[a-z][\w.-]*", first) and len(first) >= 2:
+        if _looks_like_command_word(first):
             cmd_tokens.add(first)
-    # well-known command words even without backticks
-    for word in ("pbcopy", "xclip", "xsel", "printf", "echo"):
-        if re.search(rf"\b{word}\b", content):
-            cmd_tokens.add(word)
-    # drop things that aren't commands
-    NON_CMDS = {"the", "a", "an", "and", "or", "if", "see", "use", "any", "all", "rule", "always",
-                "never", "must", "i", "you", "we", "it", "is", "are", "was", "were", "this",
-                "that", "these", "those", "trigger", "yaml", "json", "md", "ts", "tsx", "py",
-                "argparse", "claude.md", "skill.md"}
-    cmd_tokens = {c for c in cmd_tokens if c.lower() not in NON_CMDS}
+    # A whole prescribed command that ran verbatim is a different claim from
+    # "a program this block names ran somewhere": `yarn test` matching is the
+    # documented gate having been run, while `yarn` matching is not. So the
+    # multi-token fenced commands leave the weak tier for `command-echo` -
+    # emitting both would put the same command in two evidence rows.
+    # An untagged fence counts for the echo tier only. The tag requirement
+    # exists to stop `import re` being read as a program, and a candidate that
+    # must then have *run verbatim* cannot make that mistake - which is what
+    # the palletizer AGENTS.md anchor needs, its `just` recipes sitting in a
+    # bare ``` fence while every one of them ran.
+    cmd_tokens.update(c for c in _extract_fenced_commands(content) if " " not in c)
+    echo_cmds = sorted({c for c in _fenced_commands(content, None) if " " in c})
+    for cmd in echo_cmds:
+        predicates.append({
+            "kind": "command-echo",
+            "strength": "strong",
+            "cmd": cmd,
+            "label": f"`{cmd}` ran verbatim",
+            "applicable": (lambda t, c=cmd: _command_echo_count(c, t["bash_cmds"]) > 0),
+            "matches":    (lambda t: True),
+            "describe":   (lambda t, c=cmd: (
+                              f"`{c}` ran verbatim {_command_echo_count(c, t['bash_cmds'])}× this session"
+                              if _command_echo_count(c, t["bash_cmds"])
+                              else f"`{c}` did not run this session")),
+        })
+
+    # Five shell words (`pbcopy`, `xclip`, `xsel`, `printf`, `echo`) used to be
+    # harvested from bare prose here, hardcoded because of one user's clipboard
+    # rule. A word list of "commands worth noticing" is the same
+    # reverse-engineering the strong predicates were: it says nothing about the
+    # next user's rules, and backtick-free prose naming a program is prose.
     for cmd in sorted(cmd_tokens):
         predicates.append({
             "kind": "command-mention",
@@ -1911,33 +2490,15 @@ def derive_predicates(block):
                               else f"`{c}` did not run this session")),
         })
 
-    # ----- end-of-message rule: summary-after-edits etc.
-    if (re.search(r"end\s+your\s+response", content_l)
-            or re.search(r"\b\d-\d\s+sentences?\b", content)
-            or re.search(r"\buser-facing summary\b", content_l)
-            or "end-of-implementation" in title_l):
-        def _fires(t):
-            la = t["last_assistant"]
-            if not la:
-                return False
-            has_summary = any(k in la.lower() for k in SUMMARY_KEYWORDS) or len(la.strip().split("\n\n")[-1]) > 0
-            paras = [p.strip() for p in la.strip().split("\n\n") if p.strip()]
-            final_para = paras[-1] if paras else ""
-            sentences = len(re.findall(r"[.!?]+", final_para))
-            has_tech = bool(CODE_EXT.search(la)) or bool(re.search(r"\b(controller|service|schema|route)\b", la.lower()))
-            return has_summary and sentences <= 4 and not has_tech
-
-        predicates.append({
-            "kind": "end-of-message",
-            "strength": "strong",
-            "label": "summary at end of response",
-            "applicable": (lambda t: bool(t["edits"])),
-            "matches":    _fires,
-            "describe":   (lambda t: (
-                              f"{len(t['edits'])} edit(s) made; "
-                              + f"final message: {len(t['last_assistant'])} chars, "
-                              + f"final paragraph ~{len(re.findall(r'[.!?]+', (t['last_assistant'].strip().split(chr(10)+chr(10))[-1] if t['last_assistant'].strip() else '')))} sentences")),
-        })
+    # A rule about the *shape of the response* ("close with a short
+    # user-facing summary") used to fire here on its author's own phrasing -
+    # "end your response", "1-3 sentences", "user-facing summary" - and then
+    # scored the wording of the closing paragraph against a hardcoded notion of
+    # what an implementation detail is. It condemned a compliant three-sentence
+    # summary in every implementation session audited. Its checkable half is a
+    # sentence count and its load-bearing half is a judgement about meaning, so
+    # a compiled record carries it: `scope: "communication"` in the `judged`
+    # bucket, which reports as unchecked until the opt-in judge tier runs it.
 
     # A "never X" rule used to become a shell-command predicate here: the word
     # after `never` was looked up among the session's bash commands, so a rule
@@ -1989,13 +2550,6 @@ def _block_keywords(content, prompt=""):
     return out
 
 
-def _is_topical(text, keywords, threshold=1):
-    if not text or not keywords:
-        return False
-    tl = text.lower()
-    return sum(1 for k in keywords if k in tl) >= threshold
-
-
 def _last_sentence_with_causal(text):
     """Pick the most causally-loaded sentence in a passage (or first sentence)."""
     sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z])", text.strip())
@@ -2011,23 +2565,131 @@ def _moment(t, kind, verdict, label, text="", **extra):
     return {"t": t, "kind": kind, "verdict": verdict, "label": label, "text": text, **extra}
 
 
-def _find_intent_before(seg_idx, segs, keywords, max_back=6):
-    """Walk backwards in segs from seg_idx to find an assistant text segment that's topical to the block.
-    Returns (text, ts) or (None, None)."""
-    i = seg_idx - 1
-    steps = 0
-    while i >= 0 and steps < max_back:
-        s = segs[i]
-        if s["role"] == "assistant" and s["kind"] == "text":
-            if _is_topical(s["text"], keywords) or CAUSAL_RE.search(s["text"]):
-                return _last_sentence_with_causal(s["text"]), s["t"]
-            steps += 1
-        i -= 1
-    return None, None
+# A moment card is a causal claim: TRIGGER -> INTENT -> ACTION reads as "the
+# block caused this". Lexical overlap cannot support one - a design-system
+# block cited a rate-limiting review because both say "design", and a
+# tech-stack table cited an Effect-vs-react-query discussion because both say
+# "React" - so the two non-causal kinds below carry their own disclaimer in the
+# card text rather than relying on the reader knowing which kinds are weak.
+CO_OCCURRENCE_NOTE = ("Co-occurrence only: the block and the run mention the same thing. "
+                      "Nothing in the trace ties the behaviour back to the block.")
+
+THINKING_SELF_REPORT_NOTE = ("Self-report, not evidence: models describe reasoning they did "
+                             "not do (measured faithfulness under 20%), so this corroborates "
+                             "the verdict at most and never sets it.")
+
+
+def _keyword_overlap(content, trace):
+    """The block's own words that also appear in the assistant's text.
+
+    One matcher for the badge and the card: `assess_block` tokenized the block
+    one way and the loose-keyword card another, so a block could sit `unused`
+    ("no keyword overlap with the assistant's reasoning") above a card counting
+    three shared words. Returns (tokens, hits) - `tokens` keeps its duplicates
+    because the reason line quotes its length as the denominator.
+    """
+    keywords = [w.lower() for w in re.findall(r"\b[a-zA-Z]{5,}\b", content)][:8]
+    corpus = (trace["all_assistant_text"] or "").lower()
+    return keywords, [k for k in dict.fromkeys(keywords) if k in corpus]
+
+
+def _structural_intents(file, trace):
+    """INTENT cards from harness records, never from keyword-ranked prose.
+
+    The old builders filled this slot with whichever assistant paragraph
+    scored highest on the block's keywords, which is how Decision Memory ended
+    up narrated by YIN pitch-detection math. The only antecedents admitted here
+    are records the harness wrote: the Read that delivered the file, and - via
+    the trigger card its own builder emits - the Skill call or slash-command
+    expansion that loaded it.
+    """
+    abs_target = _normalize_path(file.get("abs_path") or file.get("path"))
+    if not abs_target:
+        return []
+    out = []
+    for r in trace.get("read_calls", []):
+        fp = (r.get("input") or {}).get("file_path", "")
+        if _normalize_path(fp) != abs_target:
+            continue
+        out.append(_moment(r.get("t"), "intent", None,
+                           "Read delivered this file", text=f"Read({fp})"))
+        if len(out) >= 3:
+            break
+    return out
+
+
+def _thinking_join_tokens(block, file):
+    """The block's citable, non-English tokens: `/name`, paths, whole commands.
+
+    Deliberately not `_block_keywords`: prose overlap is the thing this phase
+    stops trusting, and it is loose enough to be useless here - the two
+    readable thinking blocks in this repo's own logs matched an
+    `/implement-plan` pointer on the words "agent" and "review". A `/name`, a
+    path or a multi-word command is not something a paragraph of unrelated
+    reasoning contains by accident, and none of the three is English, which
+    the keyword tier is.
+
+    Every fence is read, not only the shell-tagged ones, for the reason
+    `_fenced_commands` documents: the caller demands the candidate appear
+    verbatim, so a mis-parsed `import re` cannot pass as a match.
+    """
+    tokens = set()
+    name = (file.get("name") or "").strip()
+    if file.get("kind") in ("skill", "command") and name:
+        tokens.add("/" + name)
+    tokens.update(_named_paths(block["content"]))
+    tokens.update(c for c in _fenced_commands(block["content"], None) if " " in c)
+    # Kept as written, matched case-insensitively: a card citing `agent.md`
+    # for a block that says `AGENT.md` sends the reader grepping for a string
+    # that is not in either text.
+    return {t for t in tokens if len(t) >= 3}
+
+
+def _thinking_corroboration(block, file, trace, segs, limit=2):
+    """Readable extended thinking that names something this block names.
+
+    Availability is mixed per model and CLI version - officially the field is
+    encrypted and empty, empirically 43 of 82 blocks were readable in a recent
+    transcript - so absence must cost nothing: this returns [] and no status
+    moves. Presence is not an evidence tier either; see
+    THINKING_SELF_REPORT_NOTE.
+    """
+    # Most scopes have no readable thinking at all, and this runs per block per
+    # turn: extracting the block's tokens first would re-parse every fence in
+    # every rule document for nothing.
+    readable = [s for s in segs
+                if s.get("kind") == "thinking" and (s.get("text") or "").strip()]
+    if not readable:
+        return []
+    tokens = _thinking_join_tokens(block, file)
+    if not tokens:
+        return []
+    out = []
+    for s in readable:
+        text = s["text"].strip()
+        # Right-bounded like `_command_echo_count`: `/cp` must not be found
+        # inside `/cpu`, nor `yarn test` inside `yarn testing`.
+        low = text.lower()
+        hits = sorted(t for t in tokens
+                      if re.search(re.escape(t.lower()) + r"(?![\w-])", low))
+        if not hits:
+            continue
+        out.append(_moment(s.get("t"), "corroboration", None,
+                           f"Agent's own thinking names {', '.join(hits[:3])} (self-report)",
+                           text=THINKING_SELF_REPORT_NOTE + "\n" + text[:400]))
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _ranked_topical_segments(segs, keywords, limit=3):
-    """Rank assistant text segments by topical+causal score; return top N."""
+    """Rank assistant text segments by topical+causal score; return top N.
+
+    Only `_classify_pair` may use this: ranking prose by keyword overlap
+    answers "was this topic live in the session", which is all a duplicate pair
+    needs. It must never fill a moment card again - the ranking is what let a
+    tech-stack table narrate itself with an Effect-vs-react-query discussion.
+    """
     if not keywords:
         return []
     scored = []
@@ -2053,36 +2715,28 @@ def _moments_for_skill_or_command(block, file, trace, segs, kind_hint):
     name = (file.get("name") or "").lower()
     moments = []
     user_prompt = trace["user_prompt"] or ""
-    triggered_in_prompt = _is_triggered(name, user_prompt)
-    triggered_via_wrapper = any(w["name"].lower() == name for w in trace["cmd_wrappers"])
-    skill_calls = [c for c in trace["calls"]
-                   if c["name"] == "Skill"
-                   and (c["input"].get("skill") or "").strip().lstrip("/").lower() == name]
+    source, rec = _trigger_evidence(name, trace)
 
-    if triggered_in_prompt or triggered_via_wrapper or skill_calls:
+    if source:
         # TRIGGER ✓
-        if skill_calls:
-            sc = skill_calls[0]
-            moments.append(_moment(sc.get("ts"), "trigger", "yes",
+        if source == "skill":
+            moments.append(_moment(rec.get("ts"), "trigger", "yes",
                                    f"`Skill` tool invoked /{name}",
-                                   text=json.dumps(sc.get("input", {}))[:400]))
-        elif triggered_via_wrapper:
-            w = next(w for w in trace["cmd_wrappers"] if w["name"].lower() == name)
-            moments.append(_moment(w["t"], "trigger", "yes",
+                                   text=json.dumps(rec.get("input", {}))[:400]))
+        elif source == "wrapper":
+            moments.append(_moment(rec["t"], "trigger", "yes",
                                    f"User invoked /{name} via slash-command",
-                                   text=w["text"]))
+                                   text=rec["text"]))
         else:
-            moments.append(_moment(None, "trigger", "yes",
-                                   f"User prompt mentioned /{name}",
-                                   text=user_prompt[:400]))
+            # A `/name` the user typed with no expansion and no `Skill` call
+            # behind it is a mention, which is why `skill-invocation` refuses
+            # it as evidence of execution. A ✓ TRIGGER here would put a
+            # satisfied green step above the weaker badge that refusal earns.
+            moments.append(_moment(None, "co-occurrence", None,
+                                   f"User prompt mentioned /{name}, but nothing shows it running",
+                                   text=f"{CO_OCCURRENCE_NOTE}\n{user_prompt[:400]}"))
 
-        # Topical assistant segments after trigger → INTENT
-        keywords = _block_keywords(block["content"], user_prompt)
-        intents = _ranked_topical_segments(segs, keywords, limit=2)
-        for s in intents:
-            moments.append(_moment(s["t"], "intent", None,
-                                   "Agent reasoning",
-                                   text=_last_sentence_with_causal(s["text"])))
+        moments.extend(_structural_intents(file, trace))
     else:
         # NON-EVENT explaining
         reason = (f"This {kind_hint} only loads when the user invokes `/{name}` "
@@ -2116,121 +2770,71 @@ def _moments_for_subagent(block, file, trace, segs):
     return moments
 
 
-def _moments_for_path_table(block, file, trace, segs, predicates):
-    """Path-table rule: list each row's match status against cwd."""
-    moments = []
-    cwd = trace["cwd"] or "(unknown)"
-    table_pred = next((p for p in predicates if p["kind"] == "path-table"), None)
-    if not table_pred:
-        return moments
-    # Re-extract rows from content (mirrors derive_predicates)
-    rows = []
-    for line in block["content"].splitlines():
-        cols = [c.strip() for c in line.strip().strip("|").split("|")]
-        if len(cols) >= 3 and not all(set(c) <= set("-: ") for c in cols):
-            joined = " ".join(cols).lower()
-            if "project path contains" in joined or "switch command" in joined:
-                continue
-            m = re.search(r"`([^`]+)`", cols[0])
-            tok = m.group(1) if m else cols[0]
-            cmd_m = ""
-            for col in cols:
-                cm = re.search(r"`([^`]+)`", col)
-                if cm and any(s in cm.group(1) for s in [" ", "-"]):
-                    cmd_m = cm.group(1)
-                    break
-            rows.append((tok, cmd_m))
-    matched_rows = [(tok, cmd) for tok, cmd in rows if tok and tok in cwd]
-
-    moments.append(_moment(None, "condition", "yes" if matched_rows else "no",
-                           f"cwd vs path table",
-                           text=f"cwd: {cwd}\nrows: " + ", ".join(f"`{t}`" for t, _ in rows)))
-
-    if not matched_rows:
-        moments.append(_moment(None, "non-event", "no",
-                               "Rule had no chance to fire",
-                               text=f"None of the table rows ({', '.join(f'`{t}`' for t, _ in rows)}) "
-                                    f"matched cwd `{cwd}`. Consider scoping this as a path-rule "
-                                    "instead of a global rule."))
-        return moments
-
-    for tok, cmd in matched_rows:
-        # Did the prescribed command run?
-        ran = next((bc for bc in trace["bash_cmds"] if cmd and cmd in bc), None)
-        if ran:
-            moments.append(_moment(None, "action", "yes",
-                                   f"prescribed command for `{tok}` ran",
-                                   text=ran[:400]))
-        else:
-            # Was *something* (e.g., gh) attempted that should have been preceded by it?
-            related = next((bc for bc in trace["bash_cmds"] if "gh " in bc or bc.startswith("gh ")), None)
-            if related:
-                moments.append(_moment(None, "violation", "no",
-                                       f"`{tok}` matched but switch command not run",
-                                       text=f"Found a `gh` command without preceding switch:\n{related[:400]}"))
-            else:
-                moments.append(_moment(None, "omission", None,
-                                       f"`{tok}` matched but command was unnecessary",
-                                       text=f"No `gh` command this session, so no switch needed."))
-    return moments
-
-
 def _moments_for_command_mention(block, file, trace, segs, predicates):
-    """Emit ACTION moments for each Bash call invoking a mentioned command. Pair with intent."""
-    moments = []
-    cmds = sorted({p["cmd"] for p in predicates if p["kind"] == "command-mention"})
-    keywords = _block_keywords(block["content"], trace["user_prompt"])
+    """One co-occurrence card per mentioned command that ran.
 
-    bash_calls_in_segs = [(i, s) for i, s in enumerate(segs)
-                          if s["kind"] == "tool_use" and s.get("name") == "Bash"]
-    seen = set()
-    for cmd in cmds:
-        for i, s in bash_calls_in_segs:
-            bc = s["input"].get("command", "")
-            if not re.search(rf"\b{re.escape(cmd)}\b", bc):
-                continue
-            key = (cmd, s["t"], bc[:80])
-            if key in seen: continue
-            seen.add(key)
-            # intent before
-            intent_text, intent_t = _find_intent_before(i, segs, keywords)
-            if intent_text:
-                moments.append(_moment(intent_t, "intent", None,
-                                       "Agent reasoning",
-                                       text=intent_text))
-            desc = s["input"].get("description") or ""
-            text = (f"$ {bc[:400]}" + (f"\n# {desc}" if desc else ""))
-            moments.append(_moment(s["t"], "action", "yes", f"Bash ran `{cmd}`", text=text))
-            if len(moments) > 30:
-                break
+    A block naming `printf` and a run that used `printf` share a name and
+    nothing more, so this is deliberately not an ACTION card paired with the
+    nearest topical paragraph - that pairing manufactured a motive for every
+    command the block happened to spell. The citation survives the reframing:
+    the card still names the run count and shows the first command verbatim,
+    which is the part a reader can check.
+    """
+    moments = []
+    for cmd in sorted({p["cmd"] for p in predicates if p["kind"] == "command-mention"}):
+        runs = [s for s in segs
+                if s["kind"] == "tool_use" and s.get("name") == "Bash"
+                and re.search(rf"\b{re.escape(cmd)}\b", s["input"].get("command", ""))]
+        if not runs:
+            continue
+        first = runs[0]["input"].get("command", "")
+        moments.append(_moment(runs[0]["t"], "co-occurrence", None,
+                               f"`{cmd}` ran {len(runs)}× this run (name overlap only)",
+                               text=f"{CO_OCCURRENCE_NOTE}\n$ {first[:400]}"))
+        if len(moments) >= 8:
+            break
     return moments
 
 
-def _moments_for_end_of_message(block, file, trace, segs):
+STRUCTURAL_KINDS = ("writes-to-named-path", "template-echo", "command-echo")
+
+
+def _moments_for_structural(block, file, trace, segs, predicates):
+    """ACTION cards for the artifacts a structural predicate cites.
+
+    Without these a block lifted by a write or a verbatim command run fell
+    through to the loose-keyword cards, so the reader got a topical-overlap
+    narrative underneath a badge earned by something else entirely - the same
+    badge-versus-card contradiction the trigger matcher was unified to remove.
+    """
     moments = []
-    if not trace["edits"]:
-        moments.append(_moment(None, "non-event", "no",
-                               "No edits → rule didn't apply",
-                               text="The rule applies only when code is modified. No Edit/Write/MultiEdit "
-                                    "calls in this session, so the rule had no chance to fire."))
-        return moments
-    moments.append(_moment(None, "applicability", "yes",
-                           f"{len(trace['edits'])} code edits → rule applies",
-                           text=f"Edits across {len(set(c['input'].get('file_path','') for c in trace['edits']))} files."))
-    la = trace["last_assistant"]
-    if la:
-        paras = [p.strip() for p in la.strip().split("\n\n") if p.strip()]
-        final_para = paras[-1] if paras else ""
-        sentences = len(re.findall(r"[.!?]+", final_para))
-        has_summary = any(k in la.lower() for k in SUMMARY_KEYWORDS) or sentences > 0
-        has_tech = bool(CODE_EXT.search(la)) or bool(re.search(r"\b(controller|service|schema|route)\b", la.lower()))
-        compliant = has_summary and sentences <= 4 and not has_tech
-        last_ts = next((s["t"] for s in reversed(segs) if s["role"] == "assistant" and s["kind"] == "text"), None)
-        moments.append(_moment(last_ts,
-                               "compliance" if compliant else "violation",
-                               "yes" if compliant else "no",
-                               "Final assistant message",
-                               text=la.strip()[-700:]))
+    named = _named_paths(block["content"])
+    # Capped like the command loop below: a block naming a directory can join
+    # every file written under it, and a card per file buries the verdict.
+    writes = list(dict.fromkeys(w for _n, w in _named_path_writes(named, trace)))
+    for w in writes[:12]:
+        ch = next((c for c in (trace.get("written_chunks") or ()) if c["path"] == w), None)
+        moments.append(_moment(ch["t"] if ch else None, "action", "yes",
+                               f"Wrote `{w}`, a path this block names",
+                               text=((ch["text"][:400]) if ch else "")))
+    hits = _template_echo_hits(_template_literals(block["content"]), trace,
+                               exclude_path=file.get("abs_path"))
+    for hit in hits[:12]:
+        moments.append(_moment(hit["t"], "action", "yes",
+                               f"`{hit['path']}` reproduces this block's template",
+                               text=", ".join(hit["literals"][:6])))
+    echo_cmds = sorted({p["cmd"] for p in predicates if p["kind"] == "command-echo"})
+    for s in segs:
+        if s["kind"] != "tool_use" or s.get("name") != "Bash":
+            continue
+        bc = s["input"].get("command", "")
+        for cmd in echo_cmds:
+            if _command_echo_count(cmd, [bc]):
+                moments.append(_moment(s["t"], "action", "yes",
+                                       f"Bash ran `{cmd}` verbatim", text=f"$ {bc[:400]}"))
+                break
+        if len(moments) > 30:
+            break
     return moments
 
 
@@ -2300,22 +2904,24 @@ def _moments_for_read_driven(block, file, trace, segs):
                 text=_last_sentence_with_causal(intent_text),
             ))
 
-        # Encrypted-thinking hint: count thinking blocks between the user prompt
-        # and this Read. Their content is empty (Anthropic encrypts extended-
-        # thinking), but presence + duration is meaningful.
-        thinking_segs = [s for s in segs[prev_user_idx + 1:r["seg_idx"]]
-                         if s.get("kind") == "thinking"]
-        if thinking_segs and not (intent_text and len(intent_text.strip()) >= 20):
+        # Encrypted-thinking hint: count the *unreadable* thinking blocks
+        # between the user prompt and this Read. Presence + duration is all
+        # they offer. Blocks that did come through readable are left to
+        # `_thinking_corroboration`, or this card would report reasoning as
+        # unreadable while the text of it sits two cards below.
+        unreadable = [s for s in segs[prev_user_idx + 1:r["seg_idx"]]
+                      if s.get("kind") == "thinking" and not (s.get("text") or "").strip()]
+        if unreadable and not (intent_text and len(intent_text.strip()) >= 20):
             # Compute duration from first thinking timestamp to the Read timestamp.
-            t0 = parse_iso(thinking_segs[0].get("t"))
+            t0 = parse_iso(unreadable[0].get("t"))
             t1 = parse_iso(r.get("t"))
             dur = ""
             if t0 and t1:
                 secs = max(0, int((t1 - t0).total_seconds()))
                 dur = f", ~{secs}s" if secs else ""
             moments.append(_moment(
-                thinking_segs[0].get("t"), "thinking-gap", None,
-                f"{len(thinking_segs)} encrypted thinking block{'s' if len(thinking_segs) > 1 else ''}{dur}",
+                unreadable[0].get("t"), "thinking-gap", None,
+                f"{len(unreadable)} encrypted thinking block{'s' if len(unreadable) > 1 else ''}{dur}",
                 text="",  # nothing readable to show
             ))
 
@@ -2334,19 +2940,34 @@ def _moments_for_read_driven(block, file, trace, segs):
 
 
 def _moments_for_loose_keyword(block, file, trace, segs):
-    moments = []
-    keywords = _block_keywords(block["content"], trace["user_prompt"])
-    intents = _ranked_topical_segments(segs, keywords, limit=3)
-    if not intents:
-        moments.append(_moment(None, "non-event", "no",
-                               "No topical reasoning detected",
-                               text="No assistant text segment had ≥2 distinctive keywords from this block."))
-        return moments
-    for s in intents:
-        moments.append(_moment(s["t"], "intent", None,
-                               "Agent reasoning (topical)",
-                               text=_last_sentence_with_causal(s["text"])))
-    return moments
+    """The one card a block earns when its only evidence is shared wording.
+
+    This used to rank the assistant's paragraphs by keyword overlap and file
+    the top three as INTENT, so a Figma design-system block got a
+    TRIGGER-shaped narrative built out of a rate-limiting review. There is no
+    narrative to tell here: the honest report is which words the two texts
+    share, and that sharing them means nothing.
+    """
+    _keywords, shared = _keyword_overlap(block["content"], trace)
+    # The ≥2 floor is `assess_block`'s, not a second one: one shared word is
+    # noise, and a card counting three of them under an `unused` badge reading
+    # "no keyword overlap" is the badge-versus-card contradiction the trigger
+    # matcher was unified to remove.
+    if len(shared) < 2:
+        return [_moment(None, "non-event", "no",
+                        "No topical reasoning detected",
+                        # Says what was measured, because the old wording
+                        # ("no assistant text segment had ≥2 distinctive
+                        # keywords") described a per-segment ranking that no
+                        # longer runs, and a card nobody can check against the
+                        # badge above it is the failure this phase is about.
+                        text=f"Overlap with the assistant's text: {len(shared)} of "
+                             f"{len(_keywords)} scanned words. Two are the floor for "
+                             "even a co-occurrence note.")]
+    return [_moment(None, "co-occurrence", None,
+                    f"{len(shared)} of the block's words also appear in the run's text",
+                    text=f"{CO_OCCURRENCE_NOTE}\nShared wording: "
+                         + ", ".join(shared[:12]))]
 
 
 def assemble_moments(block, file, trace, predicates):
@@ -2372,24 +2993,18 @@ def assemble_moments(block, file, trace, predicates):
         moments.extend(_moments_for_read_driven(block, file, trace, segs))
     else:
         # global / project / rule / reference: derive from predicates
-        if any(p["kind"] == "path-table" for p in predicates):
-            moments.extend(_moments_for_path_table(block, file, trace, segs, predicates))
         if any(p["kind"] == "command-mention" for p in predicates):
             moments.extend(_moments_for_command_mention(block, file, trace, segs, predicates))
-        if any(p["kind"] == "end-of-message" for p in predicates):
-            moments.extend(_moments_for_end_of_message(block, file, trace, segs))
+        if any(p["kind"] in STRUCTURAL_KINDS for p in predicates):
+            moments.extend(_moments_for_structural(block, file, trace, segs, predicates))
         # Trigger predicate (e.g., # graphify registration in CLAUDE.md): defer to skill-style detection
         if any(p["kind"] == "trigger" for p in predicates):
             for p in [p for p in predicates if p["kind"] == "trigger"]:
                 cmd = p.get("cmd", "")
-                # Same evidence order as the skill files themselves, so a
-                # CLAUDE.md pointer to `/foo` and foo's own SKILL.md can never
-                # disagree about whether foo fired.
-                bare = cmd.lstrip("/")
-                fired = _is_triggered(bare, trace["user_prompt"])
-                wrapper = any(f"/{w['name'].lower()}" == cmd for w in trace["cmd_wrappers"])
-                called = bare in _skill_tool_names(trace["calls"])
-                if fired or wrapper or called:
+                # The predicate's own matcher, so a CLAUDE.md pointer to
+                # `/foo`, foo's own SKILL.md and the badge above this card can
+                # never disagree about whether foo fired.
+                if _trigger_evidence(cmd, trace)[0]:
                     moments.append(_moment(None, "trigger", "yes",
                                            f"`{cmd}` was invoked",
                                            text=trace["user_prompt"][:400]))
@@ -2402,7 +3017,13 @@ def assemble_moments(block, file, trace, predicates):
             if file_kind == "reference":
                 moments.extend(_moments_for_read_driven(block, file, trace, segs))
             else:
-                moments.extend(_moments_for_loose_keyword(block, file, trace, segs))
+                # The lexical tier gets exactly the one card that builder
+                # returns: corroboration is appended below only where there is
+                # something for it to corroborate, because a second card here
+                # starts reassembling the narrative this tier cannot support.
+                return _moments_for_loose_keyword(block, file, trace, segs)
+
+    moments.extend(_thinking_corroboration(block, file, trace, segs))
 
     # Dedup by (kind, label, t, text first 200 chars) preserving first occurrence.
     seen = set()
@@ -2572,6 +3193,40 @@ def _is_strong(predicate):
     return predicate.get("strength", "strong") == "strong"
 
 
+def _is_exercised(predicate, trace):
+    """Was the behaviour this predicate judges actually attempted this scope?
+
+    Applicability answers "could the rule have fired"; exercise answers "did
+    the run do the kind of thing the rule is about". They part company for a
+    path-conditional rule, whose precondition is the cwd: without this gate a
+    turn that ran no `gh` command at all was reported as a GitHub-account
+    violation, which is how a dozen compliant turns ended up under a red
+    session badge. Predicates whose precondition *is* the exercise (a trigger
+    that was typed, edits that were made) need no separate answer.
+    """
+    check = predicate.get("exercised")
+    return check(trace) if check else predicate["applicable"](trace)
+
+
+def _ran_any_program(programs, bash_cmds):
+    """Did any of these programs run as a word in some bash command?
+
+    A token that does not start with a word character (`./scripts/switch.sh`)
+    is matched as a plain substring: `\\b` in front of it anchors against the
+    preceding character and would never match, reporting a rule as unexercised
+    however often its command ran.
+    """
+    for p in programs:
+        if not p:
+            continue
+        pattern = re.escape(p)
+        if re.match(r"\w", p):
+            pattern = r"\b" + pattern
+        if any(re.search(pattern, bc) for bc in bash_cmds):
+            return True
+    return False
+
+
 def _fired_strongly(predicate, trace):
     """A strong predicate whose precondition was met and whose rule was followed.
 
@@ -2676,12 +3331,17 @@ def assess_block(block, file, trace):
                                 "Never reached the model", text=reason)],
         }
 
-    predicates = derive_predicates(block)
+    predicates = derive_predicates(block, file)
     strong = [p for p in predicates if _is_strong(p)]
     weak = [p for p in predicates if not _is_strong(p)]
     applicable = [p for p in strong if p["applicable"](trace)]
+    exercised = [p for p in applicable if _is_exercised(p, trace)]
     fired_applicable = [p for p in applicable if p["matches"](trace)]
-    unfired_applicable = [p for p in applicable if not p["matches"](trace)]
+    # Blame is limited to exercised predicates while credit is not: an
+    # applicable rule the run never exercised has nothing to be unsatisfied
+    # about, and counting it as unsatisfied is what dragged a fully compliant
+    # block down to `used-partial`.
+    unfired_exercised = [p for p in exercised if not p["matches"](trace)]
     weak_hits = [p for p in weak if p["applicable"](trace) and p["matches"](trace)]
 
     evidence = []
@@ -2693,7 +3353,7 @@ def assess_block(block, file, trace):
 
     # Only strong predicates can reach the used/ignored end of the scale.
     if applicable:
-        if fired_applicable and not unfired_applicable:
+        if fired_applicable and not unfired_exercised:
             status = "used"
             reason = (f"{len(fired_applicable)} predicate(s) applied and were satisfied: "
                       + ", ".join(p["label"] for p in fired_applicable))
@@ -2701,12 +3361,18 @@ def assess_block(block, file, trace):
             status = "used-partial"
             reason = (f"Mixed: {len(fired_applicable)} satisfied "
                       f"({', '.join(p['label'] for p in fired_applicable)}); "
-                      f"{len(unfired_applicable)} applied but unsatisfied "
-                      f"({', '.join(p['label'] for p in unfired_applicable)}).")
+                      f"{len(unfired_exercised)} applied but unsatisfied "
+                      f"({', '.join(p['label'] for p in unfired_exercised)}).")
+        elif not exercised:
+            status = "dormant"
+            reason = (f"{len(applicable)} predicate(s) applied but were not exercised — "
+                      "the run never did the kind of thing the rule governs, so there was "
+                      "nothing to follow or break: "
+                      + ", ".join(p["label"] for p in applicable))
         else:
             status = "ignored"
-            reason = (f"{len(applicable)} predicate(s) applied but none were satisfied: "
-                      + ", ".join(p["label"] for p in applicable))
+            reason = (f"{len(exercised)} predicate(s) applied but none were satisfied: "
+                      + ", ".join(p["label"] for p in exercised))
     elif weak_hits:
         status = "possibly-referenced"
         reason = ("Weak evidence only — "
@@ -2718,9 +3384,8 @@ def assess_block(block, file, trace):
         reason = ("No predicate's preconditions were met this run — the rule didn't apply. "
                   "Block was loaded into context but could not have fired.")
     else:
-        keywords = [w.lower() for w in re.findall(r"\b[a-zA-Z]{5,}\b", content)][:8]
-        hits_per_kw = {k: trace["all_assistant_text"].lower().count(k) for k in keywords}
-        hits = sum(1 for k, n in hits_per_kw.items() if n > 0)
+        keywords, shared = _keyword_overlap(content, trace)
+        hits = len(shared)
         if keywords and hits >= 2:
             status = "possibly-referenced"
             reason = (f"Weak evidence only — loose keyword match, {hits}/{len(keywords)} "
@@ -2751,14 +3416,20 @@ def assess_block(block, file, trace):
     return out
 
 
+# The file kinds whose prose is a rule the agent agreed to follow, and so the
+# only ones a compile hint or a mechanical extraction has any business on.
+GUIDELINE_KINDS = ("global", "project", "rule")
+
+
 def _rule_check_for(block, file, trace):
     """Run this block's compiled checks, if its document has any."""
     corpus = trace.get("rule_corpus") or {"code": [], "commands": [], "paths": []}
     loaded = rule_checks.checks_for_doc(file.get("abs_path") or "")
     # Mechanical extraction only makes sense on a guidelines document. Reading
     # a file does not make its prose a rule the agent agreed to follow.
-    fallback = file.get("kind") in ("global", "project", "rule")
-    return rule_checks.check_block(block, loaded, corpus, fallback=fallback)
+    fallback = file.get("kind") in GUIDELINE_KINDS
+    return rule_checks.check_block(block, loaded, corpus, fallback=fallback,
+                                   doc_path=file.get("path") or "")
 
 
 def _apply_rule_check(verdict, rule_check):
@@ -2770,25 +3441,120 @@ def _apply_rule_check(verdict, rule_check):
     extracted fallback finding is low confidence by construction and stays a
     note: a false red badge accuses the agent of misconduct it did not commit,
     which is the failure this whole phase exists to prevent.
+
+    A conditional check that reports its obligation *satisfied* is the other
+    half of the same record, and it gives credit for the same reasons a
+    violation takes it away: the rule's antecedent fired, the consequent
+    happened, and the finding names the call. Without it, retiring the prose
+    predicates would have left a session that obeyed a compiled rule a dozen
+    times reading `unused`, and one violating turn would then have repainted
+    the whole session `ignored` - the F-COMBINE failure coming back through the
+    new mechanism.
+
+    Credit is as gated as blame, and deliberately narrower than `clear`.
+    `clear` also covers "the checks ran and matched nothing", which for a
+    forbidden-pattern rule over a coarse scope (any bash command at all, for a
+    shell kind) is the absence of a violation rather than evidence the block
+    was followed - exactly the kind of green this architecture exists to
+    refuse. Only the satisfied stage of a conditional kind says the rule was
+    exercised and met.
     """
     findings = rule_check["findings"]
     violations = [f for f in findings
                   if f["state"] == "violated" and f["confidence"] in ("high", "medium")]
+    satisfied = [f for f in findings
+                 if f.get("stage") == rule_checks.STAGE_SATISFIED
+                 and f["confidence"] in ("high", "medium")]
     if violations:
         first = violations[0]
         verdict["status"] = "ignored"
         verdict["reason"] = (f"Rule check `{first['checkId']}` fired: "
                              f"{first['path']}:{first['line']} — `{first['match'][:120]}`. "
                              + (first["message"] or "This rule was broken in code written this run."))
+    elif (satisfied and rule_check["source"] == "checks-file"
+            # `clear` and not merely "no violation among these findings": a
+            # block also carrying an `unclear` or `acknowledged` finding has a
+            # possible violation on it, and one satisfied sibling check must
+            # not paint over it.
+            and rule_check["state"] == "clear"
+            and verdict["status"] not in ("used", "used-partial", "ignored")):
+        named = ", ".join(f"`{f['checkId']}`" for f in satisfied[:4])
+        verdict["status"] = "used"
+        verdict["reason"] = (f"Reviewed rule check{'s' if len(satisfied) != 1 else ''} "
+                             f"{named} {'were' if len(satisfied) != 1 else 'was'} triggered "
+                             "this run and satisfied.")
+    elif (rule_check["state"] == "not-exercised"
+            and rule_check["source"] == "checks-file"
+            and verdict["status"] == "unused"):
+        # "The rule's precondition never came up" is what `dormant` says, and
+        # a reviewed check is the only thing left that can say it now that the
+        # prose predicates are gone. Leaving the badge at `unused` - "no
+        # predicate derivable, no keyword overlap" - would put two different
+        # claims about one record on one screen.
+        verdict["status"] = "dormant"
+        verdict["reason"] = ("Reviewed rule checks ran, but the run never did the kind of "
+                             "thing this rule governs, so there was nothing to follow or "
+                             "break.")
+    # The finding that decided the status gets a moment card. Without one, a
+    # block the check just painted green or red carries only its lexical card,
+    # whose own text says "nothing in the trace ties the behaviour back to the
+    # block" - the badge and the card contradicting each other, which is the
+    # failure the moment kinds were tiered to remove.
+    decided = (violations or satisfied)[:1] if (violations or satisfied) else []
+    for f in decided:
+        cite = (f"{f['path']}:{f['line']} — {f['match'][:200]}" if f.get("match")
+                else (f.get("message") or ""))
+        verdict["moments"].append(_moment(
+            None, "violation" if violations else "compliance",
+            "no" if violations else "yes",
+            f"Rule check `{f['checkId']}` — {f['state']}",
+            text=f"{f.get('ruleText') or ''}\n{cite}".strip()))
+
     for f in findings:
+        stage = f" ({f['stage']})" if f.get("stage") else ""
+        # A stage report about a conditional that never fired has no call to
+        # quote, and `(tools):0 — ` reads as a citation the reader can go and
+        # check. Its own message is the whole of what is known.
+        text = (f"{f['path']}:{f['line']} — {f['match'][:200]}" if f.get("match")
+                else (f.get("message") or ""))
         verdict["evidence"].append({
-            "label": f"rule check `{f['checkId']}` — {f['state']}",
-            "text": f"{f['path']}:{f['line']} — {f['match'][:200]}",
+            "label": f"rule check `{f['checkId']}` — {f['state']}{stage}",
+            "text": text,
         })
     for nc in rule_check["notCheckable"]:
         verdict["evidence"].append({
             "label": "not mechanically checkable",
             "text": nc.get("why", ""),
+        })
+    # A check pinned to wording the rule no longer carries was applied to
+    # nothing, so this block is unchecked. Leaving that to the page alone read
+    # as silence in the evidence list, which reads as a rule that was followed.
+    for st in rule_check.get("stale") or []:
+        verdict["evidence"].append({
+            "label": f"rule check `{st.get('id', '')}` — stale, not applied",
+            "text": st.get("why", ""),
+        })
+    # The command that closes the gap. A rule nobody compiled is honestly
+    # unchecked; a rule nobody compiled and no way to act on it is a dead end.
+    if rule_check.get("hint"):
+        verdict["evidence"].append({
+            "label": "no reviewed check for this rule",
+            "text": f"{rule_check['hint']}",
+        })
+    # A check whose fixtures no longer reproduce, and a rule whose bucket needs
+    # a judge this run did not have, are both rules that went unchecked. They
+    # are named here rather than left to the page alone: silence about a broken
+    # check reads as a rule that was followed.
+    for d in rule_check.get("demoted") or []:
+        verdict["evidence"].append({
+            "label": f"rule check `{d.get('id', '')}` — demoted to the "
+                     f"`{d.get('bucket', 'judged')}` bucket",
+            "text": d.get("why", ""),
+        })
+    for j in rule_check.get("judged") or []:
+        verdict["evidence"].append({
+            "label": f"rule `{j.get('id', '')}` — bucket `{j.get('bucket', 'judged')}`",
+            "text": j.get("why", ""),
         })
 
 
@@ -2867,12 +3633,16 @@ def chronological_segments(events):
                                 "input": c.get("input", {}), "idx": ev_idx,
                                 "id": c.get("id")})
                 elif c.get("type") == "thinking":
-                    # Claude's extended-thinking blocks. Content is encrypted in
-                    # transcripts (empty `thinking` field + signature), but their
-                    # presence + count + duration is meaningful — useful for
-                    # surfacing "agent reasoned here, even if we can't read it".
+                    # Claude's extended-thinking blocks. Officially the content
+                    # is encrypted (empty `thinking` field + signature), but
+                    # availability is mixed per model and CLI version, so both
+                    # shapes reach us and both are kept: an empty one still
+                    # says "the agent reasoned here" and a readable one is weak
+                    # corroboration. Deliberately absent from
+                    # `assistant_text_segments`, so it can never leak into
+                    # `all_assistant_text` and move a keyword verdict.
                     out.append({"t": ts, "role": "assistant", "kind": "thinking",
-                                "text": "", "idx": ev_idx,
+                                "text": (c.get("thinking") or "").strip(), "idx": ev_idx,
                                 "encrypted": bool(c.get("signature"))})
     return out
 
@@ -2934,6 +3704,8 @@ def build_trace(events, calls, asst_segments, user_prompt):
         for idx, s in enumerate(segs)
         if s["kind"] == "tool_use" and s.get("name") == "Read"
     ]
+    written_chunks = _written_chunks(calls)
+    written_paths = _written_paths({"edits": edits, "bash_cmds": bash_cmds})
     return {
         "bash_cmds": bash_cmds,
         "edits": edits,
@@ -2948,6 +3720,9 @@ def build_trace(events, calls, asst_segments, user_prompt):
         "cmd_wrappers": cmd_wrappers,
         "tool_results_by_call_id": tool_results_by_call_id,
         "read_calls": read_calls_with_seg,
+        "written_chunks": written_chunks,
+        "written_paths": written_paths,
+        "written_text": "\n\n".join(ch["text"] for ch in written_chunks),
     }
 
 
@@ -3319,6 +4094,38 @@ def resolve_session_id(per_session_data, prefix):
 
 # ---------- main ----------
 
+def _split_query_argv(argv, option_strings):
+    """Lift `--query`'s values out of argv before argparse sees them.
+
+    A block id can legitimately start with `-` (`file_slug` slices the 40-char
+    tail of a long path after stripping, so the tail often begins on a
+    separator), and argparse reads any such value as an unknown option whatever
+    `nargs` says. `--` is no help: it disables option parsing for everything
+    after it, so `--field` and `--all` would stop working. A value here ends
+    the list only when it is one of this parser's own option strings, which
+    keeps the ids the tool's own listings print addressable.
+    """
+    rest, query = [], None
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if query is None and tok.startswith("--query"):
+            if tok.startswith("--query="):
+                query = [tok.split("=", 1)[1]]
+                i += 1
+                continue
+            if tok == "--query":
+                query = []
+                i += 1
+                while i < len(argv) and argv[i] not in option_strings:
+                    query.append(argv[i])
+                    i += 1
+                continue
+        rest.append(tok)
+        i += 1
+    return rest, query
+
+
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--transcript", type=Path, default=None,
@@ -3355,7 +4162,16 @@ def parse_args():
     p.add_argument("--all", action="store_true",
                    help="With --query: print every row of a listing instead of the first "
                         f"{QUERY_ROW_LIMIT}.")
-    return p.parse_args()
+    # Read off the parser rather than hand-listed: a list that had to be kept
+    # in step would silently start eating whichever flag someone added next.
+    option_strings = {s for a in p._actions for s in a.option_strings}
+    rest, query = _split_query_argv(sys.argv[1:], option_strings)
+    args = p.parse_args(rest)
+    if query is not None:
+        if not query:
+            p.error("argument --query: expected at least one argument")
+        args.query = query
+    return args
 
 
 def _fmt_dur(sec):
@@ -3486,10 +4302,22 @@ def _find_query_block(session_data, block_id):
 def _moment_verdict(moment):
     """A moment's verdict, readable when it has none.
 
-    Informational moments (agent reasoning, non-events) carry `verdict: null`,
-    which would otherwise print as the literal `None`.
+    Informational moments (non-events, co-occurrence, corroboration) carry
+    `verdict: null`, which would otherwise print as the literal `None`.
     """
     return moment.get("verdict") or "-"
+
+
+def _moment_line(moment):
+    """One moment as the CLI prints it, kind included.
+
+    The kind is what carries the epistemic weight after the moment rework - a
+    co-occurrence card and an action card can read almost alike in their label
+    - and the page shows it as a chip. Dropping it here would leave the CLI
+    unable to say which of the two a reader is looking at.
+    """
+    return (f"{moment.get('kind', '')}: {moment.get('label', '')} "
+            f"— {moment.get('text', '')}")
 
 
 def _query_field(obj, field, valid):
@@ -3497,8 +4325,7 @@ def _query_field(obj, field, valid):
         raise QueryError(f"error: unknown field `{field}`. Valid fields: {', '.join(valid)}")
     value = obj.get(field)
     if field == "moments":
-        return [f"[{_moment_verdict(m)}] {m.get('label', '')} — {m.get('text', '')}"
-                for m in (value or [])]
+        return [f"[{_moment_verdict(m)}] {_moment_line(m)}" for m in (value or [])]
     return [str(value if value is not None else "")]
 
 
@@ -3512,10 +4339,27 @@ def query_sessions(data, show_all=False):
                     f"{_bounded(s.get('promptPreview'), _query_cmd(s['id'], '--field prompt'))}")
     lines = [f"{len(rows)} session(s) in {(data.get('project') or {}).get('cwd', '')}"]
     lines += _bounded_rows(rows, _query_cmd("sessions", "--all"), show_all)
+    # The listing is a fresh reader's first command, so the compile gap belongs
+    # here too: finding it three commands deeper reads as a limit of the tool.
+    hint = _compile_hint_line(data)
+    if hint:
+        lines.append(hint)
     if rows:
         first = (data.get("sessions") or [{}])[0].get("id", "")
         lines.append(f"next: {_query_cmd(first, 'turns')}")
     return lines
+
+
+def _compile_hint_line(data):
+    """The active session's compile hint, or "" when nothing is left to compile.
+
+    One session's hint stands for the listing's because the rule documents are
+    a property of the project, not of a session.
+    """
+    per = data.get("perSession") or {}
+    active = per.get(data.get("activeSessionId")) or {}
+    hint = (active.get("ruleCompile") or {}).get("hint", "")
+    return f"note: {hint}" if hint else ""
 
 
 def query_session(sid, session_data, field=None):
@@ -3523,7 +4367,7 @@ def query_session(sid, session_data, field=None):
     if field:
         return _query_field({"prompt": sess.get("userPrompt")}, field, ("prompt",))
     counts = session_data.get("counts") or {}
-    return [
+    lines = [
         f"session  {sid}",
         f"when     {_when(sess.get('startTime'))}",
         f"turns    {session_data.get('turnCount', 0)}",
@@ -3531,9 +4375,32 @@ def query_session(sid, session_data, field=None):
         f"{counts.get('filesEdited', 0)} files edited",
         f"tokens   {_usage_brief(session_data.get('usage'))}",
         f"prompt   {_bounded(sess.get('userPrompt'), _query_cmd(sid, '--field prompt'))}",
-        f"next: {_query_cmd(sid, 'turns')}",
-        f"      {_query_cmd(sid, 'blocks')}",
     ]
+    lines += _compile_lines(session_data.get("ruleCompile") or {})
+    lines.append(f"next: {_query_cmd(sid, 'turns')}")
+    lines.append(f"      {_query_cmd(sid, 'blocks')}")
+    return lines
+
+
+def _compile_lines(roll):
+    """The compile state of the project's rule documents, one line per document.
+
+    The same baked figures the page shows: a rule the compiler never saw is
+    reported unchecked in both views, and named the same way in both.
+    """
+    if not roll.get("rules"):
+        return []
+    lines = [f"rules    {roll.get('compiled', 0)} of {roll['rules']} compiled, "
+             f"{roll.get('refused', 0)} reviewed as not checkable, "
+             f"{roll.get('uncompiled', 0)} not compiled, "
+             f"{roll.get('stale', 0)} stale"]
+    for d in roll.get("docs") or []:
+        lines.append(f"  {d['path']} — {d['compiled']}/{d['rules']} compiled"
+                     + (f", {d['uncompiled']} not compiled" if d["uncompiled"] else "")
+                     + (f", {d['stale']} stale" if d["stale"] else ""))
+    if roll.get("hint"):
+        lines.append(f"todo     {roll['hint']}")
+    return lines
 
 
 def query_turns(sid, session_data, show_all=False):
@@ -3818,14 +4685,29 @@ def query_block(sid, session_data, block_id, turn=None, field=None):
         lines.append(f"rule     {rule_check['state']} ({rule_check['confidence']} "
                      f"confidence, {rule_check['source']})")
         for f in rule_check.get("findings") or []:
-            lines.append(f"  [{f['state']}] {f['checkId']} — "
-                         f"{f['path']}:{f['line']} {f['match'][:120]}")
+            # The stage is what separates "the rule never came up" from "the
+            # rule was broken", and the page shows it as its own line, so the
+            # CLI has to carry it or the two describe the record differently.
+            stage = f" {f['stage']}" if f.get("stage") else ""
+            cite = f" {f['path']}:{f['line']} {f['match'][:120]}" if f.get("match") else ""
+            lines.append(f"  [{f['state']}]{stage} {f['checkId']} —{cite}")
         for nc in rule_check.get("notCheckable") or []:
             lines.append(f"  [why] {nc.get('why', '')}")
+        # A check pinned to wording the rule no longer carries was applied to
+        # nothing. Saying so here, with the command that re-compiles it, is the
+        # difference between an honest gap and silence.
+        for st in rule_check.get("stale") or []:
+            lines.append(f"  [stale] {st.get('id', '')} — {st.get('why', '')}")
+        for d in rule_check.get("demoted") or []:
+            lines.append(f"  [demoted] {d.get('id', '')} — {d.get('why', '')}")
+        for j in rule_check.get("judged") or []:
+            lines.append(f"  [{j.get('bucket', 'judged')}] {j.get('id', '')} — "
+                         f"{j.get('why', '')}")
+        if rule_check.get("hint"):
+            lines.append(f"  [todo] {rule_check['hint']}")
     lines.append(f"moments  {len(block.get('moments') or [])}")
     for m in block.get("moments") or []:
-        text = _bounded(f"{m.get('label', '')} — {m.get('text', '')}", moments_cmd)
-        lines.append(f"  [{_moment_verdict(m)}] {text}")
+        lines.append(f"  [{_moment_verdict(m)}] {_bounded(_moment_line(m), moments_cmd)}")
     lines.append(f"next: {_query_cmd(sid, block_id, '--field content')}")
     return lines
 
@@ -3969,8 +4851,12 @@ ACTIVE_BLOCK_STATUSES = frozenset({"used", "used-partial", "ignored",
                                    "possibly-referenced", "undelivered"})
 
 
+@functools.lru_cache(maxsize=8192)
 def _resolve_key(path):
     """Filesystem-identity key for a path, for joining activity to a file.
+
+    Memoized: resolving touches the filesystem, and the path-join predicates
+    ask about the same handful of paths once per block.
 
     The activity counters are keyed by the raw `file_path` a tool input carried
     and context files by their `abs_path`, which most - but not all - of the
@@ -4017,12 +4903,13 @@ def _annotate_rollup(rec):
     edits = activity.get("edits", 0)
     total = len(blocks)
     matched = counts["used"] + counts["used-partial"]
+    violated = _violated_count(blocks)
     # A rule that fired is one the trace tied to an outcome, followed or not.
     fired = matched + counts["ignored"]
 
-    if counts["ignored"]:
+    if violated:
         summary = (f"{fired} rule{'s' if fired != 1 else ''} fired, "
-                   f"{counts['ignored']} violated")
+                   f"{violated} violated")
     elif edits:
         summary = (f"edited {edits} time{'s' if edits != 1 else ''}; "
                    f"{matched} of {total} sections matched the trace")
@@ -4042,9 +4929,61 @@ def _annotate_rollup(rec):
     }
 
 
+def _violated_count(blocks):
+    """How many of these blocks a violation was found in, at this scope.
+
+    A scope with both compliant and violating turns combines to `used-partial`
+    (see `combine_verdicts`), so counting `ignored` alone would headline a
+    session "nothing violated" over a turn that plainly did. The aggregate
+    carries `violatingTurns` for exactly that case.
+    """
+    return sum(1 for b in blocks
+               if b["status"] == "ignored" or b.get("violatingTurns"))
+
+
+def _rule_compile_rollup(context_files):
+    """Which of this project's rule documents have reviewed checks, and what to run.
+
+    Read off the documents on disk rather than off the verdicts: an uncompiled
+    rule reports `not-checkable`, which reads as a limit of the tool when the
+    truth is that nobody has compiled it yet. The first report over a project
+    is the onboarding step, so it has to name the count and the one command
+    that closes it.
+    """
+    docs = []
+    totals = Counter()
+    for f in context_files:
+        if f["kind"] not in GUIDELINE_KINDS:
+            continue
+        status = rule_checks.compile_status(
+            f["blocks"], rule_checks.checks_for_doc(f.get("abs_path") or ""))
+        # A document that states no rules has nothing to compile, and listing it
+        # would make every project look like it has pending work.
+        if not status["rules"]:
+            continue
+        totals.update({k: v for k, v in status.items() if isinstance(v, int)})
+        docs.append(dict(status, path=f["path"], kind=f["kind"],
+                         id=file_slug(f["abs_path"])))
+
+    out = {k: totals.get(k, 0)
+           for k in ("rules", "compiled", "refused", "stale", "uncompiled")}
+    pending = [d["path"] for d in docs if d["uncompiled"]]
+    drifted = [d["path"] for d in docs if d["stale"]]
+    if pending:
+        out["hint"] = (f"{out['uncompiled']} rule{'s' if out['uncompiled'] != 1 else ''} "
+                       f"not compiled — {rule_checks.compile_hint(pending)}")
+    elif drifted:
+        out["hint"] = (f"{out['stale']} check{'s' if out['stale'] != 1 else ''} stale — "
+                       f"{rule_checks.compile_hint(drifted, stale=True)}")
+    else:
+        out["hint"] = ""
+    out["docs"] = docs
+    return out
+
+
 def _violation_headline(files):
     """One line naming the most consequential thing a turn or session did."""
-    n = sum(1 for f in files for b in (f.get("blocks") or []) if b["status"] == "ignored")
+    n = sum(_violated_count(f.get("blocks") or []) for f in files)
     if not n:
         return "nothing violated"
     return f"{n} rule{'s' if n != 1 else ''} violated"
@@ -4052,7 +4991,7 @@ def _violation_headline(files):
 
 def _compute_payload(events, calls, asst_segs, args, project_dir, id_prefix="", hook_facts=None,
                      nonresident_paths=None, usage_entries=None, history_chars=None,
-                     nonresident_by_request=None):
+                     nonresident_by_request=None, skill_listing=None):
     """Run the assessment pipeline against an event/call/segment bundle.
 
     Used twice in process_session: once over the full session (the aggregate)
@@ -4079,7 +5018,7 @@ def _compute_payload(events, calls, asst_segs, args, project_dir, id_prefix="", 
     trace = build_trace(events, calls, asst_segs, user_prompt)
 
     context_files = load_context_files(events, calls, project_dir, args, user_prompt,
-                                       hook_facts=hook_facts)
+                                       hook_facts=hook_facts, skill_listing=skill_listing)
     files_out = []
     file_items = []  # (abs_path, chars, rec) parallel to files_out, for pricing
     for f in context_files:
@@ -4182,6 +5121,9 @@ def _compute_payload(events, calls, asst_segs, args, project_dir, id_prefix="", 
             "edits": edits_counter.most_common(),
         },
         "trace": trace,  # caller uses this for compute_duplicates; not emitted
+        # Same as `trace`: the caller bakes this at session scope only. The
+        # rule documents on disk are a property of the project, not of a turn.
+        "ruleCompile": _rule_compile_rollup(context_files),
     }
 
 
@@ -4271,6 +5213,11 @@ def process_session(transcript_path, args):
     # happens across a turn boundary.
     breaks = cache_breaks(series)
     _insert_cache_break_rows(aggregate["timeline"], breaks)
+    # Lifted to the session because the harness injects it once. See
+    # `load_context_files`'s `skill_listing`.
+    session_attach = extract_attachments(events)
+    skill_listing = {"present": session_attach["skill_listing_present"],
+                     "entries": session_attach["skill_listing"]}
     turn_payloads = []
     for t in turns:
         e_slice, c_slice, s_slice = turn_slice(events, calls, asst_segs, t)
@@ -4278,7 +5225,8 @@ def process_session(transcript_path, args):
                              id_prefix=f"turn{t['index']}-", hook_facts=hook_facts,
                              nonresident_paths=nonresident_by_turn.get(t["index"]),
                              usage_entries=usage_for_turn(series, t),
-                             history_chars=history_chars)
+                             history_chars=history_chars,
+                             skill_listing=skill_listing)
         _insert_cache_break_rows(p["timeline"], _breaks_within(breaks, t))
         turn_payloads.append({
             "id": f"turn-{t['index']}",
@@ -4322,7 +5270,22 @@ def process_session(transcript_path, args):
             for b in f["blocks"]:
                 statuses = per_block_statuses.get(b["id"])
                 if statuses:
+                    own = b["status"]
                     b["status"] = combine_verdicts(statuses)
+                    # Same rule as `delivery` and `hook`: the key appears only
+                    # when there is something to report. Without it a mixed
+                    # scope's downgrade to `used-partial` would leave the file
+                    # rollup and the session headline saying nothing was
+                    # violated over a turn whose badge is red.
+                    if statuses.count("ignored"):
+                        b["violatingTurns"] = statuses.count("ignored")
+                    # Rewrite the reason only where the combine rule overruled
+                    # the aggregate's own assessment - that is the record that
+                    # read "status ignored" above "applied and were satisfied".
+                    # Where the two agree the existing sentence already
+                    # describes the status it sits under.
+                    if b["status"] != own:
+                        b["reason"] = combined_reason(b["status"], statuses)
         # The rollups computed inside _compute_payload scored the session-wide
         # statuses; recompute them over the combined ones the aggregate now
         # carries, or the file summary contradicts the block list beneath it.
@@ -4397,10 +5360,15 @@ def process_session(transcript_path, args):
         # Surfaced rather than swallowed: a notification that matches no spawn
         # means an agent silently lost its result and reads as never returning.
         "unmatchedNotifications": agent_data["unmatchedNotifications"],
+        "ruleCompile": aggregate["ruleCompile"],
     }
     summary["duplicatePairs"] = len(duplicates)
     summary["redundantPairs"] = sum(1 for d in duplicates if d["classification"] == "redundant")
     summary["duplicateTokens"] = sum(d["tokens"] for d in duplicates)
+    # Counts and the hint are cheap enough for the picker; the per-document
+    # breakdown stays in per_session, like every other heavy roll-up.
+    summary["ruleCompile"] = {k: v for k, v in aggregate["ruleCompile"].items()
+                              if k != "docs"}
     return summary, per_session
 
 
@@ -4669,6 +5637,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .rc-not-exercised .rc-state, .rc-not-checkable .rc-state { color: var(--text-dim); }
   .rc-not-checkable { border-style: dashed; }
   .rc-conf { font-size: 9px; text-transform: uppercase; letter-spacing: 0.4px; border: 1px solid var(--border); color: var(--text-dim); padding: 0 4px; border-radius: 3px; margin-left: 6px; vertical-align: middle; }
+  /* An action the reader can take, not a verdict: readable, never coloured
+     like a finding. */
+  .rulecheck .rc-todo { color: var(--text); font-style: italic; }
+
+  /* The onboarding line. It sits above the file list because a project whose
+     rules were never compiled has to learn that from its first report. */
+  .compile-bar { border: 1px dashed var(--border); border-radius: 6px; padding: 8px 12px; margin-bottom: 12px; font-size: 12px; color: var(--text-dim); }
 
   .source-tag {
     display: inline-block; font-size: 9px; color: var(--text-dim);
@@ -4923,6 +5898,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .moment.kind-violation::before  { background: var(--red); }
   .moment.kind-non-event::before  { background: var(--gray); border: 1px dashed var(--text-dim); }
   .moment.kind-omission::before   { background: transparent; box-shadow: 0 0 0 1px var(--gray) inset, 0 0 0 2px var(--panel); }
+  /* The two non-causal kinds share the dashed, dimmed treatment of a
+     non-event: they must not read as a step in the causal chain above them. */
+  .moment.kind-co-occurrence::before,
+  .moment.kind-corroboration::before {
+    background: transparent; border: 1px dashed var(--text-dim);
+  }
 
   /* Encrypted-thinking gap: distinct purple-tinted card with lock icon */
   .moment.kind-thinking-gap {
@@ -4954,6 +5935,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .moment.kind-intent { border-left: 3px solid var(--purple); }
   .moment.kind-action { border-left: 3px solid var(--green); }
   .moment.kind-condition, .moment.kind-applicability { border-left: 3px solid var(--amber); }
+  .moment.kind-co-occurrence, .moment.kind-corroboration {
+    border-left: 3px dashed var(--text-dim); opacity: 0.9;
+  }
 
   .moment-head {
     display: flex; align-items: center; gap: 8px;
@@ -4976,6 +5960,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .moment.kind-compliance .moment-kind  { color: var(--green); }
   .moment.kind-violation .moment-kind   { color: var(--red); }
   .moment.kind-non-event .moment-kind   { color: var(--gray); }
+  .moment.kind-co-occurrence .moment-kind,
+  .moment.kind-corroboration .moment-kind { color: var(--text-dim); }
   .moment-verdict { font-size: 12px; font-weight: 700; }
   .moment-verdict.yes { color: var(--green); }
   .moment-verdict.no  { color: var(--red); }
@@ -6380,14 +7366,15 @@ const HELP_CONTENT = {
   `,
   'rulecheck': `
     <h5>Where this comes from</h5>
-    <div>A rule document can carry a <em>checks file</em> beside it (<code>&lt;doc&gt;.checks.json</code>): each prose rule compiled once, ahead of time, into a deterministic pattern with its own self-tests. This tool never asks a model anything — at build time it re-runs every check's self-tests with its own matcher and throws out any check that fails, then applies the survivors to the code the agent wrote, the commands it ran, and the paths it touched.</div>
+    <div>A rule document can carry a <em>checks file</em> beside it (<code>&lt;doc&gt;.checks.json</code>): each prose rule compiled once, ahead of time, into a deterministic pattern with its own fixtures. This tool never asks a model anything — at build time it re-runs every check's fixtures with its own matcher and refuses any check that fails, then applies the survivors to the commands the agent ran, the paths it touched, and the code its writes left behind. A failing check is never quietly dropped: it is listed below as <em>demoted</em>, and so is any rule whose bucket needs a judge, because a rule nobody could check must not read as one that was followed.</div>
+    <div style="margin-top:6px">Code rules are judged on the <b>net</b> effect of the session's writes. An attempt the agent wrote and then edited away is not in the tree, and a violation the reader cannot find when they go looking is worse than none. Rules broken by <em>omission</em> — "always implement the catch body" — leave nothing to match, so the checker enumerates the sites itself (every catch block, every comment) and asks about each one.</div>
     <h5>The states</h5>
     <ul>
       <li><b style="color:var(--red)">rule violated</b> — a check fired on written code, with the file, line and matched text cited below. Comments and string literals are stripped before any pattern runs, and the match must hold both with and without that stripping.</li>
       <li><b style="color:var(--amber)">acknowledged</b> — the same match, but the code carries a <code>ctx-allow</code> marker at the site: a deliberate, documented exception.</li>
       <li><b style="color:var(--amber)">unclear</b> — the strict and stripped views disagree (typically the only hit was inside a comment). Never counted as a violation.</li>
       <li><b style="color:var(--green)">checked, no violation</b> — checks ran over code in their scope and found nothing.</li>
-      <li><b>checked nothing</b> — the session wrote none of the code this rule governs.</li>
+      <li><b>checked nothing</b> — the session wrote none of the code this rule governs, or an omission rule found no site to ask about.</li>
       <li><b>not mechanically checkable</b> — the rule needs judgment, types, or whole-file context. Most rules land here, by design. It does <em>not</em> mean the rule was followed.</li>
     </ul>
     <h5>Confidence</h5>
@@ -6395,7 +7382,7 @@ const HELP_CONTENT = {
   `,
   'verdict': `
     <h5>The verdict</h5>
-    <div>Our automatic conclusion about whether the agent followed this block this run. Evidence comes in two tiers: <em>strong</em> (a trigger the user actually typed, a path-table row whose command ran, an end-of-message rule) and <em>weak</em> (a command the block merely names, loose keyword overlap). Only strong evidence can produce a green <code>used</code>. One of:</div>
+    <div>Our automatic conclusion about whether the agent followed this block this run. Evidence comes in two tiers: <em>strong</em> (a trigger the user actually typed, a structural record — a skill the agent executed, a write to a file the block names, the block's template reproduced in a written file, a documented command run verbatim — or a reviewed compiled check that ran) and <em>weak</em> (a command the block merely names, loose keyword overlap). Only strong evidence can produce a green <code>used</code>. Every strong signal is either something the harness itself records or a check a human reviewed: nothing here is read out of the way your rules happen to be worded, so a rule written differently — or in another language — is judged the same way. The structural signals only ever give credit: nothing written to a file the block names is never read as a violation, because the run may have had nothing to write. One of:</div>
     <ul>
       <li><b style="color:var(--green)">used</b> — at least one applicable predicate fired</li>
       <li><b style="color:var(--amber)">used-partial</b> — some applicable predicates fired, others didn't</li>
@@ -6478,18 +7465,20 @@ const HELP_CONTENT = {
     <div>Chronological narrative of <em>what actually happened</em> with respect to this block this run. Each card is one moment with timestamp, kind, ✓/✗ verdict, and the literal trace text underneath.</div>
     <h5>Moment kinds</h5>
     <ul>
-      <li><b style="color:var(--accent)">TRIGGER</b> — precondition: did the user invoke <code>/skill</code>, did cwd match the path-table, was a subagent called?</li>
+      <li><b style="color:var(--accent)">TRIGGER</b> — precondition: did the user invoke <code>/skill</code>, was a subagent called?</li>
       <li><b style="color:var(--amber)">CONDITION / APPLICABILITY</b> — does the rule's domain even apply this run?</li>
-      <li><b style="color:var(--purple)">INTENT</b> — a sentence from the agent's text where it expresses a related decision (with causal language like "Let me…", "I'll…", "since…")</li>
+      <li><b style="color:var(--purple)">INTENT</b> — a harness record that put this block in front of the model: the <code>Read</code> that delivered the file, or the agent's own narration immediately before it. Never the most on-topic paragraph in the run — that was a motive invented after the fact.</li>
       <li><b style="color:var(--green)">ACTION ✓</b> — the actual tool call that enacted the rule, with timestamp + bash description</li>
       <li><b style="color:var(--green)">COMPLIANCE ✓</b> — the outcome matches what the rule asks</li>
       <li><b style="color:var(--red)">VIOLATION ✗</b> — the rule was broken; literal violating command/text shown</li>
       <li><b style="color:var(--text-dim)">NON-EVENT</b> — nothing happened that was relevant; the popover explains <em>what would have made this fire</em></li>
+      <li><b style="color:var(--text-dim)">CO-OCCURRENCE</b> — the block and the run mention the same word or command, and that is <em>all</em> the trace says. Not a step in the chain above: a design-system block and a rate-limiting review both containing "design" is a coincidence, so a block whose only evidence is shared wording gets this card and nothing else.</li>
+      <li><b style="color:var(--text-dim)">CORROBORATION</b> — the agent's own readable extended thinking mentions this block. Self-report, so it can support a verdict reached elsewhere and never set one; most transcripts encrypt it, and its absence means nothing.</li>
     </ul>
     <h5>How to use it</h5>
     <div>This is the receipts. When the verdict surprises you, walk down the timeline to see the actual passages and tool calls that drove it. Timestamps are offsets from session start (also visible in the Run Timeline view).</div>
     <h5>Example</h5>
-    <div>The <code>/graphify</code> block in CLAUDE.md shows a single <b>NON-EVENT</b>: <em>"<code>/graphify</code> not invoked this run — User prompt: 'explore files…'"</em> — that directly answers "why didn't this fire?". Whereas the <code>Copy to clipboard</code> rule shows real <b>VIOLATION</b> cards with the literal <code>echo</code> commands at exact timestamps.</div>
+    <div>The <code>/graphify</code> block in CLAUDE.md shows a single <b>NON-EVENT</b>: <em>"<code>/graphify</code> not invoked this run — User prompt: 'explore files…'"</em> — that directly answers "why didn't this fire?". The <code>Copy to clipboard</code> rule, by contrast, shows <b>CO-OCCURRENCE</b> cards: <code>printf</code> ran, the rule names <code>printf</code>, and the timeline says exactly that much rather than claiming the rule is why.</div>
   `,
 };
 
@@ -6547,8 +7536,18 @@ const RULECHECK_LABEL = {
   'acknowledged': 'violation acknowledged in the code',
   'unclear': 'unclear — could not be confirmed',
   'clear': 'checked, no violation found',
-  'not-exercised': 'checked nothing — the session wrote none of the code this rule governs',
+  'not-exercised': 'checked nothing — the session never did the kind of thing this rule governs',
   'not-checkable': 'not mechanically checkable'
+};
+
+// Which half of a conditional rule the finding is about. The distinction is the
+// finding: a trigger that never came up and an obligation that went unmet are
+// different facts, and one label for both is how a session that never exercised
+// a rule gets read as one that followed it.
+const RULECHECK_STAGE = {
+  'antecedent-not-fired': 'never triggered — nothing in this session met the rule’s condition',
+  'consequent-missed': 'triggered, and what it asks for did not happen',
+  'satisfied': 'triggered, and satisfied'
 };
 
 // A rule's verdict comes from a checks file authored beside the rule document
@@ -6563,9 +7562,14 @@ function renderRuleCheck(rc) {
     inner += `<div class="rc-note">No checks file beside this document — these patterns were extracted mechanically from the rule's own backticked identifiers, so they are low confidence and never mark the block as violated.</div>`;
   }
   (rc.findings || []).forEach(f => {
-    const verb = f.state === 'violated' ? 'fired' : f.state === 'acknowledged' ? 'fired, suppressed at the site' : 'candidate, not confirmed';
-    inner += `<div class="rc-note"><code>${escapeHtml(f.checkId)}</code> ${escapeHtml(verb)}${f.message ? ' — ' + escapeHtml(f.message) : ''}</div>
-      <div class="rc-span"><span class="rc-path">${escapeHtml(f.path)}:${f.line}</span>  ${escapeHtml(f.match)}</div>`;
+    const verb = RULECHECK_STAGE[f.stage]
+      || (f.state === 'violated' ? 'fired' : f.state === 'acknowledged' ? 'fired, suppressed at the site' : 'candidate, not confirmed');
+    inner += `<div class="rc-note"><code>${escapeHtml(f.checkId)}</code> ${escapeHtml(verb)}${f.message ? ' — ' + escapeHtml(f.message) : ''}</div>`;
+    // A stage report with no call behind it has nothing to quote, and an empty
+    // span row reads as a citation the reader can go and check.
+    if (f.match) {
+      inner += `<div class="rc-span"><span class="rc-path">${escapeHtml(f.path)}:${f.line}</span>  ${escapeHtml(f.match)}</div>`;
+    }
   });
   (rc.notCheckable || []).forEach(nc => {
     inner += `<div class="rc-note">${escapeHtml(nc.ruleRef || '')}${nc.ruleRef ? ' — ' : ''}${escapeHtml(nc.why || '')}</div>`;
@@ -6573,6 +7577,21 @@ function renderRuleCheck(rc) {
   (rc.stale || []).forEach(st => {
     inner += `<div class="rc-note"><code>${escapeHtml(st.id)}</code> skipped — ${escapeHtml(st.why)}</div>`;
   });
+  // A check whose fixtures stopped reproducing here is a broken check, not an
+  // inexpressible rule, and a bucket that needs a judge is neither. Each says
+  // which it is: a reader who cannot tell them apart cannot tell what to fix.
+  (rc.demoted || []).forEach(d => {
+    inner += `<div class="rc-note"><code>${escapeHtml(d.id)}</code> demoted to the <code>${escapeHtml(d.bucket || 'judged')}</code> bucket — ${escapeHtml(d.why || '')}</div>`;
+  });
+  (rc.judged || []).forEach(j => {
+    inner += `<div class="rc-note"><code>${escapeHtml(j.id)}</code> — ${escapeHtml(j.why || '')}</div>`;
+  });
+  // Baked in Python, printed verbatim: a rule nobody compiled is honestly
+  // unchecked, and the command that closes the gap is what stops that reading
+  // as a limit of the tool.
+  if (rc.hint) {
+    inner += `<div class="rc-note rc-todo">No check ran for this rule — ${escapeHtml(rc.hint)}</div>`;
+  }
   return `<div class="detail-section">
     <h4 style="display:flex;align-items:center">
       <span>Rule check</span>
@@ -6632,9 +7651,23 @@ function renderBlocks() {
       </div>
     `;
   }
+  html += renderCompileBar();
   html += renderLevel();
   el.innerHTML = html;
   attachHelpTriggers(el);
+}
+
+// Baked in Python (`ruleCompile`), printed verbatim, so `--query` and this
+// pane name the same count and the same command.
+function renderCompileBar() {
+  const roll = (active() || {}).ruleCompile || {};
+  if (!roll.rules) return '';
+  const docs = (roll.docs || []).filter(d => d.uncompiled || d.stale)
+    .map(d => `${escapeHtml(d.path)} (${d.compiled}/${d.rules})`).join(', ');
+  const tail = roll.hint
+    ? `<strong>${escapeHtml(roll.hint)}</strong>${docs ? ' — ' + docs : ''}`
+    : 'Every rule here is either compiled or reviewed as not mechanically checkable.';
+  return `<div class="compile-bar">${roll.compiled} of ${roll.rules} rules compiled into reviewed checks. ${tail}</div>`;
 }
 
 function renderDetail(blockId) {

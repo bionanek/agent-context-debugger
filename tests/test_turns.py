@@ -50,6 +50,14 @@ def assistant_text(text, i):
             "message": {"content": [{"type": "text", "text": text}]}}
 
 
+def assistant_thinking(text, i, signature="sig"):
+    """An extended-thinking block. `text=""` is the encrypted shape the harness
+    writes most often; a non-empty one still carries a signature."""
+    return {"type": "assistant", "timestamp": _ts(i),
+            "message": {"content": [{"type": "thinking", "thinking": text,
+                                     "signature": signature}]}}
+
+
 def assistant_tool_use(name, input_, i, tool_id="t1"):
     return {"type": "assistant", "timestamp": _ts(i),
             "message": {"content": [{"type": "tool_use", "name": name,
@@ -296,9 +304,12 @@ def test_combine_verdicts_any_used_wins():
 
 
 def test_combine_verdicts_ignored_propagates():
-    """If the rule was loaded and applied but ignored in any turn, the aggregate
-    must surface that — silently downgrading to 'used' would hide a violation."""
-    assert brv.combine_verdicts(["used", "ignored"]) == "ignored"
+    """If the rule was applied but ignored and nothing satisfied it anywhere,
+    the aggregate must surface that — silently downgrading to 'used' would hide
+    a violation. Mixed turns are 'used-partial': one red turn must not repaint
+    a session that was compliant elsewhere, and 'used-partial' still isn't
+    green (see combine_verdicts)."""
+    assert brv.combine_verdicts(["used", "ignored"]) == "used-partial"
     assert brv.combine_verdicts(["ignored", "unused"]) == "ignored"
 
 

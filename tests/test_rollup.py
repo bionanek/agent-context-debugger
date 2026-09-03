@@ -13,6 +13,13 @@ from tests.test_turns import (_Args, _write_jsonl, assistant_text,
                               assistant_tool_use, user_text, user_tool_result)
 
 GOLDEN = Path(__file__).resolve().parent / "fixtures" / "rollup_payload_golden.json"
+# The golden is a *subset* of a real payload, not a full dump: `_assert_subset`
+# only demands that the keys it names survive, so keys the original author left
+# out stay free to change. Do not refresh it by re-dumping the whole payload -
+# that silently pins every value the dump happens to contain and turns the
+# additive guard into an equality guard. When a change deliberately reworks a
+# value the golden does name, edit exactly those entries and say so in the
+# commit; a diff of more lines than the change explains is the review signal.
 
 
 def _root(tmp_path):

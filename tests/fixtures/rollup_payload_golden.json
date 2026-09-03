@@ -42,7 +42,7 @@
          "kind": "non-event",
          "label": "No topical reasoning detected",
          "t": null,
-         "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+         "text": "Overlap with the assistant's text: 0 of 2 scanned words. Two are the floor for even a co-occurrence note.",
          "verdict": "no"
         }
        ],
@@ -61,6 +61,10 @@
         {
          "label": "not mechanically checkable",
          "text": "no checks file beside this document, and nothing in the rule could be extracted mechanically"
+        },
+        {
+         "label": "no reviewed check for this rule",
+         "text": "run /compile-rules on ~/.claude/CLAUDE.md"
         }
        ],
        "id": "ollup-fixture-root-home-claude-claude-md-1-commits",
@@ -70,7 +74,7 @@
          "kind": "non-event",
          "label": "No topical reasoning detected",
          "t": null,
-         "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+         "text": "Overlap with the assistant's text: 0 of 2 scanned words. Two are the floor for even a co-occurrence note.",
          "verdict": "no"
         }
        ],
@@ -128,7 +132,7 @@
          "kind": "non-event",
          "label": "No topical reasoning detected",
          "t": null,
-         "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+         "text": "Overlap with the assistant's text: 0 of 3 scanned words. Two are the floor for even a co-occurrence note.",
          "verdict": "no"
         }
        ],
@@ -151,7 +155,7 @@
          "kind": "non-event",
          "label": "No topical reasoning detected",
          "t": null,
-         "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+         "text": "Overlap with the assistant's text: 0 of 1 scanned words. Two are the floor for even a co-occurrence note.",
          "verdict": "no"
         }
        ],
@@ -310,7 +314,7 @@
            "kind": "non-event",
            "label": "No topical reasoning detected",
            "t": null,
-           "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+           "text": "Overlap with the assistant's text: 0 of 2 scanned words. Two are the floor for even a co-occurrence note.",
            "verdict": "no"
           }
          ],
@@ -329,6 +333,10 @@
           {
            "label": "not mechanically checkable",
            "text": "no checks file beside this document, and nothing in the rule could be extracted mechanically"
+          },
+          {
+           "label": "no reviewed check for this rule",
+           "text": "run /compile-rules on ~/.claude/CLAUDE.md"
           }
          ],
          "id": "turn0-ollup-fixture-root-home-claude-claude-md-1-commits",
@@ -338,7 +346,7 @@
            "kind": "non-event",
            "label": "No topical reasoning detected",
            "t": null,
-           "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+           "text": "Overlap with the assistant's text: 0 of 2 scanned words. Two are the floor for even a co-occurrence note.",
            "verdict": "no"
           }
          ],
@@ -396,7 +404,7 @@
            "kind": "non-event",
            "label": "No topical reasoning detected",
            "t": null,
-           "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+           "text": "Overlap with the assistant's text: 0 of 3 scanned words. Two are the floor for even a co-occurrence note.",
            "verdict": "no"
           }
          ],
@@ -419,7 +427,7 @@
            "kind": "non-event",
            "label": "No topical reasoning detected",
            "t": null,
-           "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+           "text": "Overlap with the assistant's text: 0 of 1 scanned words. Two are the floor for even a co-occurrence note.",
            "verdict": "no"
           }
          ],
@@ -552,7 +560,7 @@
            "kind": "non-event",
            "label": "No topical reasoning detected",
            "t": null,
-           "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+           "text": "Overlap with the assistant's text: 0 of 2 scanned words. Two are the floor for even a co-occurrence note.",
            "verdict": "no"
           }
          ],
@@ -571,6 +579,10 @@
           {
            "label": "not mechanically checkable",
            "text": "no checks file beside this document, and nothing in the rule could be extracted mechanically"
+          },
+          {
+           "label": "no reviewed check for this rule",
+           "text": "run /compile-rules on ~/.claude/CLAUDE.md"
           }
          ],
          "id": "turn1-ollup-fixture-root-home-claude-claude-md-1-commits",
@@ -580,7 +592,7 @@
            "kind": "non-event",
            "label": "No topical reasoning detected",
            "t": null,
-           "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+           "text": "Overlap with the assistant's text: 0 of 2 scanned words. Two are the floor for even a co-occurrence note.",
            "verdict": "no"
           }
          ],
@@ -638,7 +650,7 @@
            "kind": "non-event",
            "label": "No topical reasoning detected",
            "t": null,
-           "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+           "text": "Overlap with the assistant's text: 0 of 3 scanned words. Two are the floor for even a co-occurrence note.",
            "verdict": "no"
           }
          ],
@@ -661,7 +673,7 @@
            "kind": "non-event",
            "label": "No topical reasoning detected",
            "t": null,
-           "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+           "text": "Overlap with the assistant's text: 0 of 1 scanned words. Two are the floor for even a co-occurrence note.",
            "verdict": "no"
           }
          ],

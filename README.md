@@ -35,6 +35,7 @@ in the loop.
 - [Constraints and design rules](#constraints-and-design-rules)
 - [Repo layout](#repo-layout)
 - [Tests](#tests)
+- [Baseline snapshots](#baseline-snapshots)
 
 ## What it tells you
 
@@ -45,6 +46,13 @@ For every session, per turn (one real user prompt to the next):
 - A per-block verdict: was this rule/section **used**, **ignored** (rule violated),
   merely **possibly referenced**, **dormant**, **unused**, **undelivered** (truncated
   away before the model saw it), or **not loaded** at all.
+- Followed rules, detected from what the run actually did - not only from what it
+  said. A skill the agent executed marks that skill's own sections used; a write to
+  a file a rule names, a template a rule spells out reproduced in a file the agent
+  wrote, and a documented command that ran verbatim each count as evidence, cited by
+  file and command. These signals only ever give credit: nothing was written to
+  `ERRORS.md` is not read as a violation, because the session may have had nothing
+  worth logging.
 - Where the tokens went: each API request's prompt tokens attributed across the
   context files that were resident for it, cached vs fresh, plus cache-break markers.
 - Duplicated/overlapping content across context files, priced in attributed tokens.
@@ -81,6 +89,23 @@ python3 build_real_view.py --session abc12345
 # Then open the output in a browser
 open agent-context-ide-real.html
 ```
+
+That first report is also the onboarding step. It reads your rule documents
+(global and project `CLAUDE.md`, `.claude/rules/*.md`) and tells you how many of
+their rules have a reviewed, machine-checkable record and how many do not:
+
+```
+rules    0 of 10 compiled, 0 reviewed as not checkable, 10 not compiled, 0 stale
+  ~/.claude/CLAUDE.md — 0/7 compiled
+todo     10 rules not compiled — run /compile-rules on ~/.claude/CLAUDE.md
+```
+
+Running [`/compile-rules`](.claude/commands/compile-rules.md) in a Claude Code
+session compiles one document's rules into a `<doc>.checks.json` beside it, then
+stops and asks you to review the file before you commit it. Nothing else changes:
+the tool still works with no checks files at all, it just reports most rules as
+uncompiled rather than as checked. See
+[Rule checks](#rule-checks-turning-prose-rules-into-checkable-items).
 
 ## Installing the ctxlog hook
 
@@ -172,6 +197,10 @@ Notes:
 - A leaf token resolves as block id first, then file id; `agent-` addresses a
   subagent run but still falls through, so a real file named `agent-foo.md`
   stays reachable.
+- An id beginning with `-` works. Block ids often start on a separator (the
+  slug keeps the tail of a long path), and argparse used to read such a token
+  as an unknown option, so the CLI could not address every id its own listings
+  print. `--field` and `--all` still work after the address.
 - A block's output includes its `rule` line: rule-check state, findings with
   file/line/matched text, and why a rule could not be checked.
 - An agent's output includes the two fields no other view shows: the `brief`
@@ -187,7 +216,12 @@ Five tabs, all rendering the same baked JSON:
   blocks render in an Active group above a Quiet one. The detail pane for a block
   shows its content, verdict + reason, rule-check findings, attributed cost
   (labelled estimated), near-duplicates, evidence, and the chronological
-  TRIGGER → INTENT → ACTION → OUTCOME "moments" cards.
+  TRIGGER → INTENT → ACTION → OUTCOME "moments" cards. Those cards are a causal
+  claim, so a block whose only evidence is shared wording gets none of them -
+  it gets a single `co-occurrence` card that says which words the block and the
+  run have in common and that this means nothing. `corroboration` cards are the
+  agent's own readable extended thinking; most transcripts encrypt it, and its
+  absence is not held against a block.
 - **Run Timeline** — filterable event list, including compaction and cache-break
   marker rows.
 - **File Activity** — reads/edits per file across the scope.
@@ -206,38 +240,144 @@ Every `CLAUDE.md`/skill block gets one of 8 statuses in two families:
 - **NOT-USED**: `undelivered`, `unused`, `dormant`, `not-loaded`
 
 Evidence is tiered. **Strong** evidence ties the block to a specific observable
-outcome (a trigger the user actually typed, a path-table row whose command also
-ran, a satisfied response-shape rule) and is the only tier that can produce
-`used`, `used-partial` or `ignored`. **Weak** evidence (bare command mentions,
-loose keyword overlap) tops out at `possibly-referenced` and never reaches green.
+outcome (a trigger the user actually typed, a structural record of what the run
+did, or a reviewed compiled check that ran) and is the only tier that can
+produce `used`, `used-partial` or `ignored`. **Weak** evidence (bare command
+mentions, loose keyword overlap) tops out at `possibly-referenced` and never
+reaches green.
+
+Every strong signal is either something the Claude Code harness itself records
+or a check a human reviewed. Nothing in the strong tier is pattern-matched out
+of the way your rules happen to be worded, so a rule phrased differently - or
+written in another language - is judged the same way. **Checking a prose rule
+therefore needs compiled checks** (below): without them the tool reports the
+rule as uncompiled and prints the command that compiles it, rather than
+guessing. Earlier versions did guess, with two hardcoded readings of one
+author's own CLAUDE.md - a project-path table and a "close with a short
+summary" rule - and both were wrong in both directions on every session
+audited.
+
+Four of the strong signals are structural - a record of what the run did,
+joined to something the block itself names: a skill the agent executed (its own
+sections were what ran), a write to a file path the block names, the block's
+template reproduced in a file the agent wrote, and a documented command that
+ran verbatim. These four only ever give credit. Nothing written to the file a
+rule names is not read as a violation, because the run may have had nothing to
+write - and each one names the file or command it is citing, so the claim can
+be checked.
 
 Delivery is checked before anything is scored: a block the model never saw
 (truncated tail, a gap between disjoint read ranges) is `undelivered`, never
 "unused" — the difference between *never arrived* and *arrived and ignored*.
 
+A rule is only judged where it was **exercised** - where the run actually did
+the kind of thing the rule is about. A turn that ran no `gh` command at all is
+`dormant` for a GitHub-account rule, not a violation of it: the compiled check
+reports that its trigger never came up, and the block says the rule was never
+tested rather than broken. A compiled check gives credit the same way it takes
+it away - a conditional rule whose trigger fired and whose obligation was met
+reads `used`, citing the call.
+
 Session-scope verdicts combine per-turn ones with the invariant "used in any
-turn → used at session scope", and `ignored` always stays visible.
+turn → used at session scope". A scope with both compliant and violating turns
+is `used-partial`, not `ignored`: one red turn does not repaint a dozen
+compliant ones, the red turn stays red at turn scope, and `ignored` at session
+scope means the rule was satisfied nowhere.
 
 ## Rule checks: turning prose rules into checkable items
 
 The only mechanism that may call a rule **violated**. The tool never interprets
 prose at runtime — interpretation happens exactly once, offline, at authoring time:
 
-1. **Author** (manual): run [`prompts/translate-rules.md`](prompts/translate-rules.md)
-   over a guidelines doc in a Claude session and commit the JSON it returns as
-   `<doc>.checks.json` beside the doc. The prompt is built to refuse: rules that
-   need judgment, cross-file context, types, or runtime info go to `not_checkable`
-   with a reason. Expect a high refusal rate (~69% on the pilot docs) — that is
-   the design working. A false violation is treated as much worse than a missed one.
-2. **Closed vocabulary**: each check is one of 8 kinds —
-   `forbidden_pattern`, `required_pattern`, `forbidden_co_occurrence`,
-   `required_co_occurrence`, `required_order`, `forbidden_command`,
-   `required_command`, `forbidden_path` — with regex pattern fields,
+1. **Compile** (`/compile-rules`, once per document): in a Claude Code session,
+   run [`/compile-rules [doc]`](.claude/commands/compile-rules.md), which follows
+   [`prompts/translate-rules.md`](prompts/translate-rules.md) — extract every
+   rule as its own record, classify it into a bucket, generate patterns,
+   fixtures and both example lists, verify them, write `<doc>.checks.json`
+   beside the document, then **stop for your review**. The flow names the file
+   and the per-bucket counts and does not commit it: the file is config you own,
+   and its patterns will run against your own code on every later audit.
+   The command lives in this repo's `.claude/commands/`; copy it into your own
+   project (or `~/.claude/commands/`) to compile rules there.
+
+   The prompt is built to refuse: rules that need judgment, cross-file context,
+   types, or runtime info go to a judged bucket or to `not_checkable` with a
+   reason. Expect a high refusal rate (~69% on the pilot docs) — that is the
+   design working. A false violation is treated as much worse than a missed one.
+
+   Until a rule is compiled, the report says so: the session line and every
+   uncompiled block carry the count and the command, rather than reporting the
+   rule as `not-checkable` and leaving the reader to think the tool cannot do
+   better. A rule the compiler *answered* — a reviewed refusal, or a bucket
+   parked for the judge tier — is not nagged about again; a record that did not
+   survive the loader (stale, demoted, rejected) is reported as uncompiled,
+   because re-compiling is the fix.
+
+   A worked example ships in `tests/fixtures/global_rules.md.checks.json`: the
+   two rules whose hardcoded readings this tool used to carry, compiled the way
+   the flow emits them. A cwd-conditional obligation ("check the GitHub account
+   before running `gh`") becomes one `tool_never_without_prior` record over the
+   ordered tool log, so "checked, and switched only if needed" is compliance and
+   a session that never touched `gh` is honestly untested. A rule about how a
+   response closes becomes a `communication`-scope record in the `judged`
+   bucket - its sentence count is checkable, its "observable behaviour, not
+   technical details" is not - so it reports as needing the judge tier instead
+   of scoring one author's writing style.
+2. **Closed vocabulary**: each check is one of 16 kinds — over written code
+   (`forbidden_pattern`, `required_pattern`, `forbidden_co_occurrence`,
+   `required_co_occurrence`, `required_order`), shell commands
+   (`forbidden_command`, `required_command`), written paths (`forbidden_path`),
+   the **ordered tool log** (`tool_forbidden`, `tool_required`,
+   `tool_precedes`, `tool_never_without_prior`, `tool_arg_matches`,
+   `tool_call_count`, `writes_to_path`), and **enumerated candidate sites**
+   (`candidate_requires`) — with regex pattern fields,
    `applies_to` globs, `confidence` (high/medium/low), a `message`, an optional
    `rule_key` (hash of the rule text; if the rule is later edited the check is
    skipped as stale), and a **mandatory `self_test`** with both `should_match`
    and `should_not_match` snippets.
-3. **Load-time enforcement** (`rule_checks.py`): self-tests are re-run with this
+
+   **A record can declare what it is** (format v2, all fields optional so
+   existing files are untouched): `statement` (the rule as one testable
+   question), `scope` (`code`/`communication`/`process`), `evidence`
+   (`diff`/`files`/`transcript`), `bucket`
+   (`deterministic`/`hybrid`/`judged`), and `examples_positive` /
+   `examples_negative`. Only `deterministic` records run here; `hybrid` and
+   `judged` need the opt-in judge tier and are reported as unchecked with the
+   bucket named. A deterministic record whose fixtures stop reproducing is
+   **demoted to `judged` and says so** rather than silently dropped — the
+   point of re-running fixtures is that a broken check becomes visible.
+
+   **Rules violated by omission need a candidate search.** "Always implement
+   the catch body" is broken by writing *nothing*, so no pattern can find it.
+   The checker enumerates the sites itself — every catch/except block, every
+   comment — each with a file, a line and quotable text, and asks about each
+   one. `candidate_requires` is the deterministic user of that layer; the judge
+   tier reads the same records.
+
+   **Code rules read the net diff, not every hunk.** The corpus replays the
+   session's writes against each other, so an attempt written and then reverted
+   is gone: 3–19% of what the eight baseline sessions wrote never survived to
+   the final state, and accusing the agent of code that is not in the tree is a
+   violation the reader cannot find when they go looking. `evidence: "files"`
+   opts back in. Shell, path and tool rules read the transcript, as before.
+3. **Workflow rules are checkable.** The tool log is every call in call order,
+   one call per line as `<ToolName> <arguments>`, each numbered. That makes
+   sequence, conditionals and counts expressible, which is where the research
+   puts ~73% of real agent failures. A rule reading *"before running any `gh`
+   command, check the active account with `gh auth status` and switch if
+   needed"* is a `tool_never_without_prior` check — and note what it expresses
+   that a command-level check could not: **either** branch of "switch if
+   needed" satisfies it, so a session that checked and found the account
+   already correct is compliant rather than accused.
+   A check that ran earlier in the same compound command counts, because that
+   is how agents actually write it.
+   Every conditional tool finding reports its two stages separately —
+   `antecedent-not-fired` (nothing triggered the rule), `consequent-missed`
+   (it triggered and the obligation went unmet — the violation), `satisfied` —
+   because over 30% of real conditional failures are wrong condition-checking
+   rather than a wrong action. An unfired antecedent is the one finding with
+   nothing to cite, and it is `not-exercised`, never `clear`.
+4. **Load-time enforcement** (`rule_checks.py`): self-tests are re-run with this
    tool's own matcher and any failing check is refused (a generator's claim that
    its tests pass is not evidence). Comments and string literals are stripped
    centrally, offset-preserving, before any pattern runs. A `violated` state
@@ -245,12 +385,13 @@ prose at runtime — interpretation happens exactly once, offline, at authoring 
    disagreement is `unclear`, never a violation. An inline `ctx-allow`
    (or `ctx-allow: <check-id>`) marker on the match's line or the line above
    downgrades a hit to `acknowledged`.
-4. **Block states**: `violated` / `acknowledged` / `unclear` / `clear`
+5. **Block states**: `violated` / `acknowledged` / `unclear` / `clear`
    (checks ran over in-scope code, found nothing) / `not-exercised` (session
-   wrote nothing the checks apply to — deliberately distinct from "followed") /
-   `not-checkable`. Only a `violated` finding with high/medium confidence turns
+   wrote nothing the checks apply to, a conditional's antecedent never fired,
+   or an omission rule found no candidate site — all deliberately distinct
+   from "followed") / `not-checkable`. Only a `violated` finding with high/medium confidence turns
    a block red (`ignored`), citing file, line and matched text.
-5. **Fallback**: a guidelines doc with no checks file gets a narrow mechanical
+6. **Fallback**: a guidelines doc with no checks file gets a narrow mechanical
    extraction (negation cue + backticked code-shaped token, max 5 checks),
    always `confidence: low`, which can never redden a block. Files the agent
    merely read get no rule treatment at all.
@@ -261,7 +402,8 @@ becomes a `forbidden_co_occurrence` check with patterns `observer\(` and
 string-literal and longer-identifier false-positive cases.
 
 A checks file is trusted repo content: its patterns run as written, with no
-timeout, so review a generated one before committing it.
+timeout, so review a generated one before committing it — which is why the
+`/compile-rules` flow ends by handing it to you rather than committing it.
 
 ## Token attribution
 
@@ -333,11 +475,13 @@ candidate; one that is `used` on the turns that matter earns its cost.
 | `rule_checks.py` | Compiled rule checking: loads/validates checks files, strips comments, evaluates. |
 | `ctxlog_facts.py` | Hook-log parser: "actually loaded" facts that override path conventions. |
 | `hooks/ctxlog.py` | The hook that writes those logs. Self-installing (`install --write`); also a standalone session reporter. |
-| `prompts/translate-rules.md` | The authoring prompt that turns a guidelines doc into a checks file. |
+| `prompts/translate-rules.md` | The rule-compilation prompt `/compile-rules` follows to turn a guidelines doc into a checks file. |
+| `.claude/commands/compile-rules.md` | The `/compile-rules` slash command. Copy it into your own project to compile rules there. |
 | `CLAUDE.md` | The detailed architecture map (canonical for contributors). |
 | `agent-context-ide-prototype.html` | Hand-written static mockup. Layout reference only; not generated. |
 | `agent-context-ide-real.html` | The script's output. Build artifact — regenerate, don't edit. |
-| `tests/` | Pytest suite (~357 tests, 16 modules). |
+| `tests/` | Pytest suite (~611 tests, 24 modules), including the verdict regression harness. |
+| `snapshots/` | Baseline snapshots and the harness that takes them (see [Baseline snapshots](#baseline-snapshots)). |
 
 ## Tests
 
@@ -351,3 +495,41 @@ Tests assert on the baked JSON payload via in-memory event builders defined in
 `tests/test_turns.py` — never on HTML strings, because the template is not a
 stable contract. Verifying a change means `pytest` green *and* regenerating the
 HTML and opening it.
+
+`tests/test_regression_verdicts.py` is the verdict regression harness: one case
+per verdict a hand audit of real sessions proved wrong, reconstructed from
+in-memory events that reproduce the mechanism rather than the session. Test
+names carry the mechanism tag (`pytest -k f_trigger`), and the cases still
+waiting on a fix are `xfail(strict=True)` - so the suite is green today, a fix
+flips its own cases to passes, and a regression un-flips them loudly. Alongside
+them sit counter-anchors: the verdicts the audit found correct, which must keep
+passing.
+
+## Baseline snapshots
+
+Unit tests catch broken code; they do not tell you whether a change to the
+*judging* made verdicts more honest on real sessions. `snapshots/` exists for
+that. `python3 snapshots/take_baseline.py capture` freezes a chosen session's
+inputs — the transcript, the ctxlog log, and every rule doc, skill and checks
+file the run actually loaded — beside the baked JSON payload and the `--query`
+text dumps (`turns`, `blocks`, and each non-delivery block's verdict), plus a
+manifest with the tool commit and a hash of every frozen input. `verify` re-bakes
+each snapshot **from its frozen copies** and reports whether the payload is
+byte-identical, so change a judgement rule and the diff you read is the
+judgement's, not a rule doc someone edited in the meantime.
+
+Two things follow from re-baking against a restored tree. The paths inside a
+snapshot are the scratch tree's (normalised to a `__RESTORE_ROOT__` token in the
+stored artifacts, so the bytes don't depend on where the checkout lives), which
+means block ids in a snapshot differ from a live run's — compare snapshot to
+snapshot, never snapshot to a fresh build. And `capture` needs the live machine
+that owns those sessions, while `verify` runs entirely off the manifest, so
+anyone can check a committed baseline.
+
+```bash
+python3 snapshots/take_baseline.py list                    # what is captured
+python3 snapshots/take_baseline.py capture --session 9dd3cc8a
+python3 snapshots/take_baseline.py verify                  # re-bake from frozen inputs
+```
+
+Which sessions form the baseline is data, not code: `snapshots/sessions.json`.
