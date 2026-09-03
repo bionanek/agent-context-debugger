@@ -19,7 +19,6 @@ nothing and the affected rules report honestly, *and* the same rules still
 resolve correctly once their compiled equivalents are present - the migration
 preserves coverage rather than dropping it.
 """
-import json
 from pathlib import Path
 
 import build_real_view as brv
@@ -34,6 +33,7 @@ from tests.test_turns import (
 
 # ---------- helpers ----------
 
+REPO = Path(__file__).resolve().parent.parent
 FIXTURES = Path(__file__).parent / "fixtures"
 WORKED_EXAMPLE = FIXTURES / "global_rules.md"
 
@@ -161,7 +161,7 @@ def test_no_prose_derived_strong_predicate_survives_anywhere():
     """
     docs = [PATH_TABLE_MD, EOM_MD, WORKED_EXAMPLE.read_text(),
             (FIXTURES / "rules_pl.md").read_text(),
-            Path("CLAUDE.md").read_text()]
+            (REPO / "CLAUDE.md").read_text()]
     seen = set()
     for md in docs:
         for block in blocks_of(md):
@@ -322,7 +322,7 @@ def test_the_clipboard_rule_still_finds_its_violation_once_compiled():
     assert v["ruleCheck"]["findings"][0]["checkId"] == "no-echo-into-clipboard"
 
 
-def test_the_summary_rule_says_it_needs_a_judge_and_never_accuses(tmp_path):
+def test_the_summary_rule_says_it_needs_a_judge_and_never_accuses():
     """The honest compiled answer for a rule about meaning.
 
     Its checkable half is a sentence count; the half that matters ("observable
@@ -452,16 +452,12 @@ def test_a_compiled_check_carries_the_verdict_for_a_foreign_language_rule():
                           "should_not_match": ["printf '%s' \"$x\" | pbcopy"]},
         }],
     }
-    (Path(str(PL) + ".checks.json.tmp")).write_text(json.dumps(checks))
-    try:
-        loaded = rc.load_checks(checks)
-        assert loaded["rejected"] == []
-        corpus = rc.build_corpus(brv.tool_calls([bash('echo "$x" | pbcopy', 1)]))
-        v = rc.check_block(block_named(md, "Schowek"), loaded, corpus)
-        assert v["state"] == "violated"
-        assert v["findings"][0]["checkId"] == "no-echo-do-schowka"
-    finally:
-        Path(str(PL) + ".checks.json.tmp").unlink()
+    loaded = rc.load_checks(checks)
+    assert loaded["rejected"] == []
+    corpus = rc.build_corpus(brv.tool_calls([bash('echo "$x" | pbcopy', 1)]))
+    v = rc.check_block(block_named(md, "Schowek"), loaded, corpus)
+    assert v["state"] == "violated"
+    assert v["findings"][0]["checkId"] == "no-echo-do-schowka"
 
 
 def test_a_deciding_rule_check_gets_a_moment_card():
@@ -488,3 +484,30 @@ def test_a_deciding_rule_check_gets_a_moment_card():
     violation = next(m for m in red["moments"] if m["kind"] == "violation")
     assert "gh pr" in violation["text"]
     assert not [m for m in red["moments"] if m["kind"] == "compliance"]
+
+
+def test_only_a_compiled_check_can_call_a_rule_violated(tmp_path):
+    """Nothing left in the predicate tier can produce `ignored`.
+
+    Every strong kind that survives is either satisfied exactly when it is
+    applicable (a trigger) or credit-only (`matches` unconditionally true), so a
+    red badge can now only come from `rule_checks` - which refuses to report one
+    without a file, a line and the matched text. That is the epistemic rule of
+    the whole project, held here as a property of the corpus rather than a note.
+    """
+    busy = [user_text("do everything", 1),
+            bash("gh pr create --fill", 2, tool_id="b1"),
+            bash('echo "$x" | pbcopy', 3, tool_id="b2"),
+            bash("git commit -am wip", 4, tool_id="b3"),
+            write_call("/repo/src/a.ts", "export const a = 1;\n", 5),
+            assistant_text("Refactored AuthController and moved the schema.", 6)]
+    for name, md in (("en", EN.read_text()), ("pl", PL.read_text()),
+                     ("table", PATH_TABLE_MD), ("eom", EOM_MD),
+                     ("worked", WORKED_EXAMPLE.read_text())):
+        doc = tmp_path / f"{name}.md"
+        doc.write_text(md)
+        rc.checks_for_doc.cache_clear()
+        for block in blocks_of(md):
+            v = brv.assess_block(block, rule_file(doc),
+                                 trace_for(with_cwd(busy, FORMIC_CWD), "do everything"))
+            assert v["status"] != "ignored", (name, block["title"], v["reason"])

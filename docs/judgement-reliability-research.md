@@ -95,6 +95,35 @@ Ground-truth sources for every finding in this section are the raw transcripts u
 Distribution note: in every session the vast majority of blocks are `not-loaded` (correct,
 delivery-based). The judged population per session is ~40–120 blocks.
 
+### Measured after the work (Phase 14)
+
+The 8 anchor sessions were frozen (Phase 0), a ground truth was written per block from the
+frozen transcripts before either report was read, and the same frozen inputs were re-baked at
+the end. Full rows in [`snapshots/SCORECARD.md`](../snapshots/SCORECARD.md); the harness is
+`snapshots/compare.py`.
+
+| over 547 judged blocks | before | after |
+|---|---|---|
+| agrees with the ground truth | 295 (54%) | 521 (95%) |
+| false green (`used` where nothing tied the block to the run) | 4 | **0** |
+| false red (`ignored` with no citable violation) | 11 | **0** |
+| under-credit (compliance the tool would not claim) | 219 | 26 |
+| block never judged at all (a skill the older code did not resolve) | 18 | **0** |
+
+Regressed verdicts: **0**. The remaining 26 under-credits are each accounted for in the
+scorecard, and they fall into four groups: prose rules with no compiled checks file for this
+user's own documents (the gh-account and "verification before claiming done" rules — the
+report names `/compile-rules` on them), a skill invoked by typing its name with no `Skill`
+tool call behind it (a deliberate refusal, §2 F-BLINDSPOT's mirror image), a read-kind
+document whose commands ran in later turns than the read (the residency caveat), and commands
+a block names in an inline span rather than a fenced block, which `command-echo` does not read.
+
+Two caveats on the numbers. The truth classes are deliberately coarse — `used` /
+`violated` / `no-hard-verdict` / `undecidable` — because `dormant` versus `unused` is not a
+reliability claim while a green over an untied rule is; and 25 of the 547 rows were not
+written blind - 7 revised after reading the after-run, and 18 for blocks the baseline never
+judged at all - each saying so in its own line with the evidence behind it.
+
 ### Failure mechanisms, ranked by damage (consistent across all four audits)
 
 **F-PATHTABLE — the path-table predicate is wrong in both directions.**
@@ -324,6 +353,56 @@ The keyword mechanism is not fixable by threshold tuning — the **vocabulary** 
   generic block. No published precision figure exists for this exact task; well-built lexical
   retrieval is a strong zero-shot baseline but has a real ceiling
   ([BEIR](https://arxiv.org/abs/2104.08663)).
+
+**Frozen operating point (measured, Phase 13).** The calibration above was run.
+The set is [`tests/fixtures/lexical_pairs.json`](../tests/fixtures/lexical_pairs.json)
+- 250 (block, session) pairs: 22 read out of the frozen §7 transcripts by hand
+(including every pair the tier calls positive, so precision is measured rather
+than sampled), 150 shuffled cross-project pairs and 46 uninvoked-skill pairs
+that are `coincidental` by construction, and 32 self-contained synthetic pairs
+that double as the contribution format.
+[`tests/lexical_fixture.py`](../tests/lexical_fixture.py) is the scorer and
+documents the labelling procedure;
+[`tests/test_calibration.py`](../tests/test_calibration.py) gates on it.
+
+The sweep, over the whole set (precision / recall / tp / fp):
+
+| coverage floor | run chars | G² bar | precision | recall | tp | fp |
+|---|---|---|---|---|---|---|
+| 0.25 | 40 | 6.63 | 0.900 | 0.500 | 9 | 1 |
+| 0.25 | 40 | 15.13 | 1.000 | 0.444 | 8 | 0 |
+| 0.25 | 50 | 6.63 | 0.889 | 0.444 | 8 | 1 |
+| **0.30** | **40** | **6.63** | **1.000** | **0.500** | **9** | **0** |
+| 0.30 | 40 | 15.13 | 1.000 | 0.444 | 8 | 0 |
+| 0.30 | 50 | 6.63 | 1.000 | 0.444 | 8 | 0 |
+| 0.35 | 40 | 6.63 | 1.000 | 0.444 | 8 | 0 |
+| 0.35 | 50 | 15.13 | 1.000 | 0.389 | 7 | 0 |
+
+**coverage floor 0.30, run 8 tokens AND 40 chars, G² 6.63** is the only point
+that reaches precision 1.0 without giving up a further true positive, so that
+is the frozen point. Two notes on how it differs from the recommendation above:
+
+- The two run-length bars are an **AND**, not the "≥8 tokens or ≥50 chars" of
+  the anchors. Taken as alternatives, an eight-token run of seven function
+  words and one content word qualifies, and the set contains that pair twice:
+  "do you have a figma design for this" sits in two of one user's command
+  files, one invoked and one not, so the same 35-character run was the evidence
+  for a true positive and a false one at once. No threshold separates twins -
+  precision-first means losing both. Before this change precision on the set
+  was 0.833.
+- The per-term G² bar stays at **6.63**, not the 15.13 suggested for multiple
+  testing: at 15.13 the famigo `9dd3cc8a` backend-Database anchor loses one of
+  its two significant terms and the pair goes from a true positive to a miss,
+  with no false positive removed in exchange. The bar is worth revisiting when
+  the set has more than nine positives behind it.
+
+Recall at the frozen point is 0.500, and the misses are in the fixture with a
+note each. Five of them are the §7 F-BLINDSPOT and F-CMDMENTION anchors, where
+the compliance happened entirely in file writes and verbatim command runs and
+left no trace in the prose at all - exactly the shape of miss the structural
+predicates rather than the vocabulary exist to catch. The remaining shuffled
+and uninvoked-skill halves produce zero positives, which is §3.2's
+shuffled-pair check passing over 196 pairs.
 - Anti: RAKE (no corpus contrast; [Rose et al. 2010](https://www.researchgate.net/publication/227988510_Automatic_Keyword_Extraction_from_Individual_Documents),
   beaten by [YAKE](https://www.sciencedirect.com/science/article/abs/pii/S0020025519308588)
   on all evaluated datasets), TextRank (blocks too small for the graph;
@@ -767,13 +846,19 @@ Supersedes §5. Each phase ships value on its own.
     delivered → applicable → conformant/violated/not-exercised for strong verdicts.
     Payload-additive per the compatibility invariant.
 
-**Phase 5 - calibration + open-source hardening (per §4)**
+**Phase 5 - calibration + open-source hardening (per §4)** - LANDED
 24. Labelled fixture set seeded from §7 + ~250 hand-labelled pairs; precision ≥0.90 gate on
-    every matching change; shuffled-session coincidence test.
-25. Language-neutral core: stopwords/backgrounds from the user's own corpus.
+    every matching change; shuffled-session coincidence test. **Landed**: 250 pairs,
+    precision 1.0 at the frozen operating point recorded in §3.2 above; the shuffled and
+    uninvoked-skill halves (196 pairs) produce zero positives.
+25. Language-neutral core: stopwords/backgrounds from the user's own corpus. **Landed** in
+    the Phase 12 tier (D1 and D3 are the user's own corpus, D2 is optional) and asserted
+    with the English list absent in `tests/test_calibration.py`.
 26. Degradation contract: every optional signal (ctxlog, InstructionsLoaded, thinking,
     ast-grep, LLM tier) degrades to "signal unavailable", never to a worse verdict;
-    documented trust model (offline by default, what each opt-in changes).
+    documented trust model (offline by default, what each opt-in changes). **Landed** as
+    `tests/test_degradation.py` (a matrix over a registry of the five signals, so a sixth
+    cannot ship without a row) and the README's trust-model section.
 
 Dependencies: Phases 0-1 independent, start immediately; Phase 3 needs items 11-14 (record
 format + candidate enumeration are the judge's input); Phase 4 independent of 2-3; the

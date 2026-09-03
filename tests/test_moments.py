@@ -93,14 +93,31 @@ def test_lexical_overlap_gets_no_causal_card():
 
 
 def test_lexical_overlap_gets_exactly_one_card_that_disclaims_causation():
+    """A block the run really is talking about still gets one non-causal card."""
+    block = ("Hydration guards protect the persisted zustand slice. Rehydrate "
+             "the slice through the migration shim, never directly.")
+    prose = ("I added the hydration guard around the persisted zustand slice, "
+             "then ran the migration shim so rehydrate goes through it. The "
+             "hydration path now rejects a stale persisted slice, and the "
+             "migration shim reports what it dropped.")
+    ms = moments("## Store hydration\n\n" + block,
+                 [user_text("fix hydration", 1), assistant_text(prose, 2)],
+                 prompt="fix hydration")
+    assert len(ms) == 1, kinds(ms)
+    assert ms[0]["kind"] == "co-occurrence"
+    assert "co-occurrence" in ms[0]["text"].lower()
+    assert "nothing in the trace ties" in ms[0]["text"].lower()
+
+
+def test_a_stack_table_gets_no_card_at_all_beyond_saying_it_cannot_be_scored():
+    """The F-MOMENTS anchor: the table's terms are the project's, not its own."""
     ms = moments(TECH_STACK_MD,
                  [user_text("effect or react-query", 1),
                   assistant_text(UNRELATED_STACK_TALK, 2)],
                  prompt="effect or react-query")
     assert len(ms) == 1, kinds(ms)
-    assert ms[0]["kind"] == "co-occurrence"
-    assert "co-occurrence" in ms[0]["text"].lower()
-    assert "nothing in the trace ties" in ms[0]["text"].lower()
+    assert ms[0]["kind"] == "non-event"
+    assert not set(kinds(ms)) & set(CAUSAL_KINDS)
 
 
 def test_the_card_and_the_badge_read_the_same_overlap():

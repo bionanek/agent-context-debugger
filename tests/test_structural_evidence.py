@@ -190,6 +190,20 @@ def test_editing_the_rule_document_itself_is_not_a_template_echo():
                                        file=rule_file(path="CLAUDE.md"))
 
 
+def test_appending_to_the_rule_document_by_a_relative_shell_path_is_not_an_echo():
+    """`cd <dir> && cat >> DECISIONS.md` is still that document writing itself.
+
+    The exclusion used to compare resolved paths, and a relative path resolves
+    against this process's cwd - so a memory file appended to by the agent
+    matched its own template and marked every older entry in it `used`.
+    """
+    events = [user_text("log the decision", 1),
+              assistant_tool_use("Bash", {"command": "cd /tmp/memory && cat >> DECISIONS.md "
+                                                     "<<'EOF'\n" + DECISION_TEMPLATE_MD + "\nEOF"}, 2)]
+    assert "template-echo" not in fired(DECISION_TEMPLATE_MD, events,
+                                        file=rule_file(path="memory/DECISIONS.md"))
+
+
 def test_written_content_covers_multiedit_and_notebook_edits():
     t = trace_for([user_text("edit", 1),
                    assistant_tool_use("MultiEdit", {"file_path": "/tmp/a.md", "edits": [

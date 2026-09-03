@@ -35,12 +35,12 @@ It cannot parse an AST, resolve types, follow imports across files, or see the r
 Every record declares one, in `bucket`:
 
 - **`deterministic`** - a pattern over the corpora above decides it, with fixtures that prove the pattern's behaviour. This is the only bucket the tool can decide today, and the only one that can ever mark a rule violated.
-- **`hybrid`** - the *sites* are enumerable but the question about each one is semantic ("does this catch body actually handle the error?"). Name the `candidate` kind; the tool extracts the sites deterministically and asks one question per site. This needs the opt-in judge tier: until it is switched on, the rule is reported as unchecked, never as followed.
-- **`judged`** - purely semantic ("be direct, zero fluff"). No pattern, no sites. Also reported as unchecked until the judge tier is on.
+- **`hybrid`** - the *sites* are enumerable but the question about each one is semantic ("does this catch body actually handle the error?"). Name the `candidate` kind; the tool extracts the sites deterministically and asks one question per site. This needs the opt-in judge tier (`--judge`): with the tier off - the default - the rule is reported as unchecked, never as followed; with it on, the tool enumerates the sites and asks your statement about each one.
+- **`judged`** - purely semantic ("be direct, zero fluff"). No pattern, no sites. Reported as unchecked with the tier off; with it on the verdict is **advisory** - it can flag the rule for a reader but never call it violated or mark it followed.
 
 A rule that fits none of these is not a record at all: put it in `not_checkable` with a one-line `why`.
 
-Prefer `deterministic` only where the pattern is genuinely decisive. A rule forced into `deterministic` with a hopeful regex is the failure mode this whole architecture exists to remove; `hybrid` and `judged` are honest answers that lose nothing today and gain the judge tier later.
+Prefer `deterministic` only where the pattern is genuinely decisive. A rule forced into `deterministic` with a hopeful regex is the failure mode this whole architecture exists to remove; `hybrid` and `judged` are honest answers offline and are what the opt-in judge tier reads.
 
 ## Vocabulary
 
@@ -54,6 +54,7 @@ A `deterministic` record's `kind` must be one of these. Do not invent others.
 | `required_co_occurrence` | `pattern` appears but `with_pattern` is absent | pattern, with_pattern, applies_to |
 | `required_order` | both patterns are present AND the first match of `first_pattern` starts at a later offset than the first match of `second_pattern`, i.e. they are in the wrong order | first_pattern, second_pattern, applies_to |
 | `candidate_requires` | an enumerated site's own text does NOT match `pattern` | candidate, pattern, applies_to |
+| `ast_forbidden` | `ast_pattern` matches the syntax tree of a file matching `applies_to` (needs ast-grep; see below) | ast_pattern, applies_to |
 | `forbidden_command` | `pattern` matches a shell command | pattern |
 | `required_command` | a command matching `trigger_pattern` ran without a matching `pattern` | trigger_pattern, pattern |
 | `forbidden_path` | a written file path matches `pattern` | pattern |
@@ -85,6 +86,14 @@ Note the asymmetry: `required_pattern` and `required_co_occurrence` are dangerou
 ### Rules broken by omission
 
 A rule like "always implement the catch body" is broken by writing *nothing*, so the pattern that would catch it is absent by definition - and a pattern is why "all clear" is the most common wrong answer for this rule shape. Use `candidate_requires` with a `candidate` of `catch_block` or `comment`: the tool enumerates every such site in the written code and cites the site whose own text fails your `pattern`. Where the question about a site needs meaning rather than a pattern ("does this comment explain *why*?"), the record is `hybrid` with the same candidate kind, and no pattern at all.
+
+### Structural rules, and when they are worth the dependency
+
+`ast_forbidden` matches a syntax tree rather than characters, through the optional ast-grep binary. Its `ast_pattern` is code in the target language with ast-grep's metavariables (`$X` for one node, `$$$ARGS` for a list), not a regex: `catch ($$$ARGS) { }` is every empty catch body, in a way no regex can be, because a regex cannot tell a `catch` in a documentation string from one in the code, and cannot tell a body holding only a comment from a body holding a statement.
+
+Reach for it only where the structural question *is* the rule. It costs something real: a reader who has not installed ast-grep gets `not-checkable` for that rule, with the install command, and every other check in the file is unaffected. So a rule a regex decides correctly stays a regex kind.
+
+The fixture gate applies unchanged - patterns are LLM-authored either way, and ast-grep's own coverage is per-grammar (strong for TS/JS/Python/Go, absent for niche languages). Write the fixtures in the language `applies_to` names, and expect the loader to re-run them through ast-grep itself.
 
 ## Record format
 
@@ -130,7 +139,7 @@ Give a one-line `why` for each. A rule that is subjective but *does* have an enu
 
 ## Fixtures (mandatory for `deterministic`)
 
-Every deterministic record must carry `fixtures` with `should_match` (code that genuinely violates the rule) and `should_not_match` (code that does not). A record whose fixtures do not reproduce with the consumer's matcher is demoted to the `judged` bucket, visibly, and reported as unchecked.
+Every deterministic record must carry `fixtures` with `should_match` (code that genuinely violates the rule) and `should_not_match` (code that does not). A record whose fixtures do not reproduce with the consumer's matcher is demoted to the `judged` bucket, visibly, and reported as unchecked (or, with the judge tier on, judged advisorily).
 
 `should_not_match` must include the dominant false-positive sources. At minimum, wherever it applies:
 

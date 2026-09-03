@@ -5,7 +5,16 @@ The interpretation of a prose rule happens ONCE, outside this tool, by applying
 `prompts/translate-rules.md` to a guideline document. Its output is a checks
 JSON committed next to the document, reviewable by a human. This module only
 loads that file, gates it, and applies it to what a recorded session actually
-wrote and ran. Nothing here calls a model or the network.
+wrote and ran. Nothing here calls a model or the network by itself: the opt-in
+judge tier is a runner the caller passes in (`check_block(..., judge=)`), from
+a module this one imports only inside the functions that use it, so the default
+path cannot reach a model even by accident.
+
+The one external program this module will run is ast-grep, and only when the
+user has already installed it with `install_ast_grep.py`: it is resolved from
+the tool's own directory, never from PATH, and its absence downgrades the
+structural checks to `not-checkable` rather than to a regex that answers a
+different question.
 
 Two failures from the live pilot shape the design and must not regress:
 
@@ -24,6 +33,8 @@ import hashlib
 import json
 import os
 import re
+import subprocess
+import tempfile
 from functools import lru_cache
 from pathlib import Path
 
@@ -60,6 +71,9 @@ VOCABULARY = {
     # catch body" is broken by writing *nothing*, so the pattern that would
     # catch it is absent by definition. It asks the enumerated sites instead.
     "candidate_requires": ("candidate", "pattern"),
+    # The structural kind, and the only one that needs a program this tool did
+    # not ship. Its field is an ast-grep pattern - code, not a regex.
+    "ast_forbidden": ("ast_pattern",),
 }
 
 SOURCE_KINDS = ("forbidden_pattern", "required_pattern", "forbidden_co_occurrence",
@@ -70,6 +84,7 @@ TOOL_KINDS = ("tool_precedes", "tool_never_without_prior", "tool_required",
               "tool_forbidden", "tool_arg_matches", "tool_call_count",
               "writes_to_path")
 CANDIDATE_CHECK_KINDS = ("candidate_requires",)
+AST_KINDS = ("ast_forbidden",)
 
 CONFIDENCES = ("high", "medium", "low")
 
@@ -90,7 +105,7 @@ BUCKETS = ("deterministic", "hybrid", "judged")
 # quietly ignored: a check that reads nothing reports as a rule nothing
 # triggered, which looks like honest silence instead of a broken record.
 _KIND_EVIDENCE = dict(
-    [(k, ("diff", "files")) for k in SOURCE_KINDS + CANDIDATE_CHECK_KINDS]
+    [(k, ("diff", "files")) for k in SOURCE_KINDS + CANDIDATE_CHECK_KINDS + AST_KINDS]
     + [(k, ("transcript",)) for k in SHELL_KINDS + PATH_KINDS + TOOL_KINDS])
 
 SHELL_PATH = "(shell)"
@@ -475,7 +490,7 @@ def _line_of(text, offset):
 
 def _evidence_source(check):
     """`diff`, `files` or `transcript` - declared, or implied by the kind."""
-    return check.get("evidence") or _KIND_EVIDENCE.get(check["kind"], ("files",))[0]
+    return check.get("evidence") or _KIND_EVIDENCE.get(check.get("kind"), ("files",))[0]
 
 
 def _source_entries(check, corpus):
@@ -652,7 +667,7 @@ def _suppressed(text, offset, check_id):
     return False
 
 
-def _finding(check, path, text, span, state, line=None):
+def _finding(check, path, text, span, state, line=None, message=None):
     start, end = span
     matched = text[start:end].strip()
     return {
@@ -662,7 +677,10 @@ def _finding(check, path, text, span, state, line=None):
         "path": path,
         "line": _line_of(text, start) if line is None else line,
         "match": matched,
-        "message": check.get("message", ""),
+        # `message` is overridden only when the finding is about the check
+        # itself rather than about the code - a backend that failed has to say
+        # what failed, not restate what the rule forbids.
+        "message": check.get("message", "") if message is None else message,
         "ruleRef": check.get("rule_ref", ""),
         "ruleText": check.get("rule_text", ""),
         "kind": check["kind"],
@@ -690,6 +708,150 @@ def _evaluate_source(check, entry, normalised=None):
     if strict_span or norm_span:
         return _finding(check, entry["path"], strict, strict_span or norm_span, "unclear")
     return None
+
+
+# ---------- the optional ast-grep backend ----------
+
+# The one scoped exception to this repo's stdlib-only rule: an external binary
+# the user installs on purpose, verified against a pinned digest and used from
+# the tool's own directory. It buys the thing regex cannot do - deciding a
+# question about the syntax tree rather than about the characters - which is
+# what kills the comment/string false positives that `strip_comments_and_strings`
+# can only approximate.
+AST_GREP_ENV = "CTXIDE_AST_GREP"
+AST_GREP_DIR = Path(__file__).resolve().parent / "vendor"
+AST_GREP_NAMES = ("ast-grep.exe", "ast-grep") if os.name == "nt" else ("ast-grep",)
+AST_GREP_INSTALL = "python3 install_ast_grep.py"
+AST_GREP_MISSING = ("this rule needs ast-grep to check its structural pattern, and "
+                    "ast-grep is not installed, so the rule was not checked - "
+                    + AST_GREP_INSTALL)
+# A pathological pattern against a large file must not hang a build the way a
+# pathological regex can; a backend that times out reports `unclear`.
+AST_GREP_TIMEOUT = 30
+
+
+def ast_grep_binary():
+    """The consented binary, or None when the backend is unavailable.
+
+    PATH is deliberately never searched. An audit tool that runs whatever
+    `ast-grep` some PATH entry happens to provide has handed its verdicts to a
+    program nobody reviewed, on a machine whose owner never agreed to it.
+
+    An override that does not resolve returns None rather than falling through
+    to the vendored binary: it is a configuration error the user has to see,
+    and quietly running a different binary is how they would not.
+    """
+    override = os.environ.get(AST_GREP_ENV, "").strip()
+    candidates = ([Path(override)] if override
+                  else [Path(AST_GREP_DIR) / name for name in AST_GREP_NAMES])
+    for p in candidates:
+        if p.is_file() and os.access(str(p), os.X_OK):
+            return p
+    return None
+
+
+def unavailable_reason(check):
+    """Why an optional backend cannot run this check, or None.
+
+    A missing optional signal degrades to "not checked", never to a different
+    matcher wearing the same check id: an approximation that answers a textual
+    question where a structural one was asked would bring back the very false
+    positives this backend exists to kill, under a badge saying they had been
+    ruled out.
+    """
+    if check.get("kind") in AST_KINDS and ast_grep_binary() is None:
+        return AST_GREP_MISSING
+    return None
+
+
+def _ast_grep_matches(binary, pattern, path, text):
+    """(spans, error): character spans of the pattern's matches in `text`.
+
+    The text is written to a temp file keeping the original extension, because
+    that is how ast-grep picks a grammar - a hand-maintained extension-to-
+    language table here would be a second answer to a question the binary
+    already answers.
+
+    One process per file. A session that wrote a hundred files pays a hundred
+    spawns for each structural check, which is the price of not maintaining a
+    temp-path-to-real-path mapping whose one wrong entry would cite the wrong
+    file.
+    """
+    suffix = os.path.splitext(path or "")[1] or ".txt"
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / ("target" + suffix)
+            target.write_text(text, encoding="utf-8", errors="surrogatepass")
+            proc = subprocess.run(
+                [str(binary), "run", "--pattern", pattern, "--json=compact",
+                 # ast-grep honours ignore files, including the user's global
+                 # gitignore. A rule silently skipped because someone ignores
+                 # `*.ts` globally would report `clear`, which reads as "the
+                 # rule was followed" over a file nothing ever looked at.
+                 "--no-ignore", "hidden", "--no-ignore", "global",
+                 "--no-ignore", "parent", str(target)],
+                capture_output=True, timeout=AST_GREP_TIMEOUT,
+                # ast-grep emits UTF-8; decoding it with whatever the machine's
+                # locale happens to be turns a non-ASCII match into a decode
+                # error, i.e. a working check reporting itself broken.
+                text=True, encoding="utf-8", errors="replace")
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        return None, f"ast-grep could not be run ({type(e).__name__}: {e})"
+    out = (proc.stdout or "").strip()
+    detail = (proc.stderr or "").strip().splitlines()
+    if not out and proc.returncode != 0:
+        # `ast-grep run` exits 0 whether or not it matched, so a failing exit
+        # with nothing on stdout is the binary refusing the job - reading that
+        # as "no matches" is how a broken backend would report a clean file.
+        return None, ("ast-grep exited " + str(proc.returncode)
+                      + (f" ({detail[0][:200]})" if detail else ""))
+    try:
+        matches = json.loads(out) if out else []
+    except ValueError:
+        return None, ("ast-grep returned no usable JSON"
+                      + (f" ({detail[0][:200]})" if detail else ""))
+    if not isinstance(matches, list):
+        return None, "ast-grep returned no usable JSON"
+    raw = text.encode("utf-8", errors="surrogatepass")
+    spans = []
+    for m in matches:
+        offsets = ((m or {}).get("range") or {}).get("byteOffset") or {}
+        start, end = offsets.get("start"), offsets.get("end")
+        if not isinstance(start, int) or not isinstance(end, int) \
+                or not 0 <= start <= end <= len(raw):
+            return None, "ast-grep reported a match with no usable byte range"
+        # Byte offsets, not character ones. Slicing the text at a byte offset
+        # quotes the wrong code the moment a file holds one non-ASCII
+        # character, and a citation the reader cannot find is worse than none.
+        spans.append((len(raw[:start].decode("utf-8", "ignore")),
+                      len(raw[:end].decode("utf-8", "ignore"))))
+    return spans, None
+
+
+def _evaluate_ast(check, corpus):
+    """Structural findings, or an uncitable `unclear` note when the run failed.
+
+    A backend that could not answer must never leave the check reporting
+    nothing: no findings is `clear`, which reads as "the rule was followed".
+    The note carries no span because no match supports one.
+    """
+    binary = ast_grep_binary()
+    out = []
+    for entry in _source_entries(check, corpus):
+        if not _path_matches(entry["path"], check.get("applies_to") or []):
+            continue
+        text = entry["text"]
+        spans, error = _ast_grep_matches(binary, check["ast_pattern"],
+                                         entry["path"], text)
+        if error:
+            out.append(_finding(check, entry["path"], text, (0, 0), "unclear",
+                                message=error))
+            continue
+        for start, end in spans:
+            state = ("acknowledged" if _suppressed(text, start, check["id"])
+                     else "violated")
+            out.append(_finding(check, entry["path"], text, (start, end), state))
+    return out
 
 
 def _evaluate_shell(check, corpus):
@@ -879,7 +1041,14 @@ def evaluate_checks(checks, corpus, limit=20):
     findings = []
     normalised = {}
     for check in checks:
-        if check["kind"] in TOOL_KINDS:
+        if unavailable_reason(check):
+            # Skipped rather than approximated. `check_block` is where the
+            # reader is told the rule went unchecked; producing findings from
+            # some other matcher here would report it as decided.
+            continue
+        if check["kind"] in AST_KINDS:
+            findings.extend(_evaluate_ast(check, corpus))
+        elif check["kind"] in TOOL_KINDS:
             findings.extend(_evaluate_tools(check, corpus))
         elif check["kind"] in CANDIDATE_CHECK_KINDS:
             findings.extend(_evaluate_candidates(check, corpus))
@@ -921,6 +1090,274 @@ def _capped(findings, limit):
                 continue
         out.append(f)
     return out
+
+
+# ---------- the opt-in judge tier ----------
+
+# One rule x one candidate x one call, and a ceiling on how many candidates one
+# record may spend. A rule with two hundred sites would otherwise turn a single
+# audit into two hundred model calls before the reader saw anything.
+JUDGE_CANDIDATE_LIMIT = 20
+
+# What a bucket-C verdict is worth, said in the record itself rather than left
+# to a legend: judge reliability without validity, position bias and
+# self-preference are all documented, so a semantic verdict annotates and never
+# decides.
+JUDGE_ADVISORY_NOTE = ("judged semantically by the opt-in LLM tier, so this verdict is "
+                       "advisory: it can flag a rule for a reader but never call it "
+                       "violated on its own")
+JUDGE_RAN_NOTE = ("answered by the opt-in LLM judge tier, once per site this tool "
+                  "enumerated itself")
+# The tier is on and this record still went unasked. Saying "the tier is off"
+# here would send the reader to turn on something that is already on, and
+# saying nothing would report an unasked rule as an answered one.
+JUDGE_NOTHING_TO_ASK = ("the opt-in judge tier is on, but this session produced nothing "
+                        "this rule could be asked about")
+JUDGE_NO_SPAN = ("the judge reported a violation but quoted nothing that appears in the "
+                 "content it was given, so it is not reportable as one")
+
+
+def _unanswered(record, answer, path, advisory):
+    """A question the judge never got to answer, reported as unchecked.
+
+    Not `unclear`: an optional signal going missing must degrade to "not
+    checked", never to "there might be something here". A budget that ran out
+    and a backend that was down are facts about the run, not about the code.
+    """
+    return _judge_finding(record, path, "", (0, 0), "note",
+                          answer.get("reason", ""), "unavailable", advisory, line=0)
+
+
+def _record_key(record):
+    """The rule identity a cached verdict is keyed on."""
+    return (record.get("rule_key")
+            or rule_key(record.get("rule_ref", ""),
+                        record.get("rule_text") or record.get("statement") or ""))
+
+
+def _judge_finding(record, path, text, span, state, message, verdict, advisory,
+                   line=None):
+    """A judge verdict in the same shape every deterministic finding uses.
+
+    Same shape on purpose: a reader should not have to learn a second record
+    format to see what was found, and every consumer that already knows how to
+    cite a finding cites this one too. `advisory` is the display cap, read by
+    `_state_from` and by the caller that paints the block.
+    """
+    shim = dict(record)
+    shim.setdefault("kind", record.get("bucket") or "judged")
+    # A semantic verdict is always `low`, whatever the record claims: the
+    # author's confidence is in the rule being checkable, not in a model's read
+    # of a whole file, and a `high` badge beside an advisory note would invite
+    # exactly the trust the display cap exists to withhold. A bucket-B verdict
+    # keeps the record's own confidence - the site was enumerated here and the
+    # question is narrow - but never rises above `medium`, which is what decides
+    # whether a finding may paint a block red.
+    if advisory:
+        shim["confidence"] = "low"
+    elif shim.get("confidence") == "high":
+        shim["confidence"] = "medium"
+    elif shim.get("confidence") not in CONFIDENCES:
+        # Undeclared is `low`, and `low` never paints a block. A judged record
+        # is not put through the fixture gate that makes `confidence` mandatory
+        # everywhere else, so an author who left it out must not get a red badge
+        # they never asked for.
+        shim["confidence"] = "low"
+    f = _finding(shim, path, text, span, state, line=line, message=message)
+    f["judge"] = True
+    f["judgeVerdict"] = verdict
+    if advisory:
+        f["advisory"] = True
+    return f
+
+
+def _injection_findings(record, request, advisory):
+    """One note per attempt, inside the judged content, to instruct the judge.
+
+    Reported and never obeyed. For a tool whose only output is trust verdicts,
+    content that talks the judge into a green is the one attack that turns the
+    product against its user, so the attempt is a finding in its own right -
+    with state `note`, because the verdict it tried to change must not move.
+    """
+    import judge_tier
+    out = []
+    where = request["evidence"][0][0] if request["evidence"] else ""
+    for excerpt in (request.get("injections") or [])[:3]:
+        # No span: the excerpt is quoted in the message instead, because a
+        # citation pointing at line 0 is one the reader cannot go and check,
+        # and the offsets here are into content that was clipped for the model.
+        out.append(_judge_finding(
+            record, where, "", (0, 0), "note",
+            f"{judge_tier.INJECTION_NOTE} — {excerpt}", "injection-attempt",
+            advisory, line=0))
+    return out
+
+
+def _quote_span(text, quote, near=0):
+    """Where the judge's quoted evidence sits in the content, or None.
+
+    A verdict the reader cannot go and look at is not reportable, so a quote
+    that is not in what the judge was given downgrades the finding rather than
+    citing a line that says something else.
+    """
+    if not quote:
+        return None
+    pos = text.find(quote, near)
+    if pos == -1:
+        pos = text.find(quote)
+    return (pos, pos + len(quote)) if pos != -1 else None
+
+
+def _candidate_evidence(cand):
+    """The site as the judge sees it: its own opening line plus its body.
+
+    The body alone is not enough. An omission rule is broken by a body that is
+    *empty*, and a judge given nothing has nothing it could quote - which the
+    citation gate would then read as a hallucination and throw away the one
+    verdict the rule exists for. The opening line is the quotable half. A
+    candidate whose body already is its whole text (a comment) is not doubled.
+    """
+    head, body = cand.get("match") or "", cand.get("text") or ""
+    if body.strip() and body.strip() in head:
+        return head
+    return head + body
+
+
+def _judge_candidates(record, corpus, judge):
+    """Bucket B: this tool enumerates the sites, the judge answers about each one.
+
+    The deterministic half is the enumeration, which is why a bucket-B verdict
+    is not display-capped: the site, its path and its line are facts this tool
+    established, and the only thing asked of the model is the narrow question
+    the record states.
+
+    Returns the findings and how many sites were actually *answered* - a site
+    the budget or a dead backend swallowed is not one the rule was checked
+    against, and counting it would let the block read `clear`.
+    """
+    import judge_tier
+    out, asked, answered = [], 0, 0
+    globs = record.get("applies_to") or []
+    for entry in _source_entries(record, corpus):
+        for cand in enumerate_candidates(record["candidate"], [entry], globs):
+            if asked >= JUDGE_CANDIDATE_LIMIT:
+                return out, answered
+            asked += 1
+            request = judge_tier.judge_request(
+                _record_key(record), record.get("statement", ""),
+                record.get("examples_positive"), record.get("examples_negative"),
+                [(f"{cand['path']}:{cand['line']}", _candidate_evidence(cand))],
+                judge.model)
+            answer = judge.ask(request)
+            if not answer.get("unavailable"):
+                answered += 1
+            out.extend(_injection_findings(record, request, False))
+            out.append(_fold_candidate(record, entry, cand, answer))
+    return out, answered
+
+
+def _fold_candidate(record, entry, cand, answer):
+    if answer.get("unavailable"):
+        return _unanswered(record, answer, cand["path"], False)
+    text = entry["text"]
+    start, end = cand["span"]
+    verdict = answer["verdict"]
+    reason = answer.get("reason") or record.get("message", "")
+    if verdict == "violated":
+        quote = answer.get("evidence", "")
+        # The quote has to be in what the judge was *given*, not merely
+        # somewhere in the file: a model that quotes a line from the `try`
+        # block would otherwise have the rule about the `catch` cited against
+        # code it does not govern. The offset is then taken from the file, at
+        # or after the site, so the line number is the real one.
+        span = (_quote_span(text, quote, start)
+                if quote and quote in _candidate_evidence(cand) else None)
+        if span is None or span[0] < start:
+            return _judge_finding(record, cand["path"], text, (start, end), "unclear",
+                                  f"{JUDGE_NO_SPAN}. {reason}".strip(), verdict, False)
+        state = ("acknowledged" if _suppressed(text, span[0], record.get("id", ""))
+                 else "violated")
+        return _judge_finding(record, cand["path"], text, span, state, reason,
+                              verdict, False)
+    if verdict == "unclear":
+        return _judge_finding(record, cand["path"], text, (start, end), "unclear",
+                              reason, verdict, False)
+    # Compliant. It carries no span because there is nothing wrong to point at,
+    # so it is a note: the block reads `clear` from the sites having been
+    # examined, not from this one finding.
+    return _judge_finding(record, cand["path"], text, (start, end), "note",
+                          reason, verdict, False)
+
+
+def _judged_evidence(record, corpus):
+    """The minimal session content a bucket-C record's question is about."""
+    if _evidence_source(record) == "transcript":
+        log = "\n".join(e["text"] for e in corpus.get("tools") or [])
+        return [("(tools)", log)] if log else []
+    globs = record.get("applies_to") or []
+    return [(e["path"], e["text"]) for e in _source_entries(record, corpus)
+            if _path_matches(e["path"], globs)]
+
+
+def _judge_semantic(record, corpus, judge):
+    """Bucket C: one question about the session's own evidence, display-capped."""
+    import judge_tier
+    pieces = _judged_evidence(record, corpus)
+    if not pieces:
+        # Nothing the rule is about happened, so there is nothing to ask. A
+        # call here would buy an answer about an empty page.
+        return []
+    request = judge_tier.judge_request(
+        _record_key(record), record.get("statement", ""),
+        record.get("examples_positive"), record.get("examples_negative"),
+        pieces, judge.model)
+    answer = judge.ask(request)
+    out = _injection_findings(record, request, True)
+    if answer.get("unavailable"):
+        out.append(_unanswered(record, answer, pieces[0][0], True))
+        return out
+    reason = answer.get("reason") or ""
+    quote = answer.get("evidence", "")
+    for name, text in request["evidence"]:
+        span = _quote_span(text, quote)
+        if span is None:
+            continue
+        state = "unclear" if answer["verdict"] == "violated" else "note"
+        out.append(_judge_finding(record, name, text, span, state, reason,
+                                  answer["verdict"], True))
+        return out
+    # No citable span. A violation without one is not reportable as one, and a
+    # compliant answer never had anything to cite in the first place.
+    message = f"{JUDGE_NO_SPAN}. {reason}".strip() if answer["verdict"] == "violated" else reason
+    out.append(_judge_finding(record, pieces[0][0], "", (0, 0), "note", message,
+                              answer["verdict"], True, line=0))
+    return out
+
+
+def judge_records(records, corpus, judge):
+    """Ask the opt-in judge about the records this tool cannot decide itself.
+
+    Returns the findings, the records that genuinely ran (so the block can read
+    `clear` rather than `not-checkable` when the judge examined its sites),
+    whether anything was in scope at all, and one note per record saying what
+    became of it - a record the tier was on for but never asked about must not
+    report itself as answered, nor keep telling the reader the tier is off.
+    """
+    findings, ran, in_scope, notes = [], [], False, {}
+    for record in records:
+        rid = record.get("id")
+        if record.get("bucket") == "hybrid" and record.get("candidate") in CANDIDATE_KINDS:
+            f, asked = _judge_candidates(record, corpus, judge)
+            findings.extend(f)
+            notes[rid] = JUDGE_RAN_NOTE if asked else JUDGE_NOTHING_TO_ASK
+            if asked:
+                ran.append(record)
+                in_scope = True
+        else:
+            f = _judge_semantic(record, corpus, judge)
+            findings.extend(f)
+            notes[rid] = JUDGE_ADVISORY_NOTE if f else JUDGE_NOTHING_TO_ASK
+    return findings, ran, in_scope, notes
 
 
 # ---------- loading and the self-test gate ----------
@@ -974,9 +1411,25 @@ def _selftest_corpus(check, snippet):
             "commands": [], "paths": []}
 
 
+def _selftest_findings(check, snippet):
+    return evaluate_checks([check], _selftest_corpus(check, snippet))
+
+
 def _violates(check, snippet):
-    return any(f["state"] == "violated"
-               for f in evaluate_checks([check], _selftest_corpus(check, snippet)))
+    return any(f["state"] == "violated" for f in _selftest_findings(check, snippet))
+
+
+def _backend_complaint(findings, check):
+    """What an external backend said about a fixture, if it said anything.
+
+    Without this a record whose language ast-grep has no grammar for is
+    demoted with "your should_match case did not fire", which sends the author
+    off to rewrite a pattern that was never the problem.
+    """
+    for f in findings:
+        if f["state"] == "unclear" and f["message"] != check.get("message", ""):
+            return f" - {f['message']}"
+    return ""
 
 
 def _fixtures(check):
@@ -1064,7 +1517,8 @@ def _validate(check):
     kind = check.get("kind")
     if kind not in VOCABULARY:
         return f"unknown kind `{kind}` - the predicate vocabulary is closed"
-    if (kind in SOURCE_KINDS or kind in CANDIDATE_CHECK_KINDS) and not check.get("applies_to"):
+    if (kind in SOURCE_KINDS or kind in CANDIDATE_CHECK_KINDS
+            or kind in AST_KINDS) and not check.get("applies_to"):
         # Without globs every written file is in scope, including the .py and
         # .md the rule never meant, which is how an under-specified check
         # accuses the agent in a language the rule does not govern.
@@ -1075,6 +1529,17 @@ def _validate(check):
     for field in VOCABULARY[kind]:
         if not check.get(field):
             return f"kind `{kind}` requires `{field}`"
+        if field == "ast_pattern":
+            # An ast-grep pattern is code, not a regex. Compiling it as one
+            # would refuse `catch ($$$A) { }` - exactly the patterns this
+            # backend exists for - for failing at a language it is not written
+            # in. What validates it is its own fixtures, re-run below. The type
+            # check is not free-standing pedantry: skipping the compile also
+            # skipped the only thing that insisted the field was a string, and
+            # a list here reaches `subprocess` as an argv entry and raises.
+            if not isinstance(check[field], str):
+                return "`ast_pattern` must be a string"
+            continue
         if field == "candidate":
             if check[field] not in CANDIDATE_KINDS:
                 return (f"`candidate` must be one of {', '.join(CANDIDATE_KINDS)} - "
@@ -1107,10 +1572,18 @@ def _validate(check):
 
 def _self_test_failure(check):
     """The first self-test this tool's own matcher disagrees with, or None."""
+    if unavailable_reason(check):
+        # The fixtures are the gate, and with the backend absent they cannot
+        # run. Refusing the record here would report the rule as inexpressible
+        # when installing one optional binary is what it actually needs; the
+        # block says `not-checkable` either way, so nothing is claimed about it.
+        return None
     tests = _fixtures(check)
     for snippet in tests["should_match"]:
-        if not _violates(check, snippet):
-            return f"self-test failed: should_match case did not fire ({snippet[:80]!r})"
+        findings = _selftest_findings(check, snippet)
+        if not any(f["state"] == "violated" for f in findings):
+            return (f"self-test failed: should_match case did not fire "
+                    f"({snippet[:80]!r})" + _backend_complaint(findings, check))
     for snippet in tests["should_not_match"]:
         if _violates(check, snippet):
             return f"self-test failed: should_not_match case fired ({snippet[:80]!r})"
@@ -1138,6 +1611,12 @@ def _parked(entry, why, bucket, from_bucket=None):
     if from_bucket:
         out["fromBucket"] = from_bucket
     return out
+
+
+def _reworded(entry, notes):
+    """A parked entry whose reason for being parked no longer holds."""
+    why = notes.get(entry.get("id"))
+    return dict(entry, why=why) if why else entry
 
 
 _JUDGE_OFF = "the opt-in judge tier is off, so this rule was not checked"
@@ -1224,7 +1703,7 @@ def load_checks(data):
     check must be visible as a broken check. `judged` holds the records that
     were never deterministic to begin with. Neither is applied.
     """
-    checks, rejected, demoted, judged = [], [], [], []
+    checks, rejected, demoted, judged, judgeable = [], [], [], [], []
     for raw in (data or {}).get("checks") or []:
         entry = raw if isinstance(raw, dict) else {}
         bucket = entry.get("bucket")
@@ -1236,6 +1715,7 @@ def load_checks(data):
             if reason is None:
                 judged.append(_parked(
                     entry, f"bucket `{bucket}` needs a judge, and " + _JUDGE_OFF, bucket))
+                judgeable.append(entry)
         else:
             reason = _validate(raw)
             failure = _self_test_failure(raw) if reason is None else None
@@ -1248,6 +1728,11 @@ def load_checks(data):
                     entry, f"its fixtures did not reproduce here ({failure}), so it "
                            "was demoted to the `judged` bucket; " + _JUDGE_OFF,
                     "judged", from_bucket="deterministic"))
+                # Only if the judge could actually read it: a demoted record
+                # that carries no statement and no examples would hand the
+                # judge back the prose the compile step existed to replace.
+                if _validate_judged(dict(entry, bucket="judged")) is None:
+                    judgeable.append(entry)
             elif reason is None and failure:
                 reason = failure
             elif reason is None:
@@ -1263,6 +1748,11 @@ def load_checks(data):
         "notCheckable": list((data or {}).get("not_checkable") or []),
         "demoted": demoted,
         "judged": judged,
+        # The full records behind `demoted` and `judged`, for the opt-in judge
+        # tier. Deliberately not on any block payload: they carry the whole rule
+        # text and both example lists, and the parked entries above are what a
+        # reader needs to see.
+        "judgeable": judgeable,
     }
 
 
@@ -1293,7 +1783,7 @@ def checks_for_doc(doc_path):
     except Exception as e:
         return {"source": str(path), "checks": [], "notCheckable": [],
                 "rejected": [_rejection("(file)", f"checks file unreadable: {e}")],
-                "demoted": [], "judged": []}
+                "demoted": [], "judged": [], "judgeable": []}
     loaded = load_checks(data)
     loaded["source"] = loaded.get("source") or str(path)
     return loaded
@@ -1423,10 +1913,20 @@ def _in_scope(applied, corpus):
 
 
 def _state_from(findings, applied, not_checkable, stale, in_scope):
-    if any(f["state"] == "violated" for f in findings):
+    """The block's state, with the judge tier's semantic verdicts capped.
+
+    An advisory finding may weaken a green but can never manufacture a red: a
+    semantic judgement has no fixtures behind it and no site this tool
+    enumerated, so the strongest honest thing it can say alone is that the rule
+    is not settled.
+    """
+    hard = [f for f in findings if not f.get("advisory")]
+    if any(f["state"] == "violated" for f in hard):
         return "violated"
-    if any(f["state"] == "acknowledged" for f in findings):
+    if any(f["state"] == "acknowledged" for f in hard):
         return "acknowledged"
+    if any(f["state"] == "unclear" for f in hard):
+        return "unclear"
     if any(f["state"] == "unclear" for f in findings):
         return "unclear"
     if applied:
@@ -1434,7 +1934,7 @@ def _state_from(findings, applied, not_checkable, stale, in_scope):
     return "not-checkable"
 
 
-def check_block(block, loaded, corpus, fallback=True, doc_path=""):
+def check_block(block, loaded, corpus, fallback=True, doc_path="", judge=None):
     """Rule-check verdict for one block, or None when nothing is checkable.
 
     `loaded` is the gated checks payload for the block's document, or None when
@@ -1459,6 +1959,12 @@ def check_block(block, loaded, corpus, fallback=True, doc_path=""):
 
     `doc_path` is the document's own path, used only to name it in the
     re-compile hint: a rule reported unchecked has to say which file to compile.
+
+    `judge` is the opt-in LLM tier (§9.1), and is None on the default path -
+    where nothing here calls a model, makes a network request, or even imports
+    the module that could. With it, the parked buckets are answered instead of
+    reported unanswered: bucket B about the sites this tool enumerated, bucket C
+    about the session's own evidence and display-capped.
     """
     applied, stale, not_checkable, rejected = [], [], [], []
     demoted, judged = [], []
@@ -1509,7 +2015,58 @@ def check_block(block, loaded, corpus, fallback=True, doc_path=""):
         # has nothing to say about rules; staying silent beats guessing.
         return None
 
+    # A check whose optional backend is missing is moved out of `applied` and
+    # named as unchecked. Leaving it in would report `clear` - "the rule was
+    # followed" - over a rule nothing ever looked at, and dropping it silently
+    # would say nothing at all about a rule the reader compiled on purpose.
+    runnable = []
+    for c in applied:
+        why = unavailable_reason(c)
+        if why:
+            not_checkable.append({"ruleRef": c.get("rule_ref", ""),
+                                  "ruleText": c.get("rule_text", ""),
+                                  "why": why})
+        else:
+            runnable.append(c)
+    applied = runnable
+
     findings = evaluate_checks(applied, corpus) if applied else []
+    in_scope = _in_scope(applied, corpus)
+
+    # A judged record is pinned to its rule's text by the same key a
+    # deterministic check is. Skipping that gate here would ask a model a
+    # question compiled from wording the rule no longer carries, and the answer
+    # would look exactly as authoritative as a current one.
+    judgeable, jnotes = [], {}
+    if judge is not None and loaded:
+        for r in loaded.get("judgeable") or []:
+            if not _entry_matches_block(r, block):
+                continue
+            if r.get("rule_key") and r["rule_key"] != block_key:
+                why = "the rule's text changed since this check was authored"
+                stale.append({"id": r.get("id", ""), "ruleRef": r.get("rule_ref", ""),
+                              "why": why})
+                jnotes[r.get("id")] = why
+                continue
+            judgeable.append(r)
+    if judgeable:
+        jfindings, jran, jscope, notes = judge_records(judgeable, corpus, judge)
+        jnotes.update(notes)
+        findings.extend(jfindings)
+        # A hybrid record that ran counts as applied: its sites were enumerated
+        # here and each was examined, which is the same thing the deterministic
+        # path means by `clear`.
+        applied = applied + jran
+        in_scope = in_scope or jscope
+
+    if jnotes:
+        # A parked entry keeps its place in the list but stops saying the tier
+        # is off: reporting a rule as unanswered directly above its answer, or
+        # telling the reader to switch on something already on, is the same
+        # record describing itself two ways.
+        judged = [_reworded(e, jnotes) for e in judged]
+        demoted = [_reworded(e, jnotes) for e in demoted]
+
     if not applied and not not_checkable and not stale and not demoted and not judged:
         # Silence for a block that states no rule; an unextractable rule still
         # gets a verdict, so it is never mistaken for one that was followed.
@@ -1525,7 +2082,7 @@ def check_block(block, loaded, corpus, fallback=True, doc_path=""):
             "why": why,
         })
 
-    state = _state_from(findings, applied, not_checkable, stale, _in_scope(applied, corpus))
+    state = _state_from(findings, applied, not_checkable, stale, in_scope)
     # When something fired, the reported confidence is that of the findings
     # that fired - never a bystander's. A caller deciding whether to paint the
     # block red must not inherit an unrelated check's high confidence.

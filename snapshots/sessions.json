@@ -1,0 +1,21 @@
+{
+  "_comment": [
+    "The sessions the judgement-reliability baseline is measured on: the anchors",
+    "named in docs/judgement-reliability-research.md S7, spanning all four audited",
+    "projects plus this repo. `cwd` is the working directory the session ran in -",
+    "it is what the transcript directory name encodes, and the project CLAUDE.md",
+    "and project-relative paths resolve against it.",
+    "Only `capture` needs these paths; `verify` runs entirely off each snapshot's",
+    "own manifest, so a machine that never had these projects can still check one."
+  ],
+  "sessions": [
+    {"project": "famigo", "cwd": "/Users/jakuburban/Git/famigo", "session": "9dd3cc8a"},
+    {"project": "famigo", "cwd": "/Users/jakuburban/Git/famigo", "session": "5448a718"},
+    {"project": "formic-core", "cwd": "/Users/jakuburban/Git/formic/core", "session": "39b9e09e"},
+    {"project": "formic-core", "cwd": "/Users/jakuburban/Git/formic/core", "session": "4ebe50c0"},
+    {"project": "formicHMI", "cwd": "/Users/jakuburban/Git/formic/formicHMI", "session": "12f48cdb"},
+    {"project": "formicHMI", "cwd": "/Users/jakuburban/Git/formic/formicHMI", "session": "8fd8526c"},
+    {"project": "reband", "cwd": "/Users/jakuburban/reband", "session": "22c58939"},
+    {"project": "agent-context-ide", "cwd": "/Users/jakuburban/Git/agent-context-ide", "session": "d5c3cc1a"}
+  ]
+}

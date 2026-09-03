@@ -123,14 +123,35 @@ Deployment happens through the staging pipeline before production release.
 """
 
 
-def test_loose_keyword_overlap_only_scores_possibly_referenced():
+def test_a_single_passing_mention_is_not_lexical_evidence():
+    """The >= 2 observation guard: one mention of a term is not a pattern.
+
+    This used to be enough - two of the block's first eight five-letter words
+    appearing anywhere scored `possibly-referenced` - which is the mechanism
+    that made almost every loaded block "possibly referenced".
+    """
     events = [user_text("ship it", 1),
               assistant_text("The staging pipeline runs before the production "
                              "release, so deployment is safe.", 2)]
     v = brv.assess_block(block_from(KEYWORD_MD), rule_file(),
                          trace_for(events, "ship it"))
+    assert v["status"] == "unused"
+    assert v["evidenceLabel"] == "no-lexical-trace"
+
+
+def test_lexical_evidence_tops_out_at_possibly_referenced():
+    """Sustained shared vocabulary is co-occurrence, and co-occurrence is weak."""
+    md = ("## Store hydration\n\nHydration guards protect the persisted zustand "
+          "slice. Rehydrate the slice through the migration shim, never directly.\n")
+    events = [user_text("fix hydration", 1),
+              assistant_text("I added the hydration guard around the persisted "
+                             "zustand slice, then ran the migration shim so "
+                             "rehydrate goes through it. The hydration path now "
+                             "rejects a stale persisted slice, and the migration "
+                             "shim reports what it dropped.", 2)]
+    v = brv.assess_block(block_from(md), rule_file(), trace_for(events, "fix hydration"))
     assert v["status"] == "possibly-referenced"
-    assert "weak evidence" in v["reason"].lower()
+    assert v["evidenceLabel"] == "topical-overlap"
 
 
 def test_no_signal_at_all_stays_unused():

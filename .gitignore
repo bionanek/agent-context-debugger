@@ -7,6 +7,11 @@ agent-context-ide-real.html
 # Regenerated on every capture/verify; the frozen inputs themselves are tracked.
 snapshots/.restore/
 
+# The optional ast-grep binary, downloaded on consent by install_ast_grep.py.
+# Never committed: it is a ~10MB platform-specific binary, and the pinned
+# digest in the installer is what makes it reproducible.
+vendor/
+
 __pycache__/
 .pytest_cache/
 .venv/

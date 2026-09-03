@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import ctxlog_facts
+import lexical
 import rule_checks
 
 DEFAULT_CLAUDE_MD = Path.home() / ".claude" / "CLAUDE.md"
@@ -1941,7 +1942,11 @@ _QUOTED_RE = re.compile(r"\"[^\"]{1,200}\"", re.S)
 # demonstrably running. The line must *end* at the command: "links to:
 # `/deployment`, `/deployment/calibrate…`" is a list of routes, and one real doc
 # on this machine turns exactly that shape into a command that does not exist.
-_TRIGGER_DECL = r"[^\n:`]{1,40}:[ \t]*`(/[a-z][\w-]*)`[ \t]*\.?[ \t]*(?:\n|$)"
+# The label is word characters and spaces (any script) rather than "anything
+# but a colon", so the match *starts at the label*: a permissive class lets a
+# match begin at a stray quote further left, and the position `_example_spans`
+# is asked about is then outside the quoted example it should have excluded.
+_TRIGGER_DECL = r"[\w \t-]{1,40}:[ \t]*`(/[a-z][\w-]*)`[ \t]*\.?[ \t]*(?:\n|$)"
 
 
 def _example_spans(text):
@@ -2272,13 +2277,18 @@ def _template_echo_hits(literals, trace, min_literals=2, exclude_path=None):
     `exclude_path` is the block's own document. Editing the rule file itself
     rewrites the template's own text, so without this a session that merely
     updated CLAUDE.md would read as having followed every template in it.
+    The comparison is `_path_names_target`, not equality of resolved paths: an
+    append written as `cd <dir> && cat >> DECISIONS.md` carries a relative
+    path that resolves against this process's cwd, so equality let a file
+    match its own template and marked every older entry in it `used`. The
+    component join also suppresses a same-named file in another tree, which
+    costs credit and never invents an accusation - the safe direction here.
     """
     if not literals:
         return []
-    excluded = _resolve_key(os.path.expanduser(exclude_path)) if exclude_path else None
     by_path = {}
     for ch in trace.get("written_chunks") or ():
-        if excluded and _resolve_key(ch["path"]) == excluded:
+        if exclude_path and _path_names_target(exclude_path, ch["path"]):
             continue
         hit = [lit for lit in literals if lit in ch["text"]]
         if not hit:
@@ -2530,26 +2540,6 @@ def _windows_around(haystack, needle, window=140, max_hits=3):
     return out
 
 
-def _block_keywords(content, prompt=""):
-    """Distinctive 5+ char tokens from block content, minus stopwords + words present in user prompt."""
-    stop = {"about", "above", "after", "again", "always", "before", "below", "between",
-            "could", "every", "first", "have", "having", "their", "there", "these", "those",
-            "through", "under", "until", "where", "which", "while", "would", "should", "claude",
-            "rules", "rule", "block", "section", "files", "file", "code", "task", "tasks"}
-    tokens = re.findall(r"\b[a-zA-Z][a-zA-Z0-9_-]{4,}\b", content)
-    prompt_words = set(re.findall(r"\b[a-zA-Z][a-zA-Z0-9_-]{4,}\b", prompt or "")) | stop
-    out, seen = [], set()
-    for t in tokens:
-        tl = t.lower()
-        if tl in prompt_words or tl in seen:
-            continue
-        seen.add(tl)
-        out.append(tl)
-        if len(out) >= 12:
-            break
-    return out
-
-
 def _last_sentence_with_causal(text):
     """Pick the most causally-loaded sentence in a passage (or first sentence)."""
     sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z])", text.strip())
@@ -2579,18 +2569,20 @@ THINKING_SELF_REPORT_NOTE = ("Self-report, not evidence: models describe reasoni
                              "the verdict at most and never sets it.")
 
 
-def _keyword_overlap(content, trace):
-    """The block's own words that also appear in the assistant's text.
+def _lexical_result(content, trace):
+    """Score one block's wording against this scope's prose. One matcher.
 
-    One matcher for the badge and the card: `assess_block` tokenized the block
-    one way and the loose-keyword card another, so a block could sit `unused`
-    ("no keyword overlap with the assistant's reasoning") above a card counting
-    three shared words. Returns (tokens, hits) - `tokens` keeps its duplicates
-    because the reason line quotes its length as the denominator.
+    The badge, the moment card and the baked `lexical` record all read this
+    one call: `assess_block` used to tokenize the block one way and the card
+    another, so a block could sit `unused` - "no keyword overlap" - above a
+    card counting three shared words.
     """
-    keywords = [w.lower() for w in re.findall(r"\b[a-zA-Z]{5,}\b", content)][:8]
-    corpus = (trace["all_assistant_text"] or "").lower()
-    return keywords, [k for k in dict.fromkeys(keywords) if k in corpus]
+    cache = trace.setdefault("lexical_cache", {})
+    hit = cache.get(content)
+    if hit is None:
+        hit = lexical.score(content, trace.get("lexical_bg"), trace.get("lexical_q"))
+        cache[content] = hit
+    return hit
 
 
 def _structural_intents(file, trace):
@@ -2939,35 +2931,35 @@ def _moments_for_read_driven(block, file, trace, segs):
     return moments
 
 
-def _moments_for_loose_keyword(block, file, trace, segs):
+# What each lexical label says on the card. The label names the evidence, so
+# the card has to as well - and the two negative labels are different facts: a
+# block nobody could score is not a block the run left no trace of.
+LEXICAL_LABELS = {
+    lexical.ECHOED: "The run reproduced this block's wording",
+    lexical.TOPICAL: "The run's prose is over-represented in this block's terms",
+    lexical.NO_TRACE: "No lexical trace of this block in the run's prose",
+    lexical.UNSCORABLE: "Not lexically scorable",
+}
+
+
+def _moments_for_lexical(result):
     """The one card a block earns when its only evidence is shared wording.
 
     This used to rank the assistant's paragraphs by keyword overlap and file
     the top three as INTENT, so a Figma design-system block got a
     TRIGGER-shaped narrative built out of a rate-limiting review. There is no
-    narrative to tell here: the honest report is which words the two texts
-    share, and that sharing them means nothing.
+    narrative to tell here: the honest report is what the two texts share and
+    that sharing it means nothing, so the tier gets exactly one card and both
+    positive labels stay `co-occurrence`. Even a verbatim quote is self-report.
     """
-    _keywords, shared = _keyword_overlap(block["content"], trace)
-    # The ≥2 floor is `assess_block`'s, not a second one: one shared word is
-    # noise, and a card counting three of them under an `unused` badge reading
-    # "no keyword overlap" is the badge-versus-card contradiction the trigger
-    # matcher was unified to remove.
-    if len(shared) < 2:
-        return [_moment(None, "non-event", "no",
-                        "No topical reasoning detected",
-                        # Says what was measured, because the old wording
-                        # ("no assistant text segment had ≥2 distinctive
-                        # keywords") described a per-segment ranking that no
-                        # longer runs, and a card nobody can check against the
-                        # badge above it is the failure this phase is about.
-                        text=f"Overlap with the assistant's text: {len(shared)} of "
-                             f"{len(_keywords)} scanned words. Two are the floor for "
-                             "even a co-occurrence note.")]
-    return [_moment(None, "co-occurrence", None,
-                    f"{len(shared)} of the block's words also appear in the run's text",
-                    text=f"{CO_OCCURRENCE_NOTE}\nShared wording: "
-                         + ", ".join(shared[:12]))]
+    label = LEXICAL_LABELS[result["label"]]
+    if result["label"] in (lexical.NO_TRACE, lexical.UNSCORABLE):
+        return [_moment(None, "non-event", "no", label, text=result["reason"])]
+    detail = (f"Quoted: \u201c{result['quote']['text']}\u201d"
+              if result.get("quote")
+              else "Shared terms: " + ", ".join(result["significant"][:12]))
+    return [_moment(None, "co-occurrence", None, label,
+                    text=f"{CO_OCCURRENCE_NOTE}\n{result['reason']}\n{detail}")]
 
 
 def assemble_moments(block, file, trace, predicates):
@@ -3012,7 +3004,7 @@ def assemble_moments(block, file, trace, predicates):
                     moments.append(_moment(None, "non-event", "no",
                                            f"`{cmd}` not invoked this run",
                                            text=f"User prompt: \"{(trace['user_prompt'] or '')[:160]}\""))
-        # If nothing matched → loose keyword fallback (skipped for read-style kinds, handled above)
+        # If nothing matched → the lexical tier (skipped for read-style kinds, handled above)
         if not moments:
             if file_kind == "reference":
                 moments.extend(_moments_for_read_driven(block, file, trace, segs))
@@ -3021,7 +3013,7 @@ def assemble_moments(block, file, trace, predicates):
                 # returns: corroboration is appended below only where there is
                 # something for it to corroborate, because a second card here
                 # starts reassembling the narrative this tier cannot support.
-                return _moments_for_loose_keyword(block, file, trace, segs)
+                return _moments_for_lexical(_lexical_result(block["content"], trace))
 
     moments.extend(_thinking_corroboration(block, file, trace, segs))
 
@@ -3242,8 +3234,10 @@ def _fired_strongly(predicate, trace):
 
 def _classify_pair(a, b, trace):
     """Decide whether a session-loaded duplicate pair was used or wasted."""
-    keywords = _block_keywords(a["content"] + "\n" + b["content"], trace["user_prompt"])
-    relevance = _ranked_topical_segments(trace["segs"], keywords, limit=1)
+    terms = [t["term"] for t in lexical.block_terms(
+        a["content"] + "\n" + b["content"], trace.get("lexical_bg") or lexical.empty_background())
+        if " " not in t["term"]]
+    relevance = _ranked_topical_segments(trace["segs"], terms, limit=1)
     if relevance:
         return "referenced"
     # Predicate-based fall-through, restricted to the strong tier for the same
@@ -3332,6 +3326,10 @@ def assess_block(block, file, trace):
         }
 
     predicates = derive_predicates(block, file)
+    # Set only by the branch that actually consults the lexical tier. Reading it
+    # back off the trace's memo instead would attach a label to any block whose
+    # content happens to match one that *was* scored.
+    lexical_result = None
     strong = [p for p in predicates if _is_strong(p)]
     weak = [p for p in predicates if not _is_strong(p)]
     applicable = [p for p in strong if p["applicable"](trace)]
@@ -3384,17 +3382,23 @@ def assess_block(block, file, trace):
         reason = ("No predicate's preconditions were met this run — the rule didn't apply. "
                   "Block was loaded into context but could not have fired.")
     else:
-        keywords, shared = _keyword_overlap(content, trace)
-        hits = len(shared)
-        if keywords and hits >= 2:
+        # The lexical tier, and only here: it is consulted when nothing else
+        # has anything to say. Its ceiling is `possibly-referenced` whatever it
+        # finds - shared wording is co-occurrence, and a verbatim quote is the
+        # model reporting on itself.
+        lexical_result = _lexical_result(content, trace)
+        lex = lexical_result
+        if lex["label"] in (lexical.ECHOED, lexical.TOPICAL):
             status = "possibly-referenced"
-            reason = (f"Weak evidence only — loose keyword match, {hits}/{len(keywords)} "
-                      "keywords from the block appear in the assistant's reasoning. Common "
-                      "words match by coincidence, so this is a hint, not compliance.")
-            evidence.append({"label": "keyword overlap", "text": f"{hits}/{len(keywords)} keywords matched"})
+            evidence.append({"label": f"lexical: {lex['label']}", "text": lex["reason"]})
         else:
             status = "unused"
-            reason = "No predicate derivable and no keyword overlap with the assistant's reasoning."
+        # The lexical reason is quoted whole, so the badge and the card stand in
+        # a containment relation and cannot contradict each other; the prefix
+        # only says why the tier was reached at all, which the old reason
+        # ("No predicate derivable and no keyword overlap") carried and the
+        # lexical sentence on its own does not.
+        reason = f"No predicate derivable, so only the wording could be compared. {lex['reason']}"
 
     moments = assemble_moments(block, file, trace, predicates)
 
@@ -3408,6 +3412,12 @@ def assess_block(block, file, trace):
         "evidence": evidence,
         "moments": moments,
     }
+    # Appended, not inserted, and only where the tier actually ran: a block
+    # decided by a Skill call or a compiled check has no lexical claim to make,
+    # and inventing a label for it would read as one.
+    if lexical_result is not None:
+        out["evidenceLabel"] = lexical_result["label"]
+        out["lexical"] = lexical_result
 
     rule_check = _rule_check_for(block, file, trace)
     if rule_check:
@@ -3429,7 +3439,8 @@ def _rule_check_for(block, file, trace):
     # a file does not make its prose a rule the agent agreed to follow.
     fallback = file.get("kind") in GUIDELINE_KINDS
     return rule_checks.check_block(block, loaded, corpus, fallback=fallback,
-                                   doc_path=file.get("path") or "")
+                                   doc_path=file.get("path") or "",
+                                   judge=trace.get("judge"))
 
 
 def _apply_rule_check(verdict, rule_check):
@@ -3459,18 +3470,25 @@ def _apply_rule_check(verdict, rule_check):
     refuse. Only the satisfied stage of a conditional kind says the rule was
     exercised and met.
     """
-    findings = rule_check["findings"]
+    # The opt-in judge tier's semantic verdicts are advisory: they are listed,
+    # they can weaken the rule-check state, and they are filtered out here so
+    # they can never be the thing that paints the block red or green. A model's
+    # read of a whole file is not a citable finding about a site this tool
+    # established, and the badge is where that difference has to hold.
+    findings = [f for f in rule_check["findings"] if not f.get("advisory")]
     violations = [f for f in findings
                   if f["state"] == "violated" and f["confidence"] in ("high", "medium")]
     satisfied = [f for f in findings
                  if f.get("stage") == rule_checks.STAGE_SATISFIED
                  and f["confidence"] in ("high", "medium")]
+    decided = None
     if violations:
-        first = violations[0]
+        decided = violations[0]
         verdict["status"] = "ignored"
-        verdict["reason"] = (f"Rule check `{first['checkId']}` fired: "
-                             f"{first['path']}:{first['line']} — `{first['match'][:120]}`. "
-                             + (first["message"] or "This rule was broken in code written this run."))
+        verdict["reason"] = (f"Rule check `{decided['checkId']}` fired: "
+                             f"{decided['path']}:{decided['line']} — `{decided['match'][:120]}`. "
+                             + (decided["message"]
+                                or "This rule was broken in code written this run."))
     elif (satisfied and rule_check["source"] == "checks-file"
             # `clear` and not merely "no violation among these findings": a
             # block also carrying an `unclear` or `acknowledged` finding has a
@@ -3479,6 +3497,7 @@ def _apply_rule_check(verdict, rule_check):
             and rule_check["state"] == "clear"
             and verdict["status"] not in ("used", "used-partial", "ignored")):
         named = ", ".join(f"`{f['checkId']}`" for f in satisfied[:4])
+        decided = satisfied[0]
         verdict["status"] = "used"
         verdict["reason"] = (f"Reviewed rule check{'s' if len(satisfied) != 1 else ''} "
                              f"{named} {'were' if len(satisfied) != 1 else 'was'} triggered "
@@ -3495,20 +3514,21 @@ def _apply_rule_check(verdict, rule_check):
         verdict["reason"] = ("Reviewed rule checks ran, but the run never did the kind of "
                              "thing this rule governs, so there was nothing to follow or "
                              "break.")
-    # The finding that decided the status gets a moment card. Without one, a
-    # block the check just painted green or red carries only its lexical card,
-    # whose own text says "nothing in the trace ties the behaviour back to the
-    # block" - the badge and the card contradicting each other, which is the
-    # failure the moment kinds were tiered to remove.
-    decided = (violations or satisfied)[:1] if (violations or satisfied) else []
-    for f in decided:
-        cite = (f"{f['path']}:{f['line']} — {f['match'][:200]}" if f.get("match")
-                else (f.get("message") or ""))
+    # The finding that *decided* the status gets a moment card - and only that
+    # one. Without it, a block the check just painted green or red carries only
+    # its lexical card, whose own text says "nothing in the trace ties the
+    # behaviour back to the block": the badge and the card contradicting each
+    # other, which is the failure the moment kinds were tiered to remove. A
+    # satisfied note that did not decide anything gets no card either, or a
+    # green step would appear under a block whose state is `unclear`.
+    if decided:
+        cite = (f"{decided['path']}:{decided['line']} — {decided['match'][:200]}"
+                if decided.get("match") else (decided.get("message") or ""))
         verdict["moments"].append(_moment(
             None, "violation" if violations else "compliance",
             "no" if violations else "yes",
-            f"Rule check `{f['checkId']}` — {f['state']}",
-            text=f"{f.get('ruleText') or ''}\n{cite}".strip()))
+            f"Rule check `{decided['checkId']}` — {decided['state']}",
+            text=f"{decided.get('ruleText') or ''}\n{cite}".strip()))
 
     for f in findings:
         stage = f" ({f['stage']})" if f.get("stage") else ""
@@ -3639,8 +3659,8 @@ def chronological_segments(events):
                     # shapes reach us and both are kept: an empty one still
                     # says "the agent reasoned here" and a readable one is weak
                     # corroboration. Deliberately absent from
-                    # `assistant_text_segments`, so it can never leak into
-                    # `all_assistant_text` and move a keyword verdict.
+                    # `assistant_text_segments`, so it can never reach the
+                    # lexical tier's query text and move a verdict.
                     out.append({"t": ts, "role": "assistant", "kind": "thinking",
                                 "text": (c.get("thinking") or "").strip(), "idx": ev_idx,
                                 "encrypted": bool(c.get("signature"))})
@@ -3706,6 +3726,12 @@ def build_trace(events, calls, asst_segments, user_prompt):
     ]
     written_chunks = _written_chunks(calls)
     written_paths = _written_paths({"edits": edits, "bash_cmds": bash_cmds})
+    # The lexical tier reads assistant prose and nothing else - tool inputs and
+    # results never enter, and what the agent quoted back out of a file it read
+    # is stripped, or every block of that file matches itself.
+    query_segments = lexical.clean_query_segments(
+        [s["text"] for s in asst_segments],
+        copied=[s["text"] for s in segs if s["kind"] == "tool_result"])
     return {
         "bash_cmds": bash_cmds,
         "edits": edits,
@@ -3723,6 +3749,12 @@ def build_trace(events, calls, asst_segments, user_prompt):
         "written_chunks": written_chunks,
         "written_paths": written_paths,
         "written_text": "\n\n".join(ch["text"] for ch in written_chunks),
+        "query_segments": query_segments,
+        "lexical_q": lexical.query_stats(query_segments),
+        # Filled in by `_compute_payload`, which is the only caller that knows
+        # the session's whole block collection. A trace without it scores on
+        # D2 alone rather than reporting less.
+        "lexical_bg": None,
     }
 
 
@@ -4159,6 +4191,24 @@ def parse_args():
                    help="With --query: print one field in full, unbounded "
                         "(block: title/status/reason/content/moments; agent: prompt/result; "
                         "session or turn: prompt).")
+    # The opt-in LLM audit tier (research doc §9.1). Off by default, and its
+    # module is not even imported until it is asked for: the default path's
+    # promise is that nothing leaves the machine, and a flag is the only thing
+    # that may change it.
+    p.add_argument("--judge", action="store_true",
+                   help="Opt in to the LLM audit tier: rules this tool cannot decide "
+                        "deterministically are asked of a model through your own Claude "
+                        "Code auth. CHANGES THE PRIVACY CONTRACT - session content is "
+                        "sent to the model. Off by default.")
+    p.add_argument("--judge-model", type=str, default=None,
+                   help="With --judge: the model id to ask (default: sonnet). Part of the "
+                        "verdict cache key.")
+    p.add_argument("--judge-cache", type=Path, default=None,
+                   help="With --judge: the verdict cache file "
+                        "(default: $CTXIDE_JUDGE_CACHE, else ~/.claude/ctxide/judge-cache.json).")
+    p.add_argument("--judge-max-calls", type=int, default=200,
+                   help="With --judge: cap on model calls in one run (default: 200). "
+                        "Cached verdicts are free and do not count.")
     p.add_argument("--all", action="store_true",
                    help="With --query: print every row of a listing instead of the first "
                         f"{QUERY_ROW_LIMIT}.")
@@ -4377,9 +4427,24 @@ def query_session(sid, session_data, field=None):
         f"prompt   {_bounded(sess.get('userPrompt'), _query_cmd(sid, '--field prompt'))}",
     ]
     lines += _compile_lines(session_data.get("ruleCompile") or {})
+    lines += _waste_lines(session_data)
     lines.append(f"next: {_query_cmd(sid, 'turns')}")
     lines.append(f"      {_query_cmd(sid, 'blocks')}")
     return lines
+
+
+def _waste_lines(session_data):
+    """The one-line answer to "what did this session's context cost, and for what"."""
+    roll = session_data.get("wastedContext") or {}
+    if not roll.get("loadedFiles"):
+        return []
+    head = (f"context  {roll['loadedFiles']} loaded file(s), "
+            f"{_fmt_tokens(roll['totalTokens'])} attributed")
+    if not roll["judged"]:
+        return [head + (f" ({roll['note']})" if roll.get("note")
+                        else " (relevance not judged — add --judge)")]
+    return [head + f"; {roll['notPertinent']} of {roll['asked']} judged "
+                   f"not pertinent, costing {_fmt_tokens(roll['tokens'])}"]
 
 
 def _compile_lines(roll):
@@ -4575,6 +4640,36 @@ def _agent_groups(session_data):
     return out
 
 
+def query_waste(sid, session_data, show_all=False):
+    """What each loaded file cost, ordered worst-value first.
+
+    Printed straight off the baked `wastedContext`, so the page's waste list and
+    this one cannot disagree about which file the reader should look at.
+    """
+    roll = session_data.get("wastedContext") or {}
+    rows_in = roll.get("files") or []
+    head = (f"session {sid} — session scope — {roll.get('loadedFiles', 0)} loaded "
+            f"file(s) by attributed cost")
+    if roll.get("judged"):
+        head += (f"; {roll['notPertinent']} of {roll['asked']} judged not pertinent, "
+                 f"costing {_fmt_tokens(roll['tokens'])}")
+    lines = [head]
+    if not roll.get("judged"):
+        # Said out loud rather than left to the empty column: cost alone is not
+        # waste, and a reader who does not know the question was never asked
+        # will read the top of this list as the answer to it.
+        lines.append(roll.get("note")
+                     or "relevance was not judged this run — cost only. Add "
+                        "--judge to ask whether each file pertained to the task.")
+    rows = [f"{r['id']}  [{r['relevanceLabel']}]  "
+            f"{r['path']}: {_fmt_tokens(r['tokens'])} over {r['sentCount']} request(s), "
+            f"resident in {r['turns']} turn(s)"
+            + (f" — {r['reason']}" if r.get("reason") else "")
+            for r in rows_in]
+    lines += _bounded_rows(rows, _query_cmd(sid, "waste", "--all"), show_all)
+    return lines
+
+
 def _agents_listing_cmd(sid, turn, *extra):
     return (_query_cmd(sid, turn["id"], "agents", *extra) if turn is not None
             else _query_cmd(sid, "agents", *extra))
@@ -4678,6 +4773,14 @@ def query_block(sid, session_data, block_id, turn=None, field=None):
         f"status   {block.get('status', '')}",
         f"reason   {_bounded(block.get('reason'), reason_cmd)}",
     ]
+    # What the wording alone can say, named as evidence rather than as a
+    # verdict. The page shows it as a chip beside the status, so the CLI has to
+    # print it or the two describe the same block with different information.
+    if block.get("evidenceLabel"):
+        lex = block.get("lexical") or {}
+        detail = ", ".join(lex.get("terms") or [])[:120]
+        lines.append(f"lexical  {block['evidenceLabel']}"
+                     + (f" (coverage {lex.get('coverage')}; terms: {detail})" if detail else ""))
     # A rule that could not be checked has to say so here too: the CLI is the
     # agent-facing view, and silence there reads as "the rule was followed".
     rule_check = block.get("ruleCheck")
@@ -4689,8 +4792,17 @@ def query_block(sid, session_data, block_id, turn=None, field=None):
             # rule was broken", and the page shows it as its own line, so the
             # CLI has to carry it or the two describe the record differently.
             stage = f" {f['stage']}" if f.get("stage") else ""
-            cite = f" {f['path']}:{f['line']} {f['match'][:120]}" if f.get("match") else ""
-            lines.append(f"  [{f['state']}]{stage} {f['checkId']} —{cite}")
+            # A verdict a model gave and one a fixture-gated pattern gave are
+            # different kinds of claim, and the page shows them differently, so
+            # the CLI has to as well.
+            who = (" judge/advisory" if f.get("advisory")
+                   else " judge" if f.get("judge") else "")
+            # A finding with nothing to cite has its message as the whole of
+            # what it says, so it takes the em dash's place rather than sitting
+            # after a second one.
+            tail = (f" — {f['path']}:{f['line']} {f['match'][:120]}" if f.get("match")
+                    else f" — {f['message']}" if f.get("message") else "")
+            lines.append(f"  [{f['state']}]{stage}{who} {f['checkId']}{tail}")
         for nc in rule_check.get("notCheckable") or []:
             lines.append(f"  [why] {nc.get('why', '')}")
         # A check pinned to wording the rule no longer carries was applied to
@@ -4739,13 +4851,22 @@ def run_query(data, address, field=None, show_all=False):
     if rest:
         raise QueryError(f"error: unexpected address `{' '.join(rest)}`. "
                          f"An address is <session> [turn-N] "
-                         f"[turns|files|blocks|agents|<file-id>|<block-id>|agent-<id>].")
-    if token in ("turns", "files", "blocks", "agents"):
+                         f"[turns|files|blocks|agents|waste|<file-id>|<block-id>|"
+                         f"agent-<id>].")
+    if token in ("turns", "files", "blocks", "agents", "waste"):
         if field:
             raise QueryError(f"error: --field addresses one session, turn, block "
                              f"or agent, not the `{token}` listing.")
         if token == "turns":
             return query_turns(sid, session_data, show_all=show_all)
+        if token == "waste":
+            # Session scope only: relevance is judged against what the session
+            # did, so a turn-scoped waste list would answer a question the
+            # payload does not carry an answer to.
+            if turn is not None:
+                raise QueryError("error: `waste` is a session-scope listing. "
+                                 f"Try: {_query_cmd(sid, 'waste')}")
+            return query_waste(sid, session_data, show_all=show_all)
         if token == "files":
             return query_files(sid, session_data, turn=turn, show_all=show_all)
         if token == "agents":
@@ -4981,6 +5102,174 @@ def _rule_compile_rollup(context_files):
     return out
 
 
+# ---------- 11c. wasted context: cost x relevance ----------
+
+# Bounds on what one relevance question is allowed to carry. A digest is a
+# reminder of what the session was about, not a transcript: past a few prompts
+# the question stops being answerable and starts being a summarisation task.
+_DIGEST_PROMPTS = 12
+_DIGEST_PROMPT_CHARS = 300
+_SUMMARY_TITLES = 30
+_SUMMARY_OPENING_CHARS = 600
+
+# Ordering rank, worst first. `None` (nothing was asked) sits with
+# `undecidable` deliberately: an unasked question and an unanswerable one are
+# the same amount of knowledge, and sorting either below a judged-pertinent
+# file would claim the tier said something it did not.
+_RELEVANCE_RANK = {"not-pertinent": 0, "undecidable": 1, None: 1, "pertinent": 2}
+
+RELEVANCE_LABELS = {
+    "pertinent": "pertinent",
+    "not-pertinent": "not pertinent this session",
+    "undecidable": "undecidable",
+}
+
+
+def task_digest(turn_payloads, fallback_prompt=""):
+    """What this session was asked to do, as the relevance question sees it.
+
+    Every real user prompt in order, clipped: the first prompt alone is what a
+    session *started* as, and a run that pivoted three turns in would have every
+    later file judged against a task it no longer had.
+    """
+    prompts = [(t.get("userPrompt") or "").strip() for t in turn_payloads or []]
+    prompts = [p for p in prompts if p]
+    if not prompts and fallback_prompt:
+        prompts = [fallback_prompt.strip()]
+    lines = []
+    for i, p in enumerate(prompts[:_DIGEST_PROMPTS], 1):
+        clipped = p[:_DIGEST_PROMPT_CHARS]
+        lines.append(f"{i}. {clipped}" + ("…" if len(p) > _DIGEST_PROMPT_CHARS else ""))
+    extra = len(prompts) - _DIGEST_PROMPTS
+    if extra > 0:
+        lines.append(f"… and {extra} further prompt(s) not listed")
+    return "\n".join(lines)
+
+
+def _file_relevance_summary(rec):
+    """What a file is about, from what this tool already parsed out of it.
+
+    Titles plus the opening of the first section, never the whole file: the
+    question is what the file is *about*, and a model handed 40k characters is
+    being asked to summarise rather than to place it.
+    """
+    blocks = rec.get("blocks") or []
+    titles = [b.get("title", "") for b in blocks[:_SUMMARY_TITLES] if b.get("title")]
+    opening = ""
+    for b in blocks:
+        if b.get("content"):
+            opening = b["content"][:_SUMMARY_OPENING_CHARS]
+            break
+    parts = [f"path: {rec.get('path', '')}",
+             f"kind: {rec.get('kind', '')}"]
+    if rec.get("name"):
+        parts.append(f"name: {rec['name']}")
+    if titles:
+        parts.append("sections: " + "; ".join(titles))
+    if len(blocks) > _SUMMARY_TITLES:
+        parts.append(f"… and {len(blocks) - _SUMMARY_TITLES} further section(s)")
+    if opening:
+        parts.append("opening:\n" + opening)
+    return "\n".join(parts)
+
+
+def _relevance_content(rec):
+    """The text the cache keys this file on.
+
+    The path is hashed with the content because two files can legitimately parse
+    to the same blocks - an empty one especially - and one cached answer serving
+    both would put a verdict about one file's name under another's.
+    """
+    body = "\n".join(b.get("content", "") for b in rec.get("blocks") or [])
+    return f"{rec.get('path', '')}\n{body}"
+
+
+def judge_relevance(files, digest, judge):
+    """Ask, per loaded file, whether it pertained to this session. Annotates in place.
+
+    Expensive files first, because the budget is finite and the question is
+    about what the run paid for: spending the last call on a file that cost 30
+    tokens answers nothing anyone was asking. A loaded file with no attributed
+    cost is skipped for the same reason and stays honestly "not judged" - it is
+    counted out of `asked`, never in among the ones that came back fine.
+    """
+    import judge_tier
+    ordered = sorted((f for f in files if f.get("loaded")
+                      and (f.get("cost") or {}).get("tokens")),
+                     key=lambda f: -f["cost"]["tokens"])
+    for rec in ordered:
+        request = judge_tier.relevance_request(
+            rec.get("path", ""), _file_relevance_summary(rec), digest,
+            file_hash=judge_tier.content_hash(_relevance_content(rec)),
+            model=judge.model)
+        answer = judge.ask(request)
+        verdict, reason = answer["verdict"], answer.get("reason", "")
+        out = {"verdict": verdict, "reason": reason,
+               "cached": bool(answer.get("cached"))}
+        if answer.get("unavailable"):
+            out["unavailable"] = True
+        if request["fileInjections"]:
+            # Thrown away rather than reported: this file tried to pick its own
+            # answer, so whatever came back is the one answer we know nothing
+            # about. `undecidable` costs the file nothing, which is the only
+            # safe direction - the mirror, silently trusting it, is the attack.
+            out["verdict"] = judge_tier.RELEVANCE_UNKNOWN
+            out["injection"] = True
+            out["reason"] = judge_tier.INJECTION_NOTE
+        rec["relevance"] = out
+
+
+def wasted_context(files, turn_payloads, note=""):
+    """What each loaded file cost, how long it sat there, and whether it earned it.
+
+    Ordered by relevance first and cost second. With the tier off every file
+    ranks the same, so the list is the cost ordering the offline build always
+    produced - the judgment reorders it, it does not create it.
+    """
+    resident = Counter()
+    for t in turn_payloads or []:
+        for f in t.get("contextFiles") or []:
+            stem = re.sub(r"^turn\d+-", "", f.get("id", ""))
+            if stem:
+                resident[stem] += 1
+    rows = []
+    for f in files:
+        if not f.get("loaded"):
+            continue
+        cost = f.get("cost") or {}
+        rel = f.get("relevance") or {}
+        rows.append({
+            "id": f.get("id", ""),
+            "path": f.get("path", ""),
+            "tokens": cost.get("tokens", 0),
+            "sentCount": cost.get("sentCount", 0),
+            "turns": resident.get(f.get("id", ""), 0),
+            "relevance": rel.get("verdict"),
+            "relevanceLabel": RELEVANCE_LABELS.get(rel.get("verdict"), "not judged"),
+            "reason": rel.get("reason", ""),
+        })
+    rows.sort(key=lambda r: (_RELEVANCE_RANK.get(r["relevance"], 1), -r["tokens"]))
+    return dict(_waste_rollup(rows), note=note, files=rows)
+
+
+def _waste_rollup(rows):
+    """The counts every view prints, baked once.
+
+    `asked` is separate from `notPertinent` because a run whose budget ran out
+    part way leaves the rest of the list unjudged, and a header reading "3 not
+    pertinent" over two hundred rows invites the reader to take the other 197 as
+    judged fine.
+    """
+    wasted = [r for r in rows if r["relevance"] == "not-pertinent"]
+    asked = [r for r in rows if r["relevance"]]
+    return {"loadedFiles": len(rows),
+            "asked": len(asked),
+            "notPertinent": len(wasted),
+            "tokens": sum(r["tokens"] for r in wasted),
+            "totalTokens": sum(r["tokens"] for r in rows),
+            "judged": bool(asked)}
+
+
 def _violation_headline(files):
     """One line naming the most consequential thing a turn or session did."""
     n = sum(_violated_count(f.get("blocks") or []) for f in files)
@@ -4991,7 +5280,7 @@ def _violation_headline(files):
 
 def _compute_payload(events, calls, asst_segs, args, project_dir, id_prefix="", hook_facts=None,
                      nonresident_paths=None, usage_entries=None, history_chars=None,
-                     nonresident_by_request=None, skill_listing=None):
+                     nonresident_by_request=None, skill_listing=None, lexical_bg=None):
     """Run the assessment pipeline against an event/call/segment bundle.
 
     Used twice in process_session: once over the full session (the aggregate)
@@ -5011,14 +5300,24 @@ def _compute_payload(events, calls, asst_segs, args, project_dir, id_prefix="", 
     `nonresident_by_request`) prices the files: pass the whole session's series
     for the aggregate and the turn's slice for a turn, and per-turn costs sum
     back to the session's.
+
+    `lexical_bg` is the session's term backgrounds. The aggregate builds its
+    own and every turn is handed that same one, so a block's distinctive terms
+    cannot change between the turns a status is combined from and the aggregate
+    it is combined into.
     """
     user_prompt = first_real_user_prompt(events)
     timeline = build_timeline(events)
     reads, edits_counter = file_activity(calls)
     trace = build_trace(events, calls, asst_segs, user_prompt)
+    # The one hop from the CLI to the block assessment. None on the default
+    # path, which is what makes every rule check below fully offline.
+    trace["judge"] = getattr(args, "judge_runner", None)
 
     context_files = load_context_files(events, calls, project_dir, args, user_prompt,
                                        hook_facts=hook_facts, skill_listing=skill_listing)
+    trace["lexical_bg"] = lexical_bg or lexical.build_background(
+        context_files, trace["query_segments"])
     files_out = []
     file_items = []  # (abs_path, chars, rec) parallel to files_out, for pricing
     for f in context_files:
@@ -5121,6 +5420,9 @@ def _compute_payload(events, calls, asst_segs, args, project_dir, id_prefix="", 
             "edits": edits_counter.most_common(),
         },
         "trace": trace,  # caller uses this for compute_duplicates; not emitted
+        # Also not emitted: the caller hands it to every turn so the term
+        # backgrounds are the session's, not each slice's.
+        "lexicalBackground": trace["lexical_bg"],
         # Same as `trace`: the caller bakes this at session scope only. The
         # rule documents on disk are a property of the project, not of a turn.
         "ruleCompile": _rule_compile_rollup(context_files),
@@ -5226,7 +5528,8 @@ def process_session(transcript_path, args):
                              nonresident_paths=nonresident_by_turn.get(t["index"]),
                              usage_entries=usage_for_turn(series, t),
                              history_chars=history_chars,
-                             skill_listing=skill_listing)
+                             skill_listing=skill_listing,
+                             lexical_bg=aggregate["lexicalBackground"])
         _insert_cache_break_rows(p["timeline"], _breaks_within(breaks, t))
         turn_payloads.append({
             "id": f"turn-{t['index']}",
@@ -5291,6 +5594,23 @@ def process_session(transcript_path, args):
         # carries, or the file summary contradicts the block list beneath it.
         for f in aggregate["contextFiles"]:
             _annotate_rollup(f)
+
+    # Session scope only, like `ruleCompile`: the question is whether a file
+    # pertained to what this *session* did, and asking it per turn would both
+    # multiply the calls and answer a question nobody has ("did the migrations
+    # doc pertain to turn 7?").
+    digest = task_digest(turn_payloads, aggregate["userPrompt"])
+    judge = aggregate["trace"].get("judge")
+    note = ""
+    if judge is not None and digest:
+        judge_relevance(aggregate["contextFiles"], digest, judge)
+    elif judge is not None:
+        # A transcript with no real user prompt has no task to be relevant to.
+        # Asking anyway would spend a call per file on an empty question, and
+        # every such session would then share one cache entry per file.
+        note = ("no user prompt in this session, so there was nothing to judge "
+                "each file's relevance against")
+    waste = wasted_context(aggregate["contextFiles"], turn_payloads, note=note)
 
     # Pull aggregate values back out for the existing top-level keys.
     user_prompt = aggregate["userPrompt"] or None
@@ -5361,6 +5681,8 @@ def process_session(transcript_path, args):
         # means an agent silently lost its result and reads as never returning.
         "unmatchedNotifications": agent_data["unmatchedNotifications"],
         "ruleCompile": aggregate["ruleCompile"],
+        "taskDigest": digest,
+        "wastedContext": waste,
     }
     summary["duplicatePairs"] = len(duplicates)
     summary["redundantPairs"] = sum(1 for d in duplicates if d["classification"] == "redundant")
@@ -5369,6 +5691,9 @@ def process_session(transcript_path, args):
     # breakdown stays in per_session, like every other heavy roll-up.
     summary["ruleCompile"] = {k: v for k, v in aggregate["ruleCompile"].items()
                               if k != "docs"}
+    # Same split as everywhere else: the counts are cheap enough for the picker,
+    # the per-file list stays in per_session.
+    summary["wastedContext"] = {k: v for k, v in waste.items() if k != "files"}
     return summary, per_session
 
 
@@ -5429,6 +5754,27 @@ def select_transcripts(args):
     return all_paths, active_path
 
 
+def make_judge(args):
+    """The opt-in judge runner, or None when the tier was not asked for.
+
+    Imported lazily and nowhere else: with the flag off the module that can
+    send session content to a model is never loaded, so the default path's
+    offline guarantee is a property of the import graph rather than of a branch
+    someone could get wrong.
+    """
+    if not getattr(args, "judge", False):
+        return None
+    import judge_tier
+    # `or` would be wrong on the budget: `--judge-max-calls 0` is a deliberate
+    # dry run, and turning it into the default would spend two hundred calls
+    # the user asked not to make.
+    budget = getattr(args, "judge_max_calls", None)
+    return judge_tier.Judge(model=getattr(args, "judge_model", None),
+                            cache=getattr(args, "judge_cache", None),
+                            max_calls=judge_tier.DEFAULT_MAX_CALLS
+                            if budget is None else budget)
+
+
 def bake_sessions(all_paths, active_path, args):
     """Run the pipeline over every path. Returns (sessions, per_session, active_id).
 
@@ -5438,6 +5784,9 @@ def bake_sessions(all_paths, active_path, args):
     sessions = []
     per_session_data = {}
     active_id = None
+    # One runner for the whole bake, so its cache and its call budget span every
+    # session rather than resetting per transcript.
+    args.judge_runner = make_judge(args)
     for path in all_paths:
         try:
             summary, data = process_session(path, args)
@@ -5450,6 +5799,10 @@ def bake_sessions(all_paths, active_path, args):
             active_id = summary["id"]
     if active_id is None and sessions:
         active_id = sessions[0]["id"]
+    if args.judge_runner:
+        # On stderr, so it never lands in a `--query` answer: what the tier cost
+        # is a fact about the run, not about the session being reported.
+        print(args.judge_runner.summary(), file=sys.stderr)
     return sessions, per_session_data, active_id
 
 
@@ -5636,6 +5989,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .rc-clear .rc-state { color: var(--green); }
   .rc-not-exercised .rc-state, .rc-not-checkable .rc-state { color: var(--text-dim); }
   .rc-not-checkable { border-style: dashed; }
+  .rc-judge { font-size: 9px; text-transform: uppercase; letter-spacing: 0.4px; border: 1px dashed var(--border); color: var(--text-dim); padding: 0 4px; border-radius: 3px; }
   .rc-conf { font-size: 9px; text-transform: uppercase; letter-spacing: 0.4px; border: 1px solid var(--border); color: var(--text-dim); padding: 0 4px; border-radius: 3px; margin-left: 6px; vertical-align: middle; }
   /* An action the reader can take, not a verdict: readable, never coloured
      like a finding. */
@@ -5865,6 +6219,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .detail-section .reason.dormant { border-left-color: var(--text-dim); }
   .detail-section .reason.not-loaded { border-left-color: var(--gray); }
   .detail-section .reason.undelivered { border-left-color: var(--purple); }
+  .lex-chip { margin-left: 10px; font-size: 10px; padding: 2px 7px; border-radius: 10px;
+              border: 1px dashed var(--border); color: var(--text-dim); font-weight: 400;
+              text-transform: none; letter-spacing: 0; }
+  .lex-echoed { border-style: solid; color: var(--green-soft); }
   .ev-card { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; }
   .ev-card .label { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 4px; }
   .ev-card .text { font-family: monospace; font-size: 11px; color: var(--text); word-break: break-word; white-space: pre-wrap; max-height: 220px; overflow-y: auto; }
@@ -6120,6 +6478,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .file-row .path { font-family: monospace; font-size: 11px; color: var(--text); word-break: break-all; }
   .file-row .path .basename { color: var(--text-bright); }
   .file-row .path .dir { color: var(--text-dim); }
+  .waste-row { display: grid; grid-template-columns: 1fr auto; gap: 10px; padding: 6px 8px; align-items: baseline; font-size: 12px; border-top: 1px solid var(--border); }
+  .waste-row:first-child { border-top: none; }
+  .waste-row .path { font-family: monospace; font-size: 11px; word-break: break-all; }
+  .waste-row .why { color: var(--text-dim); font-size: 11px; }
+  .waste-row .figures { font-family: monospace; font-size: 11px; color: var(--text-dim); white-space: nowrap; }
+  .waste-tag { font-size: 9px; text-transform: uppercase; letter-spacing: 0.4px; border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; margin-right: 6px; color: var(--text-dim); }
+  .waste-tag.bad { border-color: var(--amber); color: var(--amber); }
+  .waste-note { font-size: 11px; color: var(--text-dim); margin: -8px 0 8px; }
 
   ::-webkit-scrollbar { width: 8px; height: 8px; }
   ::-webkit-scrollbar-track { background: transparent; }
@@ -7366,33 +7732,37 @@ const HELP_CONTENT = {
   `,
   'rulecheck': `
     <h5>Where this comes from</h5>
-    <div>A rule document can carry a <em>checks file</em> beside it (<code>&lt;doc&gt;.checks.json</code>): each prose rule compiled once, ahead of time, into a deterministic pattern with its own fixtures. This tool never asks a model anything — at build time it re-runs every check's fixtures with its own matcher and refuses any check that fails, then applies the survivors to the commands the agent ran, the paths it touched, and the code its writes left behind. A failing check is never quietly dropped: it is listed below as <em>demoted</em>, and so is any rule whose bucket needs a judge, because a rule nobody could check must not read as one that was followed.</div>
+    <div>A rule document can carry a <em>checks file</em> beside it (<code>&lt;doc&gt;.checks.json</code>): each prose rule compiled once, ahead of time, into a deterministic pattern with its own fixtures. By default this tool never asks a model anything — at build time it re-runs every check's fixtures with its own matcher and refuses any check that fails, then applies the survivors to the commands the agent ran, the paths it touched, and the code its writes left behind. A failing check is never quietly dropped: it is listed below as <em>demoted</em>, and so is any rule whose bucket needs a judge, because a rule nobody could check must not read as one that was followed.</div>
+    <div style="margin-top:6px">A rule whose question is about the <em>shape</em> of the code rather than its text — "never leave a catch body empty" — can carry a structural pattern instead, matched against the syntax tree by the optional ast-grep binary. It is never installed for you and never taken from your PATH; without it those rules report as unchecked and name the installer, and they are never approximated by a regex answering a different question.</div>
+    <div style="margin-top:6px">The rules a pattern cannot decide stay unchecked unless you opt in to the LLM audit tier (<code>--judge</code>), which sends session content to a model through your own Claude Code auth. With it on, findings are labelled <em>judge</em> — one call per rule per site, and a verdict that cannot quote the text it is about degrades to <em>unclear</em>. A purely semantic verdict is labelled <em>judge · advisory</em>: it may pull a rule down to <em>unclear</em>, but it can never on its own call a rule violated or mark it followed.</div>
     <div style="margin-top:6px">Code rules are judged on the <b>net</b> effect of the session's writes. An attempt the agent wrote and then edited away is not in the tree, and a violation the reader cannot find when they go looking is worse than none. Rules broken by <em>omission</em> — "always implement the catch body" — leave nothing to match, so the checker enumerates the sites itself (every catch block, every comment) and asks about each one.</div>
     <h5>The states</h5>
     <ul>
       <li><b style="color:var(--red)">rule violated</b> — a check fired on written code, with the file, line and matched text cited below. Comments and string literals are stripped before any pattern runs, and the match must hold both with and without that stripping.</li>
       <li><b style="color:var(--amber)">acknowledged</b> — the same match, but the code carries a <code>ctx-allow</code> marker at the site: a deliberate, documented exception.</li>
-      <li><b style="color:var(--amber)">unclear</b> — the strict and stripped views disagree (typically the only hit was inside a comment). Never counted as a violation.</li>
+      <li><b style="color:var(--amber)">unclear</b> — the strict and stripped views disagree (typically the only hit was inside a comment), or a backend could not answer at all. Never counted as a violation.</li>
       <li><b style="color:var(--green)">checked, no violation</b> — checks ran over code in their scope and found nothing.</li>
       <li><b>checked nothing</b> — the session wrote none of the code this rule governs, or an omission rule found no site to ask about.</li>
-      <li><b>not mechanically checkable</b> — the rule needs judgment, types, or whole-file context. Most rules land here, by design. It does <em>not</em> mean the rule was followed.</li>
+      <li><b>not mechanically checkable</b> — the rule needs judgment, types, or whole-file context; or it is a structural rule and ast-grep is not installed. Most rules land here, by design. It does <em>not</em> mean the rule was followed. The note below says which, and names the command that closes the gap.</li>
     </ul>
     <h5>Confidence</h5>
-    <div>Only a <code>high</code> or <code>medium</code> confidence violation from a reviewed checks file turns the block's verdict red. Patterns extracted mechanically from a document with no checks file are low confidence and stay a note.</div>
+    <div>Only a <code>high</code> or <code>medium</code> confidence violation from a reviewed checks file turns the block's verdict red. Patterns extracted mechanically from a document with no checks file are low confidence and stay a note, and so is every advisory judge verdict.</div>
   `,
   'verdict': `
     <h5>The verdict</h5>
-    <div>Our automatic conclusion about whether the agent followed this block this run. Evidence comes in two tiers: <em>strong</em> (a trigger the user actually typed, a structural record — a skill the agent executed, a write to a file the block names, the block's template reproduced in a written file, a documented command run verbatim — or a reviewed compiled check that ran) and <em>weak</em> (a command the block merely names, loose keyword overlap). Only strong evidence can produce a green <code>used</code>. Every strong signal is either something the harness itself records or a check a human reviewed: nothing here is read out of the way your rules happen to be worded, so a rule written differently — or in another language — is judged the same way. The structural signals only ever give credit: nothing written to a file the block names is never read as a violation, because the run may have had nothing to write. One of:</div>
+    <div>Our automatic conclusion about whether the agent followed this block this run. Evidence comes in two tiers: <em>strong</em> (a trigger the user actually typed, a structural record — a skill the agent executed, a write to a file the block names, the block's template reproduced in a written file, a documented command run verbatim — or a reviewed compiled check that ran) and <em>weak</em> (a command the block merely names, or the lexical tier below). Only strong evidence can produce a green <code>used</code>. Every strong signal is either something the harness itself records or a check a human reviewed: nothing here is read out of the way your rules happen to be worded, so a rule written differently — or in another language — is judged the same way. The structural signals only ever give credit: nothing written to a file the block names is never read as a violation, because the run may have had nothing to write. One of:</div>
     <ul>
       <li><b style="color:var(--green)">used</b> — at least one applicable predicate fired</li>
       <li><b style="color:var(--amber)">used-partial</b> — some applicable predicates fired, others didn't</li>
-      <li><b style="color:var(--green-soft)">possibly-referenced</b> — only weak evidence: the block names a command that ran, or a few of its words show up in the assistant's text. Suggestive, not proof. Never promoted to <code>used</code>.</li>
+      <li><b style="color:var(--green-soft)">possibly-referenced</b> — only weak evidence: the block names a command that ran, or the run's prose reused the block's own distinctive wording. Suggestive, not proof. Never promoted to <code>used</code>.</li>
       <li><b style="color:var(--red)">ignored</b> — predicates applied but none fired (rule was relevant but skipped)</li>
       <li><b style="color:var(--text-dim)">dormant</b> — rule was loaded but no precondition was met (couldn't have fired)</li>
-      <li><b style="color:var(--text-dim)">unused</b> — no predicates derivable, no keyword overlap</li>
+      <li><b style="color:var(--text-dim)">unused</b> — no predicate derivable, and the run's prose carries no lexical trace of the block (or the block has too little distinctive wording to score)</li>
       <li><b style="color:var(--gray)">not-loaded</b> — file wasn't in context this run (skill/command not invoked)</li>
       <li><b style="color:var(--purple)">undelivered</b> — the file was loaded but this block sat outside the delivered line range, so the model never saw it. Not the same as being ignored.</li>
     </ul>
+    <h5>The lexical chip</h5>
+    <div>When nothing else has anything to say, the block's wording is scored against the run's prose and the result is shown as a chip beside the verdict. It names the <em>evidence</em>, never a cause: <code>echoed</code> (the run reused this block's wording), <code>topical-overlap</code> (shared subject matter), <code>no-lexical-trace</code>, and <code>not-lexically-scorable</code> (the block has fewer than three distinctive terms — a table of column headers has none of its own). Terms are weighted against three backgrounds first: how many loaded blocks use the word, how ordinary it is in English, and how often this session says it anyway — which is what stops "React" in a React repo matching everything. None of these can reach a green verdict, and <code>no-lexical-trace</code> is not evidence the rule was broken: a rule can be followed in complete silence.</div>
     <h5>How to use it</h5>
     <div>The reason line tells you which predicates drove the verdict. If it surprises you, scroll to <em>How the agent ended up here</em> for the literal evidence.</div>
     <h5>Example</h5>
@@ -7554,6 +7924,23 @@ const RULECHECK_STAGE = {
 // and re-validated against its own self-tests at build time. Anything that is
 // not a confirmed, citable violation must read as exactly that: a rule we
 // could not check is never shown as one that was followed.
+// Named off the baked `evidenceLabel`, never re-derived here: the CLI prints
+// the same field, and a label the browser invented would let the two disagree.
+// The wording names what was observed - a block with no trace may simply have
+// been obeyed in silence, and one nobody could score is not one nobody used.
+const LEXICAL_CHIP = {
+  'echoed': 'echoed — the run reused this wording',
+  'topical-overlap': 'topical overlap — shared subject matter only',
+  'no-lexical-trace': 'no lexical trace — not evidence of non-use',
+  'not-lexically-scorable': 'not lexically scorable — too few distinctive terms',
+};
+
+function lexicalChip(b) {
+  if (!b.evidenceLabel) return '';
+  const text = LEXICAL_CHIP[b.evidenceLabel] || b.evidenceLabel;
+  return `<span class="lex-chip lex-${b.evidenceLabel}" title="Lexical evidence only — never a causal claim">${escapeHtml(text)}</span>`;
+}
+
 function renderRuleCheck(rc) {
   const label = RULECHECK_LABEL[rc.state] || rc.state;
   const conf = `<span class="rc-conf" title="Confidence of the check that produced this.">${escapeHtml(rc.confidence)} confidence</span>`;
@@ -7563,8 +7950,14 @@ function renderRuleCheck(rc) {
   }
   (rc.findings || []).forEach(f => {
     const verb = RULECHECK_STAGE[f.stage]
-      || (f.state === 'violated' ? 'fired' : f.state === 'acknowledged' ? 'fired, suppressed at the site' : 'candidate, not confirmed');
-    inner += `<div class="rc-note"><code>${escapeHtml(f.checkId)}</code> ${escapeHtml(verb)}${f.message ? ' — ' + escapeHtml(f.message) : ''}</div>`;
+      || (f.state === 'violated' ? 'fired' : f.state === 'acknowledged' ? 'fired, suppressed at the site' : f.state === 'note' ? 'noted' : 'candidate, not confirmed');
+    // Who answered is part of the claim. A model's verdict reads differently
+    // from a fixture-gated pattern's, and an advisory one cannot set the badge
+    // at all, so saying so beside the finding is the only place a reader could
+    // learn it.
+    const who = f.advisory ? ' <span class="rc-judge">judge · advisory</span>'
+      : f.judge ? ' <span class="rc-judge">judge</span>' : '';
+    inner += `<div class="rc-note"><code>${escapeHtml(f.checkId)}</code> ${escapeHtml(verb)}${who}${f.message ? ' — ' + escapeHtml(f.message) : ''}</div>`;
     // A stage report with no call behind it has nothing to quote, and an empty
     // span row reads as a citation the reader can go and check.
     if (f.match) {
@@ -7707,7 +8100,7 @@ function renderDetail(blockId) {
         <span class="help-trigger" data-help="verdict" title="How is the verdict computed?">?</span>
       </h4>
       <div class="block-status status-${b.status}" style="font-size:13px;margin-bottom:8px">
-        <span class="status-dot"></span>${statusLabel}
+        <span class="status-dot"></span>${statusLabel}${lexicalChip(b)}
       </div>
       <div class="reason ${b.status}">${escapeHtml(b.reason)}</div>
     </div>
@@ -8020,7 +8413,40 @@ function renderFiles() {
     html += `<div class="file-row"><div class="count">×${n}</div><div class="path">${fmt(fp)}</div></div>`;
   });
   html += `</div>`;
+  html += renderWastedContext();
   el.innerHTML = html;
+}
+
+// Rendered from the baked `wastedContext`, row for row, so this list and
+// `--query <session> waste` name the same file at the same price. Session
+// scope always: relevance is judged against what the whole session did, and
+// re-ordering it per turn would show a figure the payload does not carry.
+function renderWastedContext() {
+  const roll = (active() || {}).wastedContext || {};
+  const rows = roll.files || [];
+  if (!rows.length) return '';
+  let head = `Wasted context <span style="font-weight:400;color:var(--text-dim);text-transform:none;letter-spacing:0">(whole session)</span>`;
+  let html = `<h3 style="font-size:11px;text-transform:uppercase;color:var(--text-dim);letter-spacing:0.5px;margin:18px 0 8px">${head}</h3>`;
+  // Counts come from the baked roll-up, never from a tally over the rows here:
+  // recomputing them in the browser is how the page and `--query waste` would
+  // start reporting different numbers off the same list.
+  html += roll.judged
+    ? `<div class="waste-note">${roll.notPertinent} of the ${roll.asked} file${roll.asked===1?'':'s'} asked about pertained to nothing this session did, costing ${fmtTokens(roll.tokens)}. Relevance is a model judgment: it orders this list, it never marks a rule followed or broken.</div>`
+    : `<div class="waste-note">Ordered by what each file cost. ${roll.note ? escapeHtml(roll.note) + '.' : `Whether it earned that was not asked — rebuild with <code>--judge</code> to have each file's relevance to this session judged.`}</div>`;
+  html += `<div class="file-list">`;
+  rows.slice(0, 40).forEach(r => {
+    const tag = r.relevance
+      ? `<span class="waste-tag ${r.relevance === 'not-pertinent' ? 'bad' : ''}">${escapeHtml(r.relevanceLabel)}</span>`
+      : '';
+    // Both figures on every row: a token count alone does not say the file sat
+    // there for the whole run, and a turn count alone does not say what it cost.
+    html += `<div class="waste-row">
+      <div><div class="path">${tag}${escapeHtml(r.path)}</div>${r.reason ? `<div class="why">${escapeHtml(r.reason)}</div>` : ''}</div>
+      <div class="figures">${fmtTokens(r.tokens)} · ${r.turns} turn${r.turns === 1 ? '' : 's'}</div>
+    </div>`;
+  });
+  if (rows.length > 40) html += `<div class="waste-note" style="margin:8px 0 0">… ${rows.length - 40} more files — see <code>--query &lt;session&gt; waste --all</code>.</div>`;
+  return html + `</div>`;
 }
 
 // The compare payload is baked only when --compare was passed, so the tab

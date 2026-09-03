@@ -340,5 +340,10 @@ def test_the_authoring_prompt_documents_what_the_loader_enforces():
         assert name in prompt, f"the prompt never mentions `{name}`"
     for value in rc.BUCKETS + rc.SCOPES + rc.EVIDENCE_SOURCES + rc.CANDIDATE_KINDS:
         assert value in prompt, f"the prompt never mentions `{value}`"
+    # A kind the prompt does not name is a kind nobody can author: the
+    # vocabulary is closed, so the compiler only ever emits what it was told
+    # about, and the rule quietly lands in `not_checkable` instead.
+    for kind in rc.VOCABULARY:
+        assert f"`{kind}`" in prompt, f"the prompt never names the kind `{kind}`"
     # The review gate is the whole point of a reviewable artifact.
     assert "review" in prompt.lower()
