@@ -195,17 +195,28 @@ false positive rather than an unauthorised action. So the criterion "the
 corpus's false-red count returns to zero" holds for the `authorised` set and
 not for the frozen six.
 
-### The record behind every red badge in this corpus
+### The records behind the red badges in this corpus
 
-The checks file these sessions are judged with is **not committed**. It carries
-26 records lifted from a real client's guidelines document, and publishing that
-prose is not a call this corpus gets to make. `snapshots/freeze_checks.py
---check` reports it as UNREVIEWED and fails, so the gap is a failing gate
-rather than a silence.
+Eight records produce a red badge across the frozen payloads, and they are not
+equally reviewable. Two are famigo's - `commit-subject-one-short-line` and
+`quality-gate-before-push` - and their checks file is committed under
+`snapshots/checks/`, so a reader of a clone can check the patterns themselves.
 
-What produces every red badge here is one record of the 26, and it contains no
-client content at all, so it is quoted in full instead - the pattern is
-reviewable even though the file is not:
+The other six come from the OZZ checks file, which is **not committed**. It
+carries 26 records lifted from a real client's guidelines document, and
+publishing that prose is not a call this corpus gets to make.
+`snapshots/freeze_checks.py --check` reports it as UNREVIEWED and fails, so the
+gap is a failing gate rather than a silence. The six are `no-push-to-master`,
+`quality-gate-before-commit`, `new-docs-page-updates-index`,
+`docs-index-read-first`, `adr-updates-index` and `adr-updates-log`; between them
+they red-badge 56 blocks across the six sessions.
+
+Only the first of those six is quoted below. It is the one the `authorised`
+ground truth scores - those rows cover the `hard-rules-code` block and nothing
+else - and it is the only one of the 26 that contains no client content, so
+quoting it costs nothing. **The remaining five stand behind real red badges and
+remain unreviewable from a clone**, which is the state this section exists to
+report rather than to soften:
 
 ```json
 {

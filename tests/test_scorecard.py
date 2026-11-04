@@ -677,3 +677,20 @@ def test_the_header_says_how_many_reds_stand_on_authorised_rows(tmp_path):
     text = "\n".join(compare.render(report))
     assert compare.OFFLINE_RED_ON_AUTHORISED in text
     assert "1 of the 1 red" in text
+
+
+def test_the_header_names_the_acceptance_criteria_this_corpus_does_not_meet(tmp_path):
+    """Three criteria this corpus is measured against are unmet, and each was
+    disclosed in a different file. A reader quoting `false red 6` from the gate
+    itself met the explanation of what the sixth is made of, but not the fact
+    that two criteria the corpus was built to satisfy are still open - the
+    judged run clears five of six rather than six, and the frozen set is four
+    `authorised` of six with a seventh session left out.
+
+    Named here, in the generated file, because that is where the number lives.
+    """
+    root = _authorised_files(tmp_path, "ignored", "ignored")
+    report = compare.compare_all(root / "baseline", root / "after", root / "expected")
+    text = "\n".join(compare.render(report))
+    assert compare.CRITERIA_UNMET in text
+    assert compare.FROZEN_SET_SHORTFALL in text

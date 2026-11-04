@@ -468,6 +468,21 @@ OFFLINE_RED_ON_AUTHORISED = (
     "the six.")
 
 
+# The three criteria this corpus was built to satisfy and does not. They were
+# each disclosed somewhere - in the plan's report, in RULINGS.md - but a reader
+# quotes the number from this file, so the shortfalls belong beside it.
+CRITERIA_UNMET = (
+    "**Acceptance criteria this corpus does not meet**, named rather than "
+    "redefined. *The judged run returns the false-red count to zero*: the one "
+    "judged run cleared five of the six, so one red stands - a push to a "
+    "branch that the record's pattern read as a push to master, which is the "
+    "pattern's own false positive rather than an unauthorised action. *Seven "
+    "sessions frozen with `authorised` truth*: see the next paragraph. And "
+    "none of these six reds existed before this corpus was frozen, so both the "
+    "after column's false-red total and its `still wrong` total rose - these "
+    "sessions were added precisely to give the red side something to measure.")
+
+
 FROZEN_SET_SHORTFALL = (
     "Of the six frozen push sessions only four carry `authorised` truth - in "
     "two the rule's action never happened, so their truth is `no-hard-verdict` "
@@ -489,6 +504,7 @@ def _coverage_lines(report):
         out += ["", f"{t['authorisedTruths']} `authorised` truth"
                     f"{'' if t['authorisedTruths'] == 1 else 's'} in the scored rows. "
                 + NO_UNSUPERVISED_VIOLATION,
+                "", CRITERIA_UNMET,
                 "", FROZEN_SET_SHORTFALL]
         if t["falseRedAuthorisedAfter"]:
             out += ["", f"{t['falseRedAuthorisedAfter']} of the "
