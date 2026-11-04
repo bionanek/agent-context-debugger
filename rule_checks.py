@@ -420,22 +420,30 @@ def build_corpus(calls, shell_writes=()):
     flagged.
     """
     code, order, commands, paths, tools = {}, [], [], [], []
+    command_calls = []
     for c in calls:
         name, inp = c.get("name"), (c.get("input") or {})
         args = _call_args(inp)
         entry_path = inp.get("file_path") or inp.get("notebook_path") or ""
-        tools.append({
+        entry = {
             "index": len(tools),
             "name": name or "",
             "args": args,
             "text": ((name or "") + " " + args).strip(),
             "path": entry_path,
             "writes": name in _WRITE_TOOLS,
-        })
+            # The prompt of the turn this call falls in, or None. Carried, not
+            # derived here: the turn structure lives in the transcript reader,
+            # and a second reading of it would let the page and the CLI
+            # disagree about which prompt governed a cited call.
+            "governingPrompt": c.get("governingPrompt"),
+        }
+        tools.append(entry)
         if name == "Bash":
             cmd = inp.get("command") or ""
             if cmd:
                 commands.append(cmd)
+                command_calls.append(entry)
             continue
         if name not in _WRITE_TOOLS:
             continue
@@ -459,6 +467,11 @@ def build_corpus(calls, shell_writes=()):
     return {
         "code": [{"path": p, "text": "\n".join(code[p])} for p in order if code.get(p)],
         "commands": commands,
+        # Parallel to `commands`, so a shell finding can cite the call it came
+        # from. `commands` stays a list of plain strings: every check reads it
+        # as one, and changing its shape to carry the call would have rippled
+        # through the whole shell path for one extra field.
+        "command_calls": command_calls,
         "paths": paths,
         "tools": tools,
         "final_code": [{"path": p, "text": final[p]} for p in order
@@ -897,24 +910,46 @@ def _evaluate_ast(check, corpus):
     return out
 
 
+def _governing(finding, entry):
+    """Attach the prompt of the turn the cited call falls in, when there is one.
+
+    A finding that cites a call is an accusation about an action, and the
+    report has to put the instruction that caused it next to the citation -
+    otherwise the reader cannot tell an agent acting unbidden from one doing
+    exactly what it was told. Absent when the turn carried no real user prompt:
+    silence is not authorisation.
+    """
+    governing = (entry or {}).get("governingPrompt")
+    if governing and governing.get("text"):
+        finding["governingPrompt"] = {"text": governing["text"],
+                                      "turnIndex": governing.get("turnIndex"),
+                                      "callIndex": entry["index"]}
+    return finding
+
+
 def _evaluate_shell(check, corpus):
     out = []
     commands = corpus.get("commands") or []
+    entries = corpus.get("command_calls") or []
+    def at(i):
+        return entries[i] if i < len(entries) else None
     if check["kind"] == "forbidden_command":
-        for cmd in commands:
+        for i, cmd in enumerate(commands):
             m = _search(check["pattern"], cmd)
             if m:
                 state = "acknowledged" if _suppressed(cmd, m.start(), check["id"]) else "violated"
-                out.append(_finding(check, SHELL_PATH, cmd, (m.start(), m.end()), state))
+                out.append(_governing(
+                    _finding(check, SHELL_PATH, cmd, (m.start(), m.end()), state), at(i)))
     else:  # required_command
         satisfied = any(_search(check["pattern"], c) for c in commands)
         if not satisfied:
-            for cmd in commands:
+            for i, cmd in enumerate(commands):
                 m = _search(check["trigger_pattern"], cmd)
                 if m:
                     state = ("acknowledged" if _suppressed(cmd, m.start(), check["id"])
                              else "violated")
-                    out.append(_finding(check, SHELL_PATH, cmd, (m.start(), m.end()), state))
+                    out.append(_governing(
+                        _finding(check, SHELL_PATH, cmd, (m.start(), m.end()), state), at(i)))
     return out
 
 
@@ -952,7 +987,7 @@ def _tool_finding(check, entry, span, stage):
     if stage is not None:
         f["stage"] = stage
     f["toolIndex"] = entry["index"]
-    return f
+    return _governing(f, entry)
 
 
 def _stage_note(check, stage, state, detail):
@@ -1379,6 +1414,50 @@ def _judge_semantic(record, corpus, judge):
     out.append(_judge_finding(record, pieces[0][0], "", (0, 0), "note", message,
                               answer["verdict"], True, line=0))
     return out, True
+
+
+AUTHORISED_NOTE = ("the user instructed this action in the prompt that governs the "
+                   "cited call, so it is acknowledged rather than reported as "
+                   "misconduct")
+
+
+def authorise_findings(findings, corpus, judge):
+    """Downgrade a violation the user asked for to `acknowledged`.
+
+    `acknowledged` already means "a violation the site deliberately
+    suppresses", and a prompt ordering the action is the transcript's version
+    of the same thing - the code path has `ctx-allow` and the transcript had
+    nothing, so six real sessions were red-badged for obeying an instruction.
+
+    Three rules keep this from becoming a way to talk the tool out of a
+    verdict. Only a finding that already names its governing prompt is asked,
+    so a turn with no prompt can never be excused by silence. Only an
+    affirmative answer moves anything: a no, an unreadable reply and an
+    unreachable backend all leave the violation standing. And only the
+    deterministic tier's own findings are asked - a judge excusing another
+    judge's accusation is two models agreeing with each other rather than with
+    the evidence.
+    """
+    if judge is None:
+        return findings
+    import judge_tier
+    tools = corpus.get("tools") or []
+    for f in findings:
+        governing = f.get("governingPrompt")
+        if f.get("state") != "violated" or f.get("advisory") or not governing:
+            continue
+        idx = governing.get("callIndex")
+        call = (tools[idx]["text"] if isinstance(idx, int) and 0 <= idx < len(tools)
+                else f.get("match", ""))
+        request = judge_tier.authorisation_request(governing["text"], call, judge.model)
+        answer = judge.ask(request)
+        if answer.get("unavailable") or answer.get("verdict") != "authorised":
+            continue
+        f["state"] = "acknowledged"
+        f["authorisation"] = {"verdict": answer["verdict"],
+                              "reason": answer.get("reason") or "",
+                              "note": AUTHORISED_NOTE}
+    return findings
 
 
 def judge_records(records, corpus, judge):
@@ -2145,6 +2224,9 @@ def check_block(block, loaded, corpus, fallback=True, doc_path="", judge=None):
     findings = evaluate_checks(applied, corpus) if applied else []
     if source == "fallback":
         findings = [_as_candidate(f) for f in findings]
+    # Before `_state_from` reads them, and before the judged records are asked
+    # about: an accusation the user authorised must never reach the badge.
+    findings = authorise_findings(findings, corpus, judge)
     in_scope = _in_scope(applied, corpus)
 
     # A judged record is pinned to its rule's text by the same key a

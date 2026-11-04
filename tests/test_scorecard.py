@@ -227,13 +227,21 @@ def test_an_unknown_truth_class_is_refused_rather_than_scored(tmp_path):
         raise AssertionError("an unknown truth class must be refused")
 
 
-def test_the_real_ground_truth_files_parse_and_cover_the_snapshots():
-    """The committed corpus must stay loadable and complete.
+def test_the_real_ground_truth_files_parse_and_declare_what_they_cover():
+    """The committed corpus must stay loadable, and never shrink in silence.
 
-    An expected.md that stopped covering a session would quietly shrink the
-    gate to the sessions that still pass. The frozen transcripts it scores are
-    the author's own and are gitignored, so on a clone this skips by name -
-    a bare `return` here would report the same green as a full run.
+    A ground truth that stopped covering a session would quietly shrink the
+    gate to the sessions that still pass. That is still what this asserts - a
+    file is complete unless it *says* it is partial, in its own header, where
+    a reviewer reading the file sees it and the scorecard counts what it left
+    out. The Phase 0 false-red set is partial by design: its question is one
+    block's red badge, and bulk rows nobody derived would swamp the corpus
+    that was derived.
+
+    A partial file still has to name blocks the payload actually judges, or a
+    stale line would be scored as a miss. The frozen transcripts are the
+    author's own and are gitignored, so on a clone this skips by name - a bare
+    `return` here would report the same green as a full run.
     """
     root = Path(__file__).resolve().parent.parent / "snapshots"
     for needed in (root / "expected", root / "baseline"):
@@ -245,7 +253,40 @@ def test_the_real_ground_truth_files_parse_and_cover_the_snapshots():
         assert exp.is_file(), f"no ground truth for {manifest.parent}"
         entries = compare.load_expected(exp)
         judged = compare.judged_statuses(compare.read_payload(manifest.parent))
-        assert set(judged) <= set(entries), f"{exp}: blocks with no ground truth"
+        if compare.partial_scope(exp):
+            assert entries, f"{exp}: declares a partial scope and covers nothing"
+            assert set(entries) <= set(judged), f"{exp}: rows for unjudged blocks"
+        else:
+            assert set(judged) <= set(entries), f"{exp}: blocks with no ground truth"
+
+
+def test_a_partial_ground_truth_is_counted_not_named(tmp_path):
+    """Naming them would publish a client repository's document names.
+
+    A block id carries its document's path, so listing the out-of-scope blocks
+    of a 111-block session writes those paths into `SCORECARD.md`, which is
+    committed - while the transcripts they come from are gitignored precisely
+    to keep them out.
+    """
+    root = _authorised_files(tmp_path, "ignored", "ignored")
+    exp = root / "expected" / "ozz" / "auth" / "expected.md"
+    payload = json.loads((root / "after" / "ozz" / "auth" / "payload.json").read_text())
+    blocks = payload["perSession"]["authorised-session"]["contextFiles"][0]["blocks"]
+    blocks.append({"id": "secret-client-doc-md-0-pricing", "title": "x", "status": "unused"})
+    for tree in ("baseline", "after"):
+        (root / tree / "ozz" / "auth" / "payload.json").write_text(json.dumps(payload))
+
+    report = compare.compare_all(root / "baseline", root / "after", root / "expected")
+    text = "\n".join(compare.render(report))
+    assert "secret-client-doc" not in text
+    assert "1 judged block(s) outside this ground truth's declared scope" in text
+
+    # Without the marker the same corpus names them, so the collapse is the
+    # declaration's doing and not a silent change of behaviour.
+    exp.write_text(exp.read_text().replace(compare.PARTIAL_MARKER, "It is complete."),
+                   encoding="utf-8")
+    plain = compare.compare_all(root / "baseline", root / "after", root / "expected")
+    assert "secret-client-doc" in "\n".join(compare.render(plain))
 
 
 # ---------- Phase 8: the header contract, and what the corpus does not measure ----------
@@ -584,7 +625,8 @@ def _authorised_files(tmp_path, before, after):
     exp = tmp_path / "expected" / "ozz" / "auth"
     exp.mkdir(parents=True)
     (exp / "expected.md").write_text(
-        _expected([("push-rule", "authorised", "F-AUTHORISED", "call 12 pushed, prompt said to")]),
+        _expected([("push-rule", "authorised", "F-AUTHORISED", "call 12 pushed, prompt said to")])
+        + f"\n{compare.PARTIAL_MARKER}\n",
         encoding="utf-8")
     for tree, status in (("baseline", before), ("after", after)):
         d = tmp_path / tree / "ozz" / "auth"

@@ -199,7 +199,7 @@ def assistant_text_segments(events):
 
 def tool_calls(events):
     out = []
-    for e in events:
+    for idx, e in enumerate(events):
         if e.get("type") != "assistant":
             continue
         msg = e.get("message", {})
@@ -213,6 +213,10 @@ def tool_calls(events):
                     "name": c.get("name"),
                     "input": c.get("input", {}),
                     "id": c.get("id"),
+                    # Where this call sits in the list it was derived from, so
+                    # the turn it belongs to can be decided by containment
+                    # rather than by hunting for the nearest earlier prompt.
+                    "eventIdx": idx,
                 })
     return out
 
@@ -4768,7 +4772,49 @@ def fmt_offset(start_dt, ts):
     return f"+{h}h{m:02d}m"
 
 
-def build_trace(events, calls, asst_segments, user_prompt):
+def governing_prompts_for_calls(events, calls, turn_index=None):
+    """The prompt of the turn each call falls in, one record per call.
+
+    `ctx-allow` lets written code carry a deliberate exception at the violation
+    site; a transcript has none, so "the user typed this action in the prompt
+    that caused the call" - the strongest rationale there is - was invisible to
+    the rule checker, and a reviewed high-confidence record red-badged six real
+    sessions for doing what they were told.
+
+    The join is positional and nothing else: turns already run prompt to
+    prompt, so the governing prompt is the one of the turn whose event range
+    contains the call. Deciding it by matching words in the prompt would be the
+    single-user prose matching step 6 retired, and it would read a prompt
+    written in another language as silence.
+
+    Containment rather than "the nearest earlier prompt": a turn absorbs every
+    event before its own prompt, so a call the agent made before the human
+    first spoke belongs to the first turn and the two readings differ there.
+    A turn with no real user prompt - a session driven entirely by a
+    task-notification - yields None, because absence must never read as
+    authorisation.
+
+    `turn_index` is the real index of the turn when `events` is one turn's
+    slice; without it a slice would report every call as turn 0.
+    """
+    turns = split_into_turns(events)
+    base = turn_index or 0
+    out = []
+    for c in calls:
+        idx = c.get("eventIdx")
+        rec = None
+        if idx is not None:
+            for t in turns:
+                if t["startEventIdx"] <= idx < t["endEventIdx"]:
+                    text = (t.get("userPrompt") or "").strip()
+                    if text:
+                        rec = {"text": text, "turnIndex": base + t["index"]}
+                    break
+        out.append(rec)
+    return out
+
+
+def build_trace(events, calls, asst_segments, user_prompt, turn_index=None):
     """Bundle everything predicates and moment-assemblers need to introspect."""
     bash_cmds = [c["input"].get("command", "") for c in calls if c["name"] == "Bash"]
     edits = [c for c in calls if c["name"] in ("Edit", "Write", "MultiEdit", "NotebookEdit")]
@@ -4796,6 +4842,10 @@ def build_trace(events, calls, asst_segments, user_prompt):
         if s["kind"] == "tool_use" and s.get("name") == "Read"
     ]
     written_chunks = _written_chunks(calls)
+    # Copies rather than the originals: every other consumer of `calls` reads
+    # what the transcript carried, and only the rule corpus needs the turn.
+    corpus_calls = [dict(c, governingPrompt=g) for c, g in
+                    zip(calls, governing_prompts_for_calls(events, calls, turn_index))]
     written_paths = _written_paths({"edits": edits, "bash_cmds": bash_cmds})
     # The lexical tier reads assistant prose and nothing else - tool inputs and
     # results never enter, and what the agent quoted back out of a file it read
@@ -4807,7 +4857,7 @@ def build_trace(events, calls, asst_segments, user_prompt):
         "bash_cmds": bash_cmds,
         "edits": edits,
         "rule_corpus": rule_checks.build_corpus(
-            calls, shell_writes=[w for w in written_chunks if w.get("shell")]),
+            corpus_calls, shell_writes=[w for w in written_chunks if w.get("shell")]),
         "all_assistant_text": all_assistant_text,
         "last_assistant": last_assistant,
         "cwd": cwd,
@@ -5879,6 +5929,18 @@ def query_block(sid, session_data, block_id, turn=None, field=None):
             tail = (f" - {f['path']}:{f['line']} {f['match'][:120]}" if f.get("match")
                     else f" - {f['message']}" if f.get("message") else "")
             lines.append(f"  [{f['state']}]{stage}{who} {f['checkId']}{tail}")
+            # The instruction that caused the cited call, verbatim. Without it
+            # a reader cannot tell an agent acting unbidden from one doing what
+            # it was told, which is the whole of the difference between a
+            # violation and a false red.
+            gov = f.get("governingPrompt")
+            if gov:
+                lines.append(f"  [prompt] turn {gov.get('turnIndex')}, call "
+                             f"{gov.get('callIndex')}: {gov.get('text', '')[:300]}")
+            auth = f.get("authorisation")
+            if auth:
+                lines.append(f"  [authorised] {auth.get('note', '')} - "
+                             f"{auth.get('reason', '')}")
         for nc in rule_check.get("notCheckable") or []:
             lines.append(f"  [why] {nc.get('why', '')}")
         # A check pinned to wording the rule no longer carries was applied to
@@ -6406,7 +6468,7 @@ def _violation_headline(files):
 def _compute_payload(events, calls, asst_segs, args, project_dir, id_prefix="", hook_facts=None,
                      nonresident_paths=None, usage_entries=None, history_chars=None,
                      nonresident_by_request=None, skill_listing=None, lexical_bg=None,
-                     delivered=None, carried=None):
+                     delivered=None, carried=None, turn_index=None):
     """Run the assessment pipeline against an event/call/segment bundle.
 
     Used twice in process_session: once over the full session (the aggregate)
@@ -6444,7 +6506,7 @@ def _compute_payload(events, calls, asst_segs, args, project_dir, id_prefix="", 
     user_prompt = first_real_user_prompt(events)
     timeline = build_timeline(events)
     reads, edits_counter = file_activity(calls)
-    trace = build_trace(events, calls, asst_segs, user_prompt)
+    trace = build_trace(events, calls, asst_segs, user_prompt, turn_index=turn_index)
     # The one hop from the CLI to the block assessment. None on the default
     # path, which is what makes every rule check below fully offline.
     trace["judge"] = getattr(args, "judge_runner", None)
@@ -6677,7 +6739,8 @@ def process_session(transcript_path, args):
                              skill_listing=skill_listing,
                              lexical_bg=aggregate["lexicalBackground"],
                              delivered=delivered_at(versions, t["startEventIdx"]),
-                             carried=carried.get(t["index"]))
+                             carried=carried.get(t["index"]),
+                             turn_index=t["index"])
         _insert_cache_break_rows(p["timeline"], _breaks_within(breaks, t))
         turn_payloads.append({
             "id": f"turn-{t['index']}",
@@ -8907,7 +8970,7 @@ const HELP_CONTENT = {
     <h5>The states</h5>
     <ul>
       <li><b style="color:var(--red)">rule violated</b> - a check fired on written code, with the file, line and matched text cited below. Comments and string literals are stripped before any pattern runs, and the match must hold both with and without that stripping.</li>
-      <li><b style="color:var(--amber)">acknowledged</b> - the same match, but the code carries a <code>ctx-allow</code> marker at the site: a deliberate, documented exception.</li>
+      <li><b style="color:var(--amber)">acknowledged</b> - the same match, but it is a deliberate exception: either the code carries a <code>ctx-allow</code> marker at the site, or the user's own prompt for that turn instructed the action the call performs (shown verbatim beside the citation, and decided only by the opt-in judge tier - never by matching words in the prompt).</li>
       <li><b style="color:var(--amber)">unclear</b> - the strict and stripped views disagree (typically the only hit was inside a comment), or a backend could not answer at all. Never counted as a violation.</li>
       <li><b style="color:var(--green)">checked, no violation</b> - checks ran over code in their scope and found nothing.</li>
       <li><b>checked nothing</b> - the session wrote none of the code this rule governs, or an omission rule found no site to ask about.</li>
@@ -9071,7 +9134,7 @@ function dismissHelpPopover(e) {
 
 const RULECHECK_LABEL = {
   'violated': 'rule violated',
-  'acknowledged': 'violation acknowledged in the code',
+  'acknowledged': 'violation acknowledged',
   'unclear': 'unclear - could not be confirmed',
   'clear': 'checked, no violation found',
   'not-exercised': 'checked nothing - the session never did the kind of thing this rule governs',
@@ -9133,7 +9196,7 @@ function renderRuleCheck(rc) {
   }
   (rc.findings || []).forEach(f => {
     const verb = RULECHECK_STAGE[f.stage]
-      || (f.state === 'violated' ? 'fired' : f.state === 'acknowledged' ? 'fired, suppressed at the site' : f.state === 'note' ? 'noted' : 'candidate, not confirmed');
+      || (f.state === 'violated' ? 'fired' : f.state === 'acknowledged' ? 'fired, acknowledged' : f.state === 'note' ? 'noted' : 'candidate, not confirmed');
     // Who answered is part of the claim. A model's verdict reads differently
     // from a fixture-gated pattern's, and an advisory one cannot set the badge
     // at all, so saying so beside the finding is the only place a reader could
@@ -9145,6 +9208,16 @@ function renderRuleCheck(rc) {
     // span row reads as a citation the reader can go and check.
     if (f.match) {
       inner += `<div class="rc-span"><span class="rc-path">${escapeHtml(f.path)}:${f.line}</span>  ${escapeHtml(f.match)}</div>`;
+    }
+    // The prompt of the turn the cited call falls in, verbatim and
+    // uninterpreted. The reader settles authorisation in one glance; nothing
+    // here reads the words, in any language.
+    if (f.governingPrompt) {
+      inner += `<div class="rc-note">the user's prompt for turn ${f.governingPrompt.turnIndex} (call ${f.governingPrompt.callIndex}):</div>`;
+      inner += `<div class="rc-span">${escapeHtml(f.governingPrompt.text)}</div>`;
+    }
+    if (f.authorisation) {
+      inner += `<div class="rc-note">${escapeHtml(f.authorisation.note || '')}${f.authorisation.reason ? ' - ' + escapeHtml(f.authorisation.reason) : ''}</div>`;
     }
   });
   (rc.notCheckable || []).forEach(nc => {

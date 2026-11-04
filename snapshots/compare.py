@@ -46,6 +46,14 @@ ALLOWED = {
     "violated": frozenset({"ignored", "used-partial"}),
     "no-hard-verdict": frozenset({"dormant", "unused", "possibly-referenced",
                                   "undelivered", "not-loaded"}),
+    # `authorised`: the rule's action demonstrably happened and the user asked
+    # for it in the prompt that caused it. Allows exactly what
+    # `no-hard-verdict` allows, so a red badge here is a false red and a green
+    # is a false green - but it is its own class because the fact is not
+    # "nothing tied the block to the run". Something did, and it was not
+    # misconduct. See RULINGS.md 9.
+    "authorised": frozenset({"dormant", "unused", "possibly-referenced",
+                             "undelivered", "not-loaded"}),
 }
 UNDECIDABLE = "undecidable"
 TRUTHS = frozenset(ALLOWED) | {UNDECIDABLE}
@@ -60,6 +68,21 @@ ABSENT = "(absent)"
 # so a rewrap does not break the check.
 RULINGS_LINK = "snapshots/expected/RULINGS.md"
 DIRECTORY_RULING = "A file created under a directory the block names does not count."
+
+# A ground truth may cover one question rather than a whole session - the
+# Phase 0 false-red set covers the one block a compiled record governs. Naming
+# every other block of such a session would print hundreds of ids into this
+# committed file, and a block id carries its document's path, so for a client
+# repository it would publish the names of documents the transcripts are
+# gitignored to keep out. A file that says this of itself gets a count instead.
+PARTIAL_MARKER = "This file is deliberately partial."
+
+
+def partial_scope(path):
+    """Whether this ground truth declares itself partial, so its unscored
+    blocks are counted rather than named."""
+    return _norm(PARTIAL_MARKER) in _norm(Path(path).read_text(encoding="utf-8"))
+
 
 # A `revised:` note is the one edit that can ratify the tool, so the row has to
 # say whether the correction itself was derived blind. Yes or no: anything else
@@ -86,7 +109,7 @@ def error_kind(truth, status):
         # about this block, and filing that under "did not credit the rule"
         # would describe a vanished block as a judgement that was made.
         return "absent"
-    if truth == "no-hard-verdict":
+    if truth in ("no-hard-verdict", "authorised"):
         if status in GREENS:
             return "false-green"
         return "false-red" if status == "ignored" else "unexpected"
@@ -252,9 +275,13 @@ def compare_session(name, baseline_dir, after_dir, expected_file, input_changed=
     after = judged_statuses(after_payload, _session_id(after_dir))
     halves = dict(judged_halves(after_payload, _session_id(after_dir)))
     halves.update(judged_halves(before_payload, _session_id(baseline_dir)))
-    unscored = [f"{name} {bid}: judged `{before.get(bid) or after.get(bid)}` "
-                f"with no ground truth" for bid in sorted(set(before) | set(after))
-                if bid not in expected]
+    outside = [bid for bid in sorted(set(before) | set(after)) if bid not in expected]
+    if partial_scope(expected_file):
+        unscored = ([f"{name}: {len(outside)} judged block(s) outside this ground "
+                     f"truth's declared scope, not named here"] if outside else [])
+    else:
+        unscored = [f"{name} {bid}: judged `{before.get(bid) or after.get(bid)}` "
+                    f"with no ground truth" for bid in outside]
     unscored += [f"{name} {bid}: ground truth for a block neither payload judges"
                  for bid in sorted(expected)
                  if bid not in before and bid not in after]
@@ -303,7 +330,7 @@ def _tally(rows):
                         "new-agreed", "new-wrong", "nonBlindCredited", "agreedBefore", "agreedAfter", "falseGreenBefore", "falseGreenAfter",
                         "falseRedBefore", "falseRedAfter", "missedBefore", "missedAfter",
                         "absentBefore", "absentAfter", "violatedTruths",
-                        "nowUndelivered")}
+                        "authorisedTruths", "nowUndelivered")}
     for r in rows:
         t[r["outcome"]] += 1
         if r["outcome"] == "excluded":
@@ -313,6 +340,8 @@ def _tally(rows):
             t["nonBlindCredited"] += 1
         if r["truth"] == "violated":
             t["violatedTruths"] += 1
+        if r["truth"] == "authorised":
+            t["authorisedTruths"] += 1
         if (r["after"] in tb.DELIVERY_STATUSES
                 and r["before"] not in tb.DELIVERY_STATUSES and r["before"] != ABSENT):
             t["nowUndelivered"] += 1
@@ -409,6 +438,20 @@ def _half_table(report, half, title, note):
             f"· new wrong {t['new-wrong']}**", ""]
 
 
+# Said in the header, every time, because the false-red count is the number a
+# reader is most likely to quote and the one most likely to be over-read. A
+# scan of all 1,093 of this author's transcripts found no clean unsupervised
+# violation: every candidate action was ordered in the prompt that caused it,
+# because this author works with the agent in the loop. So the red side is
+# measured against actions the user authorised, not against misconduct.
+NO_UNSUPERVISED_VIOLATION = (
+    "The corpus holds no genuine unsupervised violation, so a false-red count "
+    "of zero is measured against authorised actions only - the rule's action "
+    "happened and the user asked for it in the prompt that caused it. Whether "
+    "the tool accuses correctly when nobody authorised the action is still "
+    "unmeasured; subagent and workflow runs are the candidate hunting ground.")
+
+
 def _coverage_lines(report):
     """What the corpus can and cannot measure, said before any number is read."""
     t = report["totals"]
@@ -418,13 +461,17 @@ def _coverage_lines(report):
            f"{len(files)} session{'' if len(files) == 1 else 's'} "
            f"carr{'ies' if len(files) == 1 else 'y'} a compiled checks file"
            + (" (" + ", ".join(files) + ")." if files else ".")]
-    if not t["violatedTruths"] or not files:
+    if t["authorisedTruths"]:
+        out += ["", f"{t['authorisedTruths']} `authorised` truth"
+                    f"{'' if t['authorisedTruths'] == 1 else 's'} in the scored rows. "
+                + NO_UNSUPERVISED_VIOLATION]
+    if (not t["violatedTruths"] and not t["authorisedTruths"]) or not files:
         out += ["",
                 "> **Warning: the red side of this corpus is unmeasured.** With no "
-                "`violated` truth, or with no compiled checks file for any session, "
-                "nothing here could have produced a red badge - so a false-red count "
-                "of zero records that the tool stopped accusing, not that it accuses "
-                "correctly."]
+                "`violated` or `authorised` truth, or with no compiled checks file for "
+                "any session, nothing here could have produced a red badge - so a "
+                "false-red count of zero records that the tool stopped accusing, not "
+                "that it accuses correctly."]
     return out + [""]
 
 

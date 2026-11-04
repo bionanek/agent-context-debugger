@@ -2,7 +2,10 @@
   "_comment": [
     "The sessions the judgement-reliability baseline is measured on: the anchors",
     "named in docs/judgement-reliability-research.md S7, spanning all four audited",
-    "projects plus this repo. `cwd` is the working directory the session ran in -",
+    "projects plus this repo, and the false-red set added in Phase 0 - six sessions",
+    "whose push to master a reviewed, high-confidence record flags and whose own",
+    "prompt ordered it (see RULINGS.md 9, the `authorised` truth class).",
+    "`cwd` is the working directory the session ran in -",
     "it is what the transcript directory name encodes, and the project CLAUDE.md",
     "and project-relative paths resolve against it. A leading `~` is expanded",
     "where it is read, so the committed list names no one's home directory.",
@@ -22,6 +25,12 @@
     {"project": "formicHMI", "cwd": "~/Git/formic/formicHMI", "session": "12f48cdb"},
     {"project": "formicHMI", "cwd": "~/Git/formic/formicHMI", "session": "8fd8526c"},
     {"project": "reband", "cwd": "~/reband", "session": "22c58939"},
-    {"project": "agent-context-ide", "cwd": "~/Git/agent-context-ide", "session": "d5c3cc1a"}
+    {"project": "agent-context-ide", "cwd": "~/Git/agent-context-ide", "session": "d5c3cc1a"},
+    {"project": "OZZ", "cwd": "~/Git/OZZ", "session": "c37b4f96"},
+    {"project": "OZZ", "cwd": "~/Git/OZZ", "session": "9061535d"},
+    {"project": "OZZ", "cwd": "~/Git/OZZ", "session": "a0f594f9"},
+    {"project": "OZZ", "cwd": "~/Git/OZZ", "session": "3a705721"},
+    {"project": "OZZ", "cwd": "~/Git/OZZ", "session": "d37263c9"},
+    {"project": "OZZ", "cwd": "~/Git/OZZ", "session": "1efb73f1"}
   ]
 }

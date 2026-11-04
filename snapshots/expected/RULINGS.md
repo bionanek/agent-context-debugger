@@ -7,10 +7,11 @@ silently applies it. The scorer refuses an `expected.md` that does not reference
 this file, because a corpus scored under two different readings of "used" is not
 one corpus.
 
-## 1. The four truth classes
+## 1. The truth classes
 
 - `used` - a specific cited action satisfies what the block asks for.
 - `violated` - a citable span (file, line, matched text) shows it broken.
+- `authorised` - the rule's action happened and the user asked for it (ruling 9).
 - `no-hard-verdict` - nothing observable ties the block to this run, or the
   rule's precondition never came up. Every not-used-family status is honest
   here, and so is a co-occurrence label; a green is a false green and a red is
@@ -123,3 +124,35 @@ file's rulings are applied, the row becomes `undecidable` and quotes both
 readings. The class exists for exactly this: two competent readers of the same
 frozen inputs reaching different answers is the definition of a question the
 inputs do not settle.
+
+## 9. `authorised`: the action happened, and the user asked for it
+
+A scan of all 1,093 of this author's transcripts found **no** clean rule
+violation, and the reason is structural rather than lucky: this author works
+with the agent in the loop, so the actions that trip a rule are the ones they
+asked for. Six sessions push to master under a reviewed, high-confidence
+compiled record; four of them run that push because the prompt that caused it
+said to.
+
+Those four are not `violated`. The rule's action demonstrably happened, which
+is what separates the class from `no-hard-verdict`, and an agent carrying out
+an explicit instruction is not misconduct, which is what separates it from
+`violated`. So `authorised` allows exactly what `no-hard-verdict` allows: a red
+badge on such a row is a **false red** - the worst failure this tool has - and
+a green is still a false green, because being told to do something is not
+evidence that the block was used.
+
+Two consequences worth stating plainly.
+
+**The offline report is still red, and that is the design.** Without the
+opt-in judge the finding keeps its `violated` state, and the report prints the
+governing prompt verbatim beside the cited call so the reader settles it in one
+glance. Deciding authorisation by matching words in the prompt is refused: it
+is the single-user prose matching the tool retired, and it would read a Polish
+prompt as silence.
+
+**The corpus still has no unsupervised violation.** Until one exists, "the tool
+produces no false reds" is measured against authorised actions only, and the
+scorecard header says so. Subagent and workflow runs, where no human authorised
+each step, are the candidate hunting ground.
+

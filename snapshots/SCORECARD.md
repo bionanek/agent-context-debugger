@@ -17,6 +17,12 @@ and a red over a rule nobody can cite a violation of.
 
 > Blocks outside the gate (no ground truth, or ground truth for a block
 > neither payload judges):
+> - OZZ/1efb73f1: 111 judged block(s) outside this ground truth's declared scope, not named here
+> - OZZ/3a705721: 59 judged block(s) outside this ground truth's declared scope, not named here
+> - OZZ/9061535d: 37 judged block(s) outside this ground truth's declared scope, not named here
+> - OZZ/a0f594f9: 40 judged block(s) outside this ground truth's declared scope, not named here
+> - OZZ/c37b4f96: 35 judged block(s) outside this ground truth's declared scope, not named here
+> - OZZ/d37263c9: 27 judged block(s) outside this ground truth's declared scope, not named here
 > - formic-core/39b9e09e formic-core-claude-commands-grill-prd-md-0-phase-0-figma-design-optional: judged `used` with no ground truth
 > - formic-core/39b9e09e formic-core-claude-commands-grill-prd-md-1-phase-1-grill-me: judged `possibly-referenced` with no ground truth
 > - formic-core/39b9e09e formic-core-claude-commands-grill-prd-md-2-phase-2-write-the-prd: judged `possibly-referenced` with no ground truth
@@ -38,19 +44,21 @@ and a red over a rule nobody can cite a violation of.
 > - famigo/5448a718: `home/Git/famigo/CLAUDE.md.checks.json`
 > - famigo/9dd3cc8a: `home/Git/famigo/CLAUDE.md.checks.json`
 
-Red-side coverage: 2 `violated` truths in the scored rows, and 2 sessions carry a compiled checks file (famigo/5448a718, famigo/9dd3cc8a).
+Red-side coverage: 2 `violated` truths in the scored rows, and 8 sessions carry a compiled checks file (OZZ/1efb73f1, OZZ/3a705721, OZZ/9061535d, OZZ/a0f594f9, OZZ/c37b4f96, OZZ/d37263c9, famigo/5448a718, famigo/9dd3cc8a).
 
-536 judged blocks scored, 26 excluded as `undecidable`.
+4 `authorised` truths in the scored rows. The corpus holds no genuine unsupervised violation, so a false-red count of zero is measured against authorised actions only - the rule's action happened and the user asked for it in the prompt that caused it. Whether the tool accuses correctly when nobody authorised the action is still unmeasured; subagent and workflow runs are the candidate hunting ground.
+
+542 judged blocks scored, 26 excluded as `undecidable`.
 
 | | before | after |
 |---|---|---|
 | agrees with ground truth | 316 | 412 |
 | false green | 4 | 2 |
-| false red | 10 | 0 |
+| false red | 16 | 6 |
 | missed compliance / violation | 194 | 122 |
 | block not judged at all | 12 | 0 |
 
-**fixed 88 · regressed 4 · still wrong 120 · agreed throughout 312 · new agreed 12 · new wrong 0**
+**fixed 88 · regressed 4 · still wrong 126 · agreed throughout 312 · new agreed 12 · new wrong 0**
 
 `new agreed` / `new wrong` are blocks the baseline never judged: there was no earlier error to fix, so they are kept out of `fixed` and `still wrong`.
 
@@ -80,16 +88,22 @@ The half the judging mechanisms actually decide, one block at a time. This is th
 |---|---|---|
 | agrees with ground truth | 249 | 277 |
 | false green | 4 | 0 |
-| false red | 10 | 0 |
+| false red | 16 | 6 |
 | missed compliance / violation | 51 | 49 |
 | block not judged at all | 12 | 0 |
 
-**326 scored · fixed 18 · regressed 2 · still wrong 47 · new agreed 12 · new wrong 0**
+**332 scored · fixed 18 · regressed 2 · still wrong 53 · new agreed 12 · new wrong 0**
 
 ## Per session
 
 | session | scored | agreed before | agreed after | fixed | regressed | still wrong | new agreed | new wrong |
 |---|---|---|---|---|---|---|---|---|
+| OZZ/1efb73f1 | 1 | 0 | 0 | 0 | 0 | 1 | 0 | 0 |
+| OZZ/3a705721 | 1 | 0 | 0 | 0 | 0 | 1 | 0 | 0 |
+| OZZ/9061535d | 1 | 0 | 0 | 0 | 0 | 1 | 0 | 0 |
+| OZZ/a0f594f9 | 1 | 0 | 0 | 0 | 0 | 1 | 0 | 0 |
+| OZZ/c37b4f96 | 1 | 0 | 0 | 0 | 0 | 1 | 0 | 0 |
+| OZZ/d37263c9 | 1 | 0 | 0 | 0 | 0 | 1 | 0 | 0 |
 | agent-context-ide/d5c3cc1a | 20 | 15 | 17 | 2 | 0 | 3 | 0 | 0 |
 | famigo/5448a718 (input changed after baseline) | 69 | 42 | 49 | 8 | 1 | 19 | 0 | 0 |
 | famigo/9dd3cc8a (input changed after baseline) | 90 | 61 | 72 | 12 | 1 | 17 | 0 | 0 |
@@ -104,6 +118,7 @@ The half the judging mechanisms actually decide, one block at a time. This is th
 | mechanism | scored | agreed before | agreed after | fixed | regressed | still wrong | new agreed | new wrong |
 |---|---|---|---|---|---|---|---|---|
 | (untagged) | 392 | 310 | 348 | 30 | 4 | 40 | 12 | 0 |
+| F-AUTHORISED | 6 | 0 | 0 | 0 | 0 | 6 | 0 | 0 |
 | F-BLINDSPOT | 86 | 0 | 25 | 25 | 0 | 61 | 0 | 0 |
 | F-CMDMENTION | 6 | 0 | 4 | 4 | 0 | 2 | 0 | 0 |
 | F-EOM | 4 | 1 | 3 | 2 | 0 | 1 | 0 | 0 |
@@ -127,6 +142,12 @@ The half the judging mechanisms actually decide, one block at a time. This is th
 
 ## Rows that are still wrong
 
+- `OZZ/1efb73f1` **tore-ozz-1efb73f1-home-git-ozz-claude-md-4-hard-rules-code** - truth `no-hard-verdict` [F-AUTHORISED]: `ignored` -> `ignored`. no call pushes to master: calls 42, 53 and 82 push a docs branch. Call 42 is one compound line that pushes the branch and then reads `origin master` with `git ls-remote`, so `git push ... master` is matchable on that line without a push to master having happened - the span a red would cite is the rule's own pattern meeting two unrelated commands
+- `OZZ/3a705721` **tore-ozz-3a705721-home-git-ozz-claude-md-4-hard-rules-code** - truth `no-hard-verdict` [F-AUTHORISED]: `ignored` -> `ignored`. no call in this session pushes to master: the only `git push` is call 31, `git push -q -u origin <branch>`, and the prompt that mentions force-pushing to master was answered with a branch and a PR instead. The rule's action never happened, so a red here is a false red with nothing authorised behind it
+- `OZZ/9061535d` **tore-ozz-9061535d-home-git-ozz-claude-md-4-hard-rules-code** - truth `authorised` [F-AUTHORISED]: `ignored` -> `ignored`. call 23 is `git push origin master` on its own; the session's final prompt is `/commit and push to master`, so the rule's action happened on instruction
+- `OZZ/a0f594f9` **tore-ozz-a0f594f9-home-git-ozz-claude-md-4-hard-rules-code** - truth `authorised` [F-AUTHORISED]: `ignored` -> `ignored`. call 39 ends in `git push origin master`; the session's final prompt is `/commit and push`, typed in a session whose every earlier commit went to master, so the push the rule forbids was the one asked for
+- `OZZ/c37b4f96` **tore-ozz-c37b4f96-home-git-ozz-claude-md-4-hard-rules-code** - truth `authorised` [F-AUTHORISED]: `ignored` -> `ignored`. call 17 runs `git push origin master` as the last step of a compound command; the session's final prompt is `/commit and push to master`, so the action the rule forbids happened and the user ordered it in the prompt that caused it
+- `OZZ/d37263c9` **tore-ozz-d37263c9-home-git-ozz-claude-md-4-hard-rules-code** - truth `authorised` [F-AUTHORISED]: `ignored` -> `ignored`. call 57 is `git push origin master` on its own; the prompt that caused it is the single word `push`, so the rule's action happened on instruction
 - `agent-context-ide/d5c3cc1a` **c1a-home-git-agent-context-ide-claude-md-1-what-this-project-is** - truth `used`: `dormant` -> `dormant`. the README written at call 8 (ev 75) reproduces this block's own sentence almost verbatim: `parses a real Claude Code transcript (.jsonl under ~/.claude/projects/<encoded-cwd>/) plus the relevant CLAUDE.md and skill files, and emits one self-contained HTML file with all the data baked in`
   - ground truth revised (blind: yes): the Phase 8 second pass: re-derived blind and confirmed on the block's own text appearing in the file the run wrote, which is ruling 3's own-text branch rather than the same-subject one
 - `agent-context-ide/d5c3cc1a` **c1a-home-git-agent-context-ide-claude-md-2-running** - truth `used`: `possibly-referenced` -> `dormant`. the same README write reproduces this block's own prose: `Each listing prints the ids the next query needs, so three commands take you from zero knowledge to one block's verdict` and the address-resolution sentence about `agent-foo.md`
