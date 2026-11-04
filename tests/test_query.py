@@ -481,13 +481,15 @@ def _fixture_transcript(tmp_path):
 
 
 class _QueryArgs(_Args):
-    def __init__(self, transcript, out, query, field=None, all=False, claude_md=None):
+    def __init__(self, transcript, out, query, field=None, all=False, claude_md=None,
+                 compile_status=False):
         self.claude_md = claude_md
         self.transcript = transcript
         self.out = out
         self.query = query
         self.field = field
         self.all = all
+        self.compile_status = compile_status
         self.session = None
         self.all_sessions = False
         self.max_sessions = 0

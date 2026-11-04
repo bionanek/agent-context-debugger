@@ -1843,6 +1843,11 @@ def compile_hint(docs, stale=False):
 # a rule is compiled while the block under it asks them to compile it.
 COMPILE_STATES = ("compiled", "stale", "refused", "uncompiled")
 
+# The three answers the compiler can give a rule it did look at. `deterministic`
+# is the only one this tool can decide with the judge off, which is why the mix
+# is reported rather than a single compiled count.
+COMPILE_BUCKETS = ("deterministic", "judged", "notCheckable")
+
 
 def compile_state(block, loaded):
     """This rule's compile state, from its document's loaded checks payload.
@@ -1873,21 +1878,61 @@ def compile_state(block, loaded):
     return "uncompiled"
 
 
+def _refusal_bucket(block, loaded):
+    """Which answer the compiler gave a refused rule: `judged` or `notCheckable`.
+
+    `compile_state` collapses the two into `refused`, which is the right answer
+    to "is there work left here". It is the wrong answer to "can this report be
+    produced offline": a rule parked for the judge is decided by nothing unless
+    the opt-in tier is switched on.
+    """
+    if any(_entry_matches_block(e, block, loaded) for e in (loaded or {}).get("judged") or []):
+        return "judged"
+    return "notCheckable"
+
+
 def compile_status(blocks, loaded):
     """How many of a document's rules the compiler has answered, and how many not.
 
     Counted per rule-stating block, not per check: a checks file that compiled
     two rules out of thirty is mostly uncompiled, and counting its checks would
     report the document as covered.
+
+    Beside the four compile states it reports the bucket mix - how many rules
+    the compiler made deterministic, how many it parked for the judge, how many
+    it reviewed and refused - and one `state` for the document as a whole.
     """
     out = {"rules": 0, "checksFile": (loaded or {}).get("source", "")}
     out.update({state: 0 for state in COMPILE_STATES})
+    out.update({bucket: 0 for bucket in COMPILE_BUCKETS})
     for block in blocks:
         if not _looks_like_a_rule(block):
             continue
         out["rules"] += 1
-        out[compile_state(block, loaded)] += 1
+        state = compile_state(block, loaded)
+        out[state] += 1
+        if state == "compiled":
+            out["deterministic"] += 1
+        elif state == "refused":
+            out[_refusal_bucket(block, loaded)] += 1
+    out["state"] = document_state(out)
     return out
+
+
+def document_state(status):
+    """One state for a whole document, worst outstanding work first.
+
+    `compiled` is only reachable with nothing left to compile *and* at least
+    one rule this tool can decide offline: a document whose every record was
+    parked for the judge reports `refused`, because reading "compiled" as
+    "decidable" is exactly the mistake the bucket mix exists to prevent.
+    """
+    if not status.get("rules"):
+        return ""
+    for state in ("uncompiled", "stale", "compiled"):
+        if status.get(state):
+            return state
+    return "refused"
 
 
 def load_checks(data):

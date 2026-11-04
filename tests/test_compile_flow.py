@@ -442,3 +442,29 @@ def test_compile_status_round_trips_when_a_document_is_compiled(tmp_path, monkey
     assert "uncompiled" not in after
     assert rc.COMPILE_COMMAND not in after
     rc.checks_for_doc.cache_clear()
+
+
+# ---------- the worked example this repo ships ----------
+
+EXAMPLE_CHECKS = REPO / "docs" / "example-CLAUDE.md.checks.json"
+
+
+def test_the_worked_example_passes_every_gate_this_tool_runs():
+    """An example that would be refused teaches the wrong shape.
+
+    The counts are the pilot's own: 17 rules this tool can decide offline, 9
+    parked for the judge, 20 the compiler reviewed and honestly refused. A
+    refusal rate like that is the design working, so the example has to show it.
+    """
+    data = json.loads(EXAMPLE_CHECKS.read_text())
+    loaded = rc.load_checks(data)
+    assert loaded["rejected"] == [] and loaded["demoted"] == []
+    assert len(loaded["checks"]) == 17
+    assert len(loaded["judged"]) == 9
+    assert len(data["not_checkable"]) == 20
+
+
+def test_the_worked_example_carries_no_private_paths():
+    """It was redacted from a real project's file; nothing of that project stays."""
+    text = EXAMPLE_CHECKS.read_text()
+    assert "/Users/" not in text

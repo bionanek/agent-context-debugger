@@ -126,6 +126,15 @@ Decide where a rule lives by **the concrete objects it names**, never by its ver
 
 Words like "never", "always", "must" tell you how severe a rule is, not where to look. A rule saying "never import X" is about code, not about the shell, even though "import" could be a command name somewhere.
 
+### The string-literal trap
+
+The consumer blanks **every string literal** before any source pattern runs, template literals included, and there is no opt-out. So a rule whose subject lives inside a string has no characters left to match, and a regex over it reports `clear` - "the rule was followed" - about a rule nothing looked at. Two shapes land here constantly, and the pilot hit this on three separate rules:
+
+- **An import path.** "`packages/db` is imported only by the API", "never import another store's singleton". The module specifier is a string; `import { db } from '@acme/db'` survives stripping only as `import { db } from ''`.
+- **UI text in code.** "No user-facing copy in code - it goes in the i18n files", "update `.env.example` when you add an env var". The copy and the variable name are both string literals.
+
+For either, there are exactly two honest answers: `ast_forbidden`, which asks the syntax tree and sees the string as a node, or `not_checkable` with that as the `why`. Never a `forbidden_pattern` or `required_pattern` over the text - it will pass over every real violation. A rule about the *shape* around the string (an import statement at all, a JSX element) is still a structural pattern; it is the string's contents that are gone.
+
 ## Not checkable
 
 Put a rule in `not_checkable` when no bucket can carry it. This is a correct answer, not a failure. Typical cases:

@@ -5351,6 +5351,10 @@ def parse_args():
     p.add_argument("--all", action="store_true",
                    help="With --query: print every row of a listing instead of the first "
                         f"{QUERY_ROW_LIMIT}.")
+    p.add_argument("--compile-status", action="store_true",
+                   help="With --query: list every rule document in the project, its "
+                        "compile state and its bucket mix, and name the command that "
+                        "compiles the next one.")
     # Read off the parser rather than hand-listed: a list that had to be kept
     # in step would silently start eating whichever flag someone added next.
     option_strings = {s for a in p._actions for s in a.option_strings}
@@ -5599,11 +5603,53 @@ def _compile_lines(roll):
              f"{roll.get('uncompiled', 0)} not compiled, "
              f"{roll.get('stale', 0)} stale"]
     for d in roll.get("docs") or []:
-        lines.append(f"  {d['path']} - {d['compiled']}/{d['rules']} compiled"
+        lines.append(f"  {d['path']} - {d['compiled']}/{d['rules']} compiled "
+                     f"({_bucket_mix(d)})"
                      + (f", {d['uncompiled']} not compiled" if d["uncompiled"] else "")
                      + (f", {d['stale']} stale" if d["stale"] else ""))
     if roll.get("hint"):
         lines.append(f"todo     {roll['hint']}")
+    return lines
+
+
+def _bucket_mix(doc):
+    """The three answers the compiler gave this document's rules, in words.
+
+    `deterministic` is the only one that makes the report decidable with the
+    judge off, so a document that compiled entirely into `judged` has to read
+    as what it is rather than as a compiled count.
+    """
+    return (f"{doc.get('deterministic', 0)} deterministic, "
+            f"{doc.get('judged', 0)} judged, "
+            f"{doc.get('notCheckable', 0)} reviewed as not checkable")
+
+
+def query_compile_status(data):
+    """Every rule document in the project, its state, its mix, and what to run.
+
+    Project scope, not session scope: the documents on disk belong to the
+    project, so this answers the same way whichever session is active.
+    """
+    per = data.get("perSession") or {}
+    roll = ((per.get(data.get("activeSessionId")) or {}).get("ruleCompile")) or {}
+    docs = roll.get("docs") or []
+    if not docs:
+        return ["no rule documents in this project - nothing to compile"]
+    lines = [f"{len(docs)} rule document(s) in "
+             f"{(data.get('project') or {}).get('cwd', '')}"]
+    for d in docs:
+        lines.append(f"{d.get('state', ''):<11s} {d['path']} - "
+                     f"{d['rules']} rule(s): {_bucket_mix(d)}"
+                     + (f", {d['uncompiled']} not compiled" if d["uncompiled"] else "")
+                     + (f", {d['stale']} stale" if d["stale"] else ""))
+        if d.get("checksFile"):
+            # Printed as `source` rather than as the checks file's path: the
+            # value is the checks file's own `source` field where it has one,
+            # and labelling an author-written string as a path would send the
+            # reader looking for a file that is not there.
+            lines.append(f"            source: {d['checksFile']}")
+    if roll.get("hint"):
+        lines.append(f"next: {roll['hint']}")
     return lines
 
 
@@ -5983,7 +6029,7 @@ def query_block(sid, session_data, block_id, turn=None, field=None):
     return lines
 
 
-def run_query(data, address, field=None, show_all=False):
+def run_query(data, address, field=None, show_all=False, compile_status=False):
     """Answer one address against the baked payload. Returns the lines to print.
 
     Read-only by construction: it touches nothing but `data`, which is why the
@@ -5991,6 +6037,9 @@ def run_query(data, address, field=None, show_all=False):
     """
     if not address:
         raise QueryError(f"error: --query needs an address. Start with: {_query_cmd('sessions')}")
+    # Project scope, so it answers the same whatever address asked for it.
+    if compile_status:
+        return query_compile_status(data)
     head = address[0]
     if head == "sessions":
         if len(address) > 1:
@@ -6081,7 +6130,8 @@ def cmd_query(args):
     all_paths, active_path = select_transcripts(args)
     sessions, per_session_data, active_id = bake_sessions(all_paths, active_path, args)
     data = build_data(os.getcwd(), sessions, per_session_data, active_id)
-    for line in run_query(data, address, field=args.field, show_all=args.all):
+    for line in run_query(data, address, field=args.field, show_all=args.all,
+                          compile_status=args.compile_status):
         print(line)
 
 
@@ -6252,14 +6302,19 @@ def _rule_compile_rollup(context_files):
     pending = [d["path"] for d in docs if d["uncompiled"]]
     drifted = [d["path"] for d in docs if d["stale"]]
     if pending:
-        out["hint"] = (f"{out['uncompiled']} rule{'s' if out['uncompiled'] != 1 else ''} "
-                       f"not compiled - {rule_checks.compile_hint(pending)}")
+        # Counted in documents, not rules: the reader's next action is to run
+        # the command once per document, and a count of rules tells them how
+        # much prose is unchecked rather than how much work is in front of them.
+        out["hint"] = (f"{len(pending)} rule document"
+                       f"{'s' if len(pending) != 1 else ''} not compiled - "
+                       f"{rule_checks.compile_hint(pending)}")
     elif drifted:
         out["hint"] = (f"{out['stale']} check{'s' if out['stale'] != 1 else ''} stale - "
                        f"{rule_checks.compile_hint(drifted, stale=True)}")
     else:
         out["hint"] = ""
     out["docs"] = docs
+    out.update({b: totals.get(b, 0) for b in rule_checks.COMPILE_BUCKETS})
     return out
 
 
