@@ -4,8 +4,8 @@
     {
       "id": "no-npm-pnpm-yarn-npx",
       "rule_ref": "Commands",
-      "rule_text": "Bun is the package manager. Never use npm, pnpm, yarn or npx; use `bun add` / `bunx`.",
-      "statement": "Did the session run npm, pnpm, yarn or npx as a command instead of bun/bunx?",
+      "rule_text": "Bun is this repo's package manager. Do not reach for npm, pnpm, yarn or npx - run `bun add` or `bunx`.",
+      "statement": "Did the session run npm, pnpm, yarn or npx as a command instead of bun or bunx?",
       "scope": "process",
       "evidence": "transcript",
       "bucket": "deterministic",
@@ -13,7 +13,7 @@
       "kind": "forbidden_command",
       "pattern": "(?:^|(?<=[;&|]\\s))(?:npm|pnpm|yarn|npx)\\s",
       "confidence": "high",
-      "message": "This project uses Bun. Use `bun add` / `bunx` instead of npm, pnpm, yarn or npx.",
+      "message": "This repo runs on Bun: use `bun add` or `bunx` rather than npm, pnpm, yarn or npx.",
       "examples_positive": [
         "npm install",
         "yarn add zod",
@@ -41,7 +41,7 @@
     {
       "id": "no-gh-auth-switch",
       "rule_ref": "GitHub CLI",
-      "rule_text": "Never run `gh auth switch`. It changes the account for the whole machine.",
+      "rule_text": "Do not run `gh auth switch`: it repoints the CLI for the whole machine.",
       "statement": "Did the session run `gh auth switch`?",
       "scope": "process",
       "evidence": "transcript",
@@ -50,7 +50,7 @@
       "kind": "forbidden_command",
       "pattern": "\\bgh\\s+auth\\s+switch\\b",
       "confidence": "high",
-      "message": "`gh auth switch` changes the account machine-wide and breaks parallel sessions. Use the per-command GH_TOKEN prefix.",
+      "message": "`gh auth switch` changes the account machine-wide and breaks other sessions. Pass the token per command instead.",
       "examples_positive": [
         "gh auth switch -u your-gh-account"
       ],
@@ -72,8 +72,8 @@
     {
       "id": "gh-requires-token-prefix",
       "rule_ref": "GitHub CLI",
-      "rule_text": "Prefix every `gh` call with a per-command token: `GH_TOKEN=$(gh auth token --user your-gh-account) gh ...`.",
-      "statement": "Did a `gh` command run without the GH_TOKEN per-command prefix?",
+      "rule_text": "Give every `gh` call its own token: `GH_TOKEN=$(gh auth token --user your-gh-account) gh ...`.",
+      "statement": "Did a `gh` command run without the per-command GH_TOKEN prefix?",
       "scope": "process",
       "evidence": "transcript",
       "bucket": "deterministic",
@@ -81,7 +81,7 @@
       "kind": "forbidden_command",
       "pattern": "(?:^|(?<=[;&|]\\s))gh\\s+(?!auth\\b)",
       "confidence": "medium",
-      "message": "Prefix gh calls with GH_TOKEN=$(gh auth token --user your-gh-account) so the right account is used.",
+      "message": "Prefix gh calls with GH_TOKEN=$(gh auth token --user your-gh-account) so the intended account is used.",
       "examples_positive": [
         "gh pr create --fill",
         "gh issue list"
@@ -105,8 +105,8 @@
     {
       "id": "quality-gate-before-commit",
       "rule_ref": "Commands",
-      "rule_text": "`bun run typecheck && bun run lint && bun run format:check && bun run test && bun run audit` must pass before any commit.",
-      "statement": "Was a git commit made with no prior run of the quality gate?",
+      "rule_text": "The gate `bun run typecheck && bun run lint && bun run format:check && bun run test && bun run audit` has to pass before a commit.",
+      "statement": "Was a commit made with no earlier run of the quality gate?",
       "scope": "process",
       "evidence": "transcript",
       "bucket": "deterministic",
@@ -136,8 +136,8 @@
     {
       "id": "schema-change-generates-migration",
       "rule_ref": "Commands",
-      "rule_text": "Schema change: edit `packages/db/src/schema.ts`, then `bun run db:generate` and commit the new migration.",
-      "statement": "Was the Drizzle schema edited without `bun run db:generate` running afterwards?",
+      "rule_text": "Changing `packages/db/src/schema.ts` means running `bun run db:generate` and committing the migration it writes.",
+      "statement": "Was the database schema edited without `bun run db:generate` running afterwards?",
       "scope": "process",
       "evidence": "transcript",
       "bucket": "deterministic",
@@ -146,7 +146,7 @@
       "first_pattern": "^(?:Edit|Write) .*packages/db/src/schema\\.ts",
       "second_pattern": "\\bbun run db:generate\\b",
       "confidence": "medium",
-      "message": "After editing packages/db/src/schema.ts run `bun run db:generate` and commit the migration.",
+      "message": "After editing packages/db/src/schema.ts, run `bun run db:generate` and commit the migration.",
       "examples_positive": [
         "Edit /repo/packages/db/src/schema.ts"
       ],
@@ -166,8 +166,8 @@
     },
     {
       "id": "db-import-outside-api",
-      "rule_ref": "Structure",
-      "rule_text": "`packages/db` is imported only by `apps/api`; the admin panel never reads the DB and calls the API only.",
+      "rule_ref": "Repository layout",
+      "rule_text": "`packages/db` belongs to `apps/api` alone; everything else goes through the API.",
       "statement": "Does a file outside apps/api import @acme/db?",
       "scope": "code",
       "evidence": "diff",
@@ -183,7 +183,7 @@
         "packages/shared/**/*.ts"
       ],
       "confidence": "medium",
-      "message": "Only apps/api may import @acme/db. Call the API through @acme/api-client instead.",
+      "message": "Only apps/api may import @acme/db. Go through @acme/api-client instead.",
       "examples_positive": [
         "import { db } from '@acme/db'"
       ],
@@ -203,8 +203,8 @@
     },
     {
       "id": "shared-no-react",
-      "rule_ref": "Structure",
-      "rule_text": "`packages/shared` holds zod schemas, enums, permissions and limits. No React, no DB code.",
+      "rule_ref": "Repository layout",
+      "rule_text": "`packages/shared` carries schemas, enums and constants only - no UI framework code.",
       "statement": "Does a file in packages/shared import React?",
       "scope": "code",
       "evidence": "diff",
@@ -217,7 +217,7 @@
         "packages/shared/**/*.tsx"
       ],
       "confidence": "medium",
-      "message": "packages/shared must stay framework-free: no React imports.",
+      "message": "packages/shared stays framework-free: no React imports.",
       "examples_positive": [
         "import React from 'react'"
       ],
@@ -236,8 +236,8 @@
     },
     {
       "id": "docs-raw-immutable",
-      "rule_ref": "The docs are a wiki (Karpathy LLM wiki pattern)",
-      "rule_text": "`docs/raw/` is immutable input. Add files, never edit them.",
+      "rule_ref": "The docs directory",
+      "rule_text": "`docs/raw/` holds unedited source material. Add files to it; do not rewrite the ones already there.",
       "statement": "Did the session edit an existing file under docs/raw/?",
       "scope": "process",
       "evidence": "transcript",
@@ -246,7 +246,7 @@
       "kind": "tool_forbidden",
       "pattern": "^Edit .*\\bdocs/raw/",
       "confidence": "high",
-      "message": "docs/raw/ is immutable. Add a new source file instead of editing an existing one.",
+      "message": "docs/raw/ is append-only: add a new source file rather than editing one.",
       "examples_positive": [
         "Edit /repo/docs/raw/interview-2026-01.md"
       ],
@@ -266,8 +266,8 @@
     },
     {
       "id": "adr-updates-index",
-      "rule_ref": "When to write an ADR (every session, including implementation)",
-      "rule_text": "After writing an ADR, add the line under \"Decisions\" in `docs/index.md`.",
+      "rule_ref": "When to write an ADR",
+      "rule_text": "A new ADR gets its line under \"Decisions\" in `docs/index.md`.",
       "statement": "Was a new ADR written without docs/index.md being updated in the same session?",
       "scope": "process",
       "evidence": "transcript",
@@ -296,8 +296,8 @@
     },
     {
       "id": "adr-updates-log",
-      "rule_ref": "When to write an ADR (every session, including implementation)",
-      "rule_text": "After writing an ADR, add a `decision` entry in `docs/log.md`.",
+      "rule_ref": "When to write an ADR",
+      "rule_text": "A new ADR also gets a `decision` entry in `docs/log.md`.",
       "statement": "Was a new ADR written without a decision entry being added to docs/log.md?",
       "scope": "process",
       "evidence": "transcript",
@@ -326,8 +326,8 @@
     },
     {
       "id": "adr-filename-convention",
-      "rule_ref": "When to write an ADR (every session, including implementation)",
-      "rule_text": "Write `docs/adr/NNNN-<kebab>.md` (next free number).",
+      "rule_ref": "When to write an ADR",
+      "rule_text": "ADRs are filed as `docs/adr/NNNN-<kebab>.md`, taking the next free number.",
       "statement": "Was a file written under docs/adr/ whose name is not NNNN-kebab-case.md?",
       "scope": "process",
       "evidence": "transcript",
@@ -358,8 +358,8 @@
     },
     {
       "id": "adr-has-alternatives-rejected",
-      "rule_ref": "When to write an ADR (every session, including implementation)",
-      "rule_text": "ADR template includes `## Alternatives rejected` (one-line reason each).",
+      "rule_ref": "When to write an ADR",
+      "rule_text": "An ADR carries an `## Alternatives rejected` section, a line of reasoning each.",
       "statement": "Is an ADR missing its `## Alternatives rejected` section?",
       "scope": "process",
       "evidence": "diff",
@@ -389,8 +389,8 @@
     },
     {
       "id": "new-docs-page-updates-index",
-      "rule_ref": "The docs are a wiki (Karpathy LLM wiki pattern)",
-      "rule_text": "`docs/index.md` lists every docs file. Any page you create or rename gets a line there in the same change.",
+      "rule_ref": "The docs directory",
+      "rule_text": "`docs/index.md` lists every page under `docs/`; a page you add or rename is listed there in the same change.",
       "statement": "Was a new docs page created without docs/index.md being updated?",
       "scope": "process",
       "evidence": "transcript",
@@ -400,7 +400,7 @@
       "trigger_pattern": "^Write .*\\bdocs/.*\\.md",
       "pattern": "docs/index\\.md",
       "confidence": "medium",
-      "message": "Every new docs page needs a one-line entry in docs/index.md in the same change.",
+      "message": "Every new docs page needs its one-line entry in docs/index.md in the same change.",
       "examples_positive": [
         "Write /repo/docs/specs/features/posts.md"
       ],
@@ -420,8 +420,8 @@
     },
     {
       "id": "no-push-to-master",
-      "rule_ref": "Hard rules (code)",
-      "rule_text": "`master` takes code only through a PR with green CI.",
+      "rule_ref": "Code rules",
+      "rule_text": "Code reaches `master` through a reviewed PR with green CI, never a direct push.",
       "statement": "Did the session push directly to master?",
       "scope": "process",
       "evidence": "transcript",
@@ -430,7 +430,7 @@
       "kind": "tool_forbidden",
       "pattern": "\\bgit\\s+push\\b[^\\n]*\\bmaster\\b",
       "confidence": "high",
-      "message": "master is protected: land code through a PR with green CI, never a direct push.",
+      "message": "master is protected: land code through a PR with green CI.",
       "examples_positive": [
         "Bash git push origin master"
       ],
@@ -451,8 +451,8 @@
     },
     {
       "id": "stories-not-ticked-in-file",
-      "rule_ref": "Specs are the source of truth",
-      "rule_text": "Shipped stories are ticked in the GitHub issue, not in `docs/specs/stories/<role>.md`.",
+      "rule_ref": "Docs are the source of truth",
+      "rule_text": "Shipped stories are ticked on the tracker issue, not inside `docs/specs/stories/<role>.md`.",
       "statement": "Was a story ticked off with a checked checkbox inside a stories file?",
       "scope": "process",
       "evidence": "diff",
@@ -464,7 +464,7 @@
         "docs/specs/stories/*.md"
       ],
       "confidence": "medium",
-      "message": "Tick shipped stories in the GitHub issue, not in the stories spec file.",
+      "message": "Tick shipped stories on the tracker issue, not in the stories document.",
       "examples_positive": [
         "- [x] US-012 Admin can delete a post"
       ],
@@ -484,31 +484,31 @@
       }
     },
     {
-      "id": "schema-change-needs-prd-to-plan",
+      "id": "schema-change-needs-a-plan",
       "rule_ref": "Workflow",
-      "rule_text": "Plan with `/prd-to-plan` for anything that touches auth, permissions, the DB schema, or more than 3 files.",
-      "statement": "Was the DB schema edited without /prd-to-plan having been invoked first?",
+      "rule_text": "Anything touching auth, permissions, the database schema or more than three files is planned with `/plan-change` first.",
+      "statement": "Was the database schema edited without /plan-change having been invoked first?",
       "scope": "process",
       "evidence": "transcript",
       "bucket": "deterministic",
       "domain": "tool",
       "kind": "tool_never_without_prior",
       "pattern": "^(?:Edit|Write) .*packages/db/src/schema\\.ts",
-      "prior_pattern": "prd-to-plan",
+      "prior_pattern": "plan-change",
       "confidence": "medium",
-      "message": "Schema changes need a /prd-to-plan plan before the edit.",
+      "message": "Schema changes need a /plan-change plan before the edit.",
       "examples_positive": [
         "Edit /repo/packages/db/src/schema.ts"
       ],
       "examples_negative": [
-        "Skill prd-to-plan\nEdit /repo/packages/db/src/schema.ts"
+        "Skill plan-change\nEdit /repo/packages/db/src/schema.ts"
       ],
       "fixtures": {
         "should_match": [
           "Edit /repo/packages/db/src/schema.ts"
         ],
         "should_not_match": [
-          "Skill prd-to-plan\nEdit /repo/packages/db/src/schema.ts",
+          "Skill plan-change\nEdit /repo/packages/db/src/schema.ts",
           "Read /repo/packages/db/src/schema.ts",
           "Edit /repo/apps/api/src/server.ts"
         ]
@@ -516,8 +516,8 @@
     },
     {
       "id": "docs-index-read-first",
-      "rule_ref": "Specs are the source of truth",
-      "rule_text": "Read `docs/index.md` first, then only the pages the task needs.",
+      "rule_ref": "Docs are the source of truth",
+      "rule_text": "Start from `docs/index.md`, then open only the pages the task needs.",
       "statement": "Was a docs page read before docs/index.md had been read?",
       "scope": "process",
       "evidence": "transcript",
@@ -547,14 +547,14 @@
     },
     {
       "id": "api-input-zod-validated",
-      "rule_ref": "Hard rules (code)",
-      "rule_text": "Every API input is validated with a zod schema from `@acme/shared`. Only exception: the Better Auth handler.",
-      "statement": "Does an API route added or changed here accept input without validating it against a zod schema from @acme/shared?",
+      "rule_ref": "Code rules",
+      "rule_text": "API input is validated against a schema from `@acme/shared` before it is used.",
+      "statement": "Does an API route added or changed here accept input without validating it against a schema from @acme/shared?",
       "scope": "code",
       "evidence": "diff",
       "bucket": "judged",
       "confidence": "medium",
-      "message": "API input must be validated with a zod schema from @acme/shared.",
+      "message": "API input must be validated with a schema from @acme/shared.",
       "examples_positive": [
         "app.post('/posts', async (c) => { const body = await c.req.json(); return c.json(await createPost(body)) })"
       ],
@@ -564,9 +564,9 @@
     },
     {
       "id": "authz-in-api-not-ui",
-      "rule_ref": "Hard rules (code)",
-      "rule_text": "Authorization lives in the API, per `docs/specs/permissions.md`. UI hiding is not authorization.",
-      "statement": "Was an authorization decision implemented only by hiding UI, with no corresponding API-side check?",
+      "rule_ref": "Code rules",
+      "rule_text": "Permission checks live in the API. Hiding a control in the UI is not one.",
+      "statement": "Was an authorization decision implemented only by hiding UI, with no API-side check?",
       "scope": "code",
       "evidence": "diff",
       "bucket": "judged",
@@ -581,14 +581,14 @@
     },
     {
       "id": "no-raw-db-rows-in-response",
-      "rule_ref": "Hard rules (code)",
-      "rule_text": "The API returns response schemas per role, never raw DB rows.",
+      "rule_ref": "Code rules",
+      "rule_text": "Handlers return a response schema for the caller's role, never the database row itself.",
       "statement": "Does an API handler return a raw database row instead of a per-role response schema?",
       "scope": "code",
       "evidence": "diff",
       "bucket": "judged",
       "confidence": "medium",
-      "message": "Return a per-role response schema, never a raw DB row.",
+      "message": "Return a per-role response schema, never a raw database row.",
       "examples_positive": [
         "return c.json(await db.select().from(posts))"
       ],
@@ -598,14 +598,14 @@
     },
     {
       "id": "no-secrets-in-code-or-logs",
-      "rule_ref": "Hard rules (code)",
-      "rule_text": "No secrets in code or logs. Use env vars.",
+      "rule_ref": "Code rules",
+      "rule_text": "Secrets come from the environment; they are never written into source or log output.",
       "statement": "Was a secret value hard-coded in source or written into a log line?",
       "scope": "code",
       "evidence": "diff",
       "bucket": "judged",
       "confidence": "medium",
-      "message": "Secrets belong in env vars, never in code or log output.",
+      "message": "Secrets belong in environment variables, never in code or log output.",
       "examples_positive": [
         "const apiKey = 'sk_live_9f3b2a...'",
         "logger.info(`token=${session.accessToken}`)"
@@ -617,8 +617,8 @@
     },
     {
       "id": "adr-when-decision-made",
-      "rule_ref": "When to write an ADR (every session, including implementation)",
-      "rule_text": "Write an ADR in the same session when you chose between options, rejected something expected, added a constraint the specs don't state, or worked around a platform limitation.",
+      "rule_ref": "When to write an ADR",
+      "rule_text": "Write the ADR in the session that made the call: a choice between options, a rejected expectation, a new constraint, or a workaround for a platform limit.",
       "statement": "Did the session make a decision of a kind the ADR rule lists without writing an ADR for it?",
       "scope": "process",
       "evidence": "transcript",
@@ -635,32 +635,32 @@
     },
     {
       "id": "no-bulk-doc-rewrites",
-      "rule_ref": "The docs are a wiki (Karpathy LLM wiki pattern)",
-      "rule_text": "Ingest and lint are human-triggered; never rewrite docs in bulk on your own.",
+      "rule_ref": "The docs directory",
+      "rule_text": "Bulk documentation passes are started by a human; do not launch one unprompted.",
       "statement": "Did the session rewrite documentation in bulk without being asked to?",
       "scope": "process",
       "evidence": "transcript",
       "bucket": "judged",
       "confidence": "medium",
-      "message": "Do not rewrite docs in bulk unprompted; ingest and lint are human-triggered.",
+      "message": "Do not rewrite docs in bulk unprompted.",
       "examples_positive": [
         "Rewrote every page under docs/specs/ for tone, unprompted."
       ],
       "examples_negative": [
         "Updated the one spec page the task changed.",
-        "Ran /wiki-ingest because the user asked for it."
+        "Ran /docs-ingest because the user asked for it."
       ]
     },
     {
       "id": "contradicting-source-stop-and-ask",
-      "rule_ref": "The docs are a wiki (Karpathy LLM wiki pattern)",
-      "rule_text": "A new source that contradicts an existing page: stop and ask which wins. Never resolve silently.",
-      "statement": "Did the session resolve a contradiction between a new source and an existing page without asking the user?",
+      "rule_ref": "The docs directory",
+      "rule_text": "When new material contradicts a page already in `docs/`, stop and ask which one holds. Do not pick silently.",
+      "statement": "Did the session resolve a contradiction between a new source and an existing page without asking?",
       "scope": "process",
       "evidence": "transcript",
       "bucket": "judged",
       "confidence": "medium",
-      "message": "Stop and ask when a new source contradicts an existing page.",
+      "message": "Stop and ask when new material contradicts an existing page.",
       "examples_positive": [
         "Noticed the new brief contradicts docs/specs/permissions.md and silently updated the page."
       ],
@@ -670,9 +670,9 @@
     },
     {
       "id": "dont-re-explain-docs-context",
-      "rule_ref": "Specs are the source of truth",
-      "rule_text": "Don't re-explain context the docs already hold; ask `/wiki-query` instead.",
-      "statement": "Did the response re-explain project context that the docs already hold?",
+      "rule_ref": "Docs are the source of truth",
+      "rule_text": "Point at the page instead of restating context `docs/` already carries.",
+      "statement": "Did the response re-explain project context the docs already hold?",
       "scope": "communication",
       "evidence": "transcript",
       "bucket": "judged",
@@ -687,14 +687,14 @@
     },
     {
       "id": "test-first-then-code",
-      "rule_ref": "Hard rules (code)",
-      "rule_text": "Write the failing test first, see it fail, then the code.",
+      "rule_ref": "Code rules",
+      "rule_text": "Write the failing test, watch it fail, then write the code.",
       "statement": "Was implementation code written before a failing test existed for it?",
       "scope": "process",
       "evidence": "transcript",
       "bucket": "judged",
       "confidence": "medium",
-      "message": "Write the failing test first and see it fail before the implementation.",
+      "message": "Write the failing test and see it fail before the implementation.",
       "examples_positive": [
         "Implemented the new endpoint, then added a passing test afterwards."
       ],
@@ -705,83 +705,83 @@
   ],
   "not_checkable": [
     {
-      "rule_ref": "Specs are the source of truth",
-      "rule_text": "`docs/specs/` wins over code. When they disagree, fix one explicitly, never silently.",
-      "why": "Detecting that a spec and the code disagree needs cross-file semantic comparison the checker cannot do."
+      "rule_ref": "Docs are the source of truth",
+      "rule_text": "`docs/` wins over code. Where they disagree, fix one of them on purpose, not quietly.",
+      "why": "Establishing that a document and the code disagree needs cross-file semantic comparison the checker cannot do."
     },
     {
-      "rule_ref": "Specs are the source of truth",
-      "rule_text": "Read only the pages the task needs.",
+      "rule_ref": "Docs are the source of truth",
+      "rule_text": "Open only the pages the task needs.",
       "why": "\"Needed\" is relative to a task the checker cannot scope; any read set is defensible."
     },
     {
-      "rule_ref": "Specs are the source of truth",
-      "rule_text": "Before any feature change, read its `docs/specs/features/<slug>.md`; with no spec, write it with `/feature-spec` and stop for approval.",
-      "why": "Nothing in the corpora identifies which edits constitute a \"feature change\" or which slug belongs to them."
+      "rule_ref": "Docs are the source of truth",
+      "rule_text": "Before changing a feature, read its page under `docs/specs/features/`; with no page, write one and stop for approval.",
+      "why": "Nothing in the corpora identifies which edits constitute a feature change or which page belongs to them."
     },
     {
-      "rule_ref": "Specs are the source of truth",
-      "rule_text": "Story ids are permanent, never renumber.",
-      "why": "Renumbering is a diff-level semantic comparison of ids across versions; the net diff does not expose the prior numbering."
+      "rule_ref": "Docs are the source of truth",
+      "rule_text": "Story ids are permanent. Never renumber them.",
+      "why": "Renumbering is a semantic comparison of ids across versions; the net diff does not expose the prior numbering."
     },
     {
-      "rule_ref": "Specs are the source of truth",
-      "rule_text": "A role x action missing from `docs/specs/permissions.md` is denied.",
+      "rule_ref": "Docs are the source of truth",
+      "rule_text": "A role and action missing from `docs/specs/permissions.md` is denied.",
       "why": "Requires resolving the permissions table against every call site - cross-file reasoning the checker cannot do."
     },
     {
       "rule_ref": "Commands",
-      "rule_text": "Stop `bun run dev` before `bun run test:e2e`; check ports 3100/3101.",
+      "rule_text": "Stop the dev server before running the end-to-end suite, and check that its ports are free.",
       "why": "Whether a dev server was running is machine state, not anything in the transcript."
     },
     {
       "rule_ref": "Commands",
-      "rule_text": "`bun run test` needs `docker compose up -d`.",
+      "rule_text": "`bun run test` expects the local container stack to be up.",
       "why": "A session on an already-running stack is compliant, and the checker cannot see that the containers were up."
     },
     {
       "rule_ref": "Commands",
-      "rule_text": "Command reference: dev, e2e, single-package test, psql, local stack ports.",
-      "why": "Descriptive invocation reference, not an obligation with a failure signature."
+      "rule_text": "Command reference: dev server, end-to-end suite, single-package test, database shell, local stack ports.",
+      "why": "A descriptive invocation reference, not an obligation with a failure signature."
     },
     {
-      "rule_ref": "Structure",
-      "rule_text": "App and panel call the API only through `@acme/api-client`.",
+      "rule_ref": "Repository layout",
+      "rule_text": "The apps talk to the API only through `@acme/api-client`.",
       "why": "Catching a raw fetch needs call-graph context; a character pattern over hunks would accuse ordinary fetch use."
     },
     {
-      "rule_ref": "Structure",
-      "rule_text": "Repo layout: entry points, route locations, package responsibilities.",
-      "why": "Descriptive layout, no detectable failure signature."
+      "rule_ref": "Repository layout",
+      "rule_text": "Repository layout: entry points, route locations, what each package is responsible for.",
+      "why": "A descriptive layout, with no detectable failure signature."
     },
     {
-      "rule_ref": "Structure",
-      "rule_text": "Per-app rules load from `.claude/rules/` when you touch matching files.",
+      "rule_ref": "Repository layout",
+      "rule_text": "Per-app rules load from `.claude/rules/` when you touch files they match.",
       "why": "Describes harness behaviour, not an action the agent can get wrong."
     },
     {
-      "rule_ref": "Hard rules (code)",
-      "rule_text": "Update the app's `.env.example` when you add an env var.",
+      "rule_ref": "Code rules",
+      "rule_text": "Adding an environment variable means updating that app's `.env.example`.",
       "why": "The trigger is adding an env var, which is visible only inside string literals the checker strips before matching."
     },
     {
-      "rule_ref": "Hard rules (code)",
-      "rule_text": "No string-built SQL. Use the Drizzle query builder.",
+      "rule_ref": "Code rules",
+      "rule_text": "Build queries with the query builder; do not assemble SQL by string.",
       "why": "String literals are stripped before any pattern runs, so SQL text inside a string can never be matched."
     },
     {
-      "rule_ref": "Hard rules (code)",
-      "rule_text": "No UI text in code: Polish strings go in the app's i18next files.",
+      "rule_ref": "Code rules",
+      "rule_text": "No user-facing text in code: translated strings live in the app's locale files.",
       "why": "Same reason: the UI strings this rule is about live inside string literals, which are stripped before matching."
     },
     {
       "rule_ref": "Workflow",
-      "rule_text": "Fresh session per issue; spec, /prd-to-plan, /implement-plan-workflow, review, PR.",
+      "rule_text": "One session per issue: write the spec, plan it, implement it, review it, open the PR.",
       "why": "Session boundaries are not in the corpus, and the phase sequence spans sessions."
     },
     {
       "rule_ref": "Workflow",
-      "rule_text": "Before you plan a feature, read `.claude/rules/<app>.md` for every app it touches.",
+      "rule_text": "Before planning a feature, read `.claude/rules/<app>.md` for every app it touches.",
       "why": "Which apps a feature touches is not derivable before the edits exist."
     },
     {
@@ -791,17 +791,17 @@
     },
     {
       "rule_ref": "Workflow",
-      "rule_text": "Before a PR, run the security + performance review from `docs/WORKFLOW.md` Step 8.",
+      "rule_text": "Run the security and performance review before opening a PR.",
       "why": "The review is prose work with no command or tool call that marks it as having happened."
     },
     {
-      "rule_ref": "When to write an ADR (every session, including implementation)",
-      "rule_text": "Skip the ADR when architecture.md, data-model.md, permissions.md or an existing ADR already dictates the choice; cite that file instead.",
+      "rule_ref": "When to write an ADR",
+      "rule_text": "Skip the ADR where an existing document or ADR already dictates the choice; cite that file instead.",
       "why": "An exception clause to another rule; it has no independent failure signature."
     },
     {
-      "rule_ref": "The docs are a wiki (Karpathy LLM wiki pattern)",
-      "rule_text": "`docs/log.md` is append-only: `## [YYYY-MM-DD] <ingest|decision|lint|query> | <what> -> <files>`.",
+      "rule_ref": "The docs directory",
+      "rule_text": "`docs/log.md` is append-only: `## [YYYY-MM-DD] <kind> | <what> -> <files>`.",
       "why": "Append-only means prior lines are unchanged, which the net diff cannot establish."
     }
   ]

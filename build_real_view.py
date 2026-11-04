@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 from collections import Counter
 from datetime import datetime, timezone
@@ -5627,8 +5628,9 @@ def _bucket_mix(doc):
 def query_compile_status(data):
     """Every rule document in the project, its state, its mix, and what to run.
 
-    Project scope, not session scope: the documents on disk belong to the
-    project, so this answers the same way whichever session is active.
+    Project scope, not session scope: the list is every rule document on disk
+    under the project, the ones this session never opened included, so it
+    answers the same way whichever session is active.
     """
     per = data.get("perSession") or {}
     roll = ((per.get(data.get("activeSessionId")) or {}).get("ruleCompile")) or {}
@@ -6273,7 +6275,67 @@ def _violated_count(blocks):
                if b["status"] == "ignored" or b.get("violatingTurns"))
 
 
-def _rule_compile_rollup(context_files):
+# The rule-document filenames the harness loads by convention. A nested one is
+# delivered only when the harness injects it or something reads it, so the
+# project's rule documents are a strict superset of the session's.
+RULE_DOC_NAMES = ("CLAUDE.md", "AGENTS.md", "AGENTS.override.md")
+
+# Directories a rule document under them would not be the project's own.
+_RULE_SCAN_SKIP = {"node_modules", "dist", "build", "vendor", "target",
+                   "venv", "__pycache__", "site-packages"}
+
+
+@functools.lru_cache(maxsize=8)
+def project_rule_documents(project_dir):
+    """Every rule document on disk under the project, as minimal file records.
+
+    The compile-status screen answers for the project, so a document this
+    session never opened still has to be on it: a reader who sees every listed
+    document compiled must not still have uncompiled rules a directory down.
+    Cached per project because the walk would otherwise run once per turn.
+    """
+    root = Path(project_dir)
+    found = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames
+                             if d not in _RULE_SCAN_SKIP
+                             and (not d.startswith(".") or d == ".claude"))
+        found += [Path(dirpath) / fn for fn in sorted(filenames)
+                  if fn in RULE_DOC_NAMES]
+    ignored = _git_ignored(root, found)
+    out = []
+    for f in found:
+        if str(f) in ignored:
+            continue
+        try:
+            text = f.read_text(errors="replace")
+        except OSError:
+            continue
+        ap = str(f.resolve())
+        out.append({"kind": "project", "abs_path": ap,
+                    "path": _display_path(ap), "blocks": parse_claude_md(text)})
+    return tuple(out)
+
+
+def _git_ignored(root, paths):
+    """Which of these paths git ignores, as strings. Empty where git cannot say.
+
+    A frozen transcript corpus or a vendored checkout under the project is
+    input data, not the project's own rules - and listing another project's
+    CLAUDE.md as work to do buries the documents the reader can act on.
+    """
+    if not paths:
+        return set()
+    try:
+        proc = subprocess.run(["git", "-C", str(root), "check-ignore", "--stdin"],
+                              input="\n".join(str(p) for p in paths),
+                              capture_output=True, text=True, timeout=20)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return set()
+    return {ln for ln in proc.stdout.splitlines() if ln}
+
+
+def _rule_compile_rollup(context_files, project_dir=None):
     """Which of this project's rule documents have reviewed checks, and what to run.
 
     Read off the documents on disk rather than off the verdicts: an uncompiled
@@ -6281,10 +6343,17 @@ def _rule_compile_rollup(context_files):
     truth is that nobody has compiled it yet. The first report over a project
     is the onboarding step, so it has to name the count and the one command
     that closes it.
+
+    Scope is the project, not the session: the loaded documents come first (a
+    nested CLAUDE.md the harness injected is already one of them), and the walk
+    adds the rest.
     """
     docs = []
     totals = Counter()
-    for f in context_files:
+    scanned = project_rule_documents(str(project_dir)) if project_dir else ()
+    loaded_paths = {f.get("abs_path") for f in context_files}
+    for f in list(context_files) + [d for d in scanned
+                                    if d["abs_path"] not in loaded_paths]:
         if f["kind"] not in GUIDELINE_KINDS:
             continue
         status = rule_checks.compile_status(
@@ -6702,7 +6771,7 @@ def _compute_payload(events, calls, asst_segs, args, project_dir, id_prefix="", 
         "lexicalBackground": trace["lexical_bg"],
         # Same as `trace`: the caller bakes this at session scope only. The
         # rule documents on disk are a property of the project, not of a turn.
-        "ruleCompile": _rule_compile_rollup(context_files),
+        "ruleCompile": _rule_compile_rollup(context_files, project_dir),
     }
 
 

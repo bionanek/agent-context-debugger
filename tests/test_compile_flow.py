@@ -468,3 +468,68 @@ def test_the_worked_example_carries_no_private_paths():
     """It was redacted from a real project's file; nothing of that project stays."""
     text = EXAMPLE_CHECKS.read_text()
     assert "/Users/" not in text
+
+
+def test_compile_status_lists_a_rule_document_the_session_never_loaded(tmp_path, monkeypatch):
+    """The screen claims project scope, so session scope is not enough.
+
+    A nested `backend/CLAUDE.md` is loaded only when the harness injects it or
+    something reads it. Reading the screen, seeing every listed document
+    compiled and taking that for "the project is compiled" is exactly the
+    wrong answer when an unopened document still holds uncompiled rules.
+    """
+    nested = tmp_path / "backend"
+    nested.mkdir()
+    (nested / "CLAUDE.md").write_text("# Backend\n\n## Logging\n\nNever log a secret.\n")
+    brv.project_rule_documents.cache_clear()
+    summary, per_session = _session(tmp_path, monkeypatch)
+
+    loaded = {f["path"] for f in per_session["contextFiles"]}
+    assert not any(p.endswith("backend/CLAUDE.md") for p in loaded), \
+        "the fixture no longer exercises an unloaded document"
+
+    paths = [d["path"] for d in per_session["ruleCompile"]["docs"]]
+    assert any(p.endswith("backend/CLAUDE.md") for p in paths), paths
+    out = _query(summary, per_session, ["sessions"], compile_status=True)
+    assert "backend/CLAUDE.md" in out
+    brv.project_rule_documents.cache_clear()
+    rc.checks_for_doc.cache_clear()
+
+
+def test_the_worked_example_carries_no_project_specific_detail():
+    """Redaction has to reach the prose, not only the identifiers.
+
+    The example was redacted from a real project's checks file. Renaming its
+    packages leaves every sentence, workflow name and operational detail of
+    that project in `rule_text`, `rule_ref`, `statement` and `why` - which is
+    the content the privacy guardrail is about, not just home paths.
+    """
+    text = EXAMPLE_CHECKS.read_text()
+    for leak in ("Karpathy", "wiki-query", "3100", "3101", "i18next", "Polish",
+                 "feature-spec", "prd-to-plan", "implement-plan-workflow",
+                 "WORKFLOW.md", "Better Auth"):
+        assert leak not in text, f"the example still carries {leak!r}"
+
+
+def test_a_git_ignored_fixture_corpus_is_not_reported_as_this_projects_rules(tmp_path, monkeypatch):
+    """A frozen transcript corpus under the repo is input data, not project rules.
+
+    This repo keeps other projects' CLAUDE.md files under a gitignored
+    `snapshots/` tree. Reporting those as rules to compile would bury the two
+    documents the reader can actually act on.
+    """
+    import subprocess
+    if subprocess.run(["git", "init", "-q", str(tmp_path)],
+                      capture_output=True).returncode != 0:
+        import pytest
+        pytest.skip("git unavailable")
+    (tmp_path / ".gitignore").write_text("corpus/\n")
+    (tmp_path / "corpus").mkdir()
+    (tmp_path / "corpus" / "CLAUDE.md").write_text("# Other\n\n## Logging\n\nNever log a secret.\n")
+    brv.project_rule_documents.cache_clear()
+    summary, per_session = _session(tmp_path, monkeypatch)
+
+    paths = [d["path"] for d in per_session["ruleCompile"]["docs"]]
+    assert not any("corpus/CLAUDE.md" in p for p in paths), paths
+    brv.project_rule_documents.cache_clear()
+    rc.checks_for_doc.cache_clear()
