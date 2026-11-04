@@ -35,6 +35,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 import build_real_view as brv  # noqa: E402
+import rule_checks as rc  # noqa: E402
 
 SNAPSHOTS_DIR = REPO_ROOT / "snapshots"
 DEFAULT_BASELINE_DIR = SNAPSHOTS_DIR / "baseline"
@@ -228,21 +229,6 @@ def _cmd_bake(args):
 
 # ---------- freezing ----------
 
-def _checks_files(doc_path):
-    """The reviewed `<doc>.checks.json` beside a rule doc, if it has one.
-
-    Part of the judgement input, not a derived artifact: the same prose scores
-    differently with and without it.
-    """
-    p = Path(doc_path)
-    out = []
-    for candidate in (p.with_name(p.name + ".checks.json"),
-                      p.with_name(p.stem + ".checks.json")):
-        if candidate.is_file():
-            out.append(candidate)
-    return out
-
-
 def _freeze(paths, homes, inputs_dir):
     """Copy each path into inputs_dir under its relocatable key.
 
@@ -293,7 +279,11 @@ def _loaded_inputs(loads, home, transcript, session_id):
         if not raw or not Path(raw).is_absolute():
             continue
         paths.append(Path(raw))
-        paths.extend(_checks_files(raw))
+        # Part of the judgement input, not a derived artifact: the same prose
+        # scores differently with and without it.
+        checks = rc.find_checks_file(raw)
+        if checks is not None:
+            paths.append(checks)
     return paths
 
 
@@ -392,6 +382,28 @@ def _read_manifest(snap_dir):
     return json.loads((Path(snap_dir) / "manifest.json").read_text(encoding="utf-8"))
 
 
+def inputs_added_after_bake(manifest):
+    """Keys frozen into a snapshot after its baseline payload was baked.
+
+    The baseline never read them and the after-run does, so a verdict that
+    moved in that session may have moved because of the input rather than the
+    judging code. Manifests written before `addedAfterBake` existed are read off
+    the origin instead: `capture` rewrites the manifest and bakes in one call,
+    so an entry whose origin is the committed checks tree was added afterwards.
+    """
+    if "addedAfterBake" in manifest:
+        return sorted(manifest["addedAfterBake"])
+    if "payload" not in manifest:
+        return []
+    return sorted(e["key"] for e in manifest.get("inputs") or []
+                  if _under_checks_tree(e.get("origin", "")))
+
+
+def _under_checks_tree(origin):
+    parts = Path(origin).parts
+    return any(parts[i:i + 2] == ("snapshots", "checks") for i in range(len(parts) - 1))
+
+
 def _write_manifest(snap_dir, manifest):
     (Path(snap_dir) / "manifest.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
@@ -417,7 +429,7 @@ def capture_session(spec, *, home=None, baseline_dir=None, restore_root=None):
     home = Path(home) if home else Path.home()
     homes = _spellings(home)
     baseline_dir = Path(baseline_dir) if baseline_dir else DEFAULT_BASELINE_DIR
-    cwd = Path(spec["cwd"])
+    cwd = Path(os.path.expanduser(spec["cwd"]))
     transcript = _find_transcript(cwd, spec["session"], home)
     session_id = transcript.stem
     snap_dir = baseline_dir / spec["project"] / session_id[:8]
@@ -570,8 +582,13 @@ def verify_session(snap_dir, restore_root=None):
     payload = bake_from_frozen(snap_dir, restore_root)
     matched = sha256(payload) == m["payload"]["sha256"]
     if not matched:
-        problems.append(f"payload differs from baseline ({m['payload']['sha256'][:12]} "
-                        f"-> {sha256(payload)[:12]})")
+        problem = (f"payload differs from baseline ({m['payload']['sha256'][:12]} "
+                   f"-> {sha256(payload)[:12]})")
+        added = inputs_added_after_bake(m)
+        if added:
+            problem += ("; expected, input(s) added after the baseline was baked: "
+                        + ", ".join(added))
+        problems.append(problem)
     return {"sessionId": m["sessionId"], "project": m["project"],
             "inputsVerified": len(m["inputs"]), "payloadMatched": matched,
             "problems": problems}

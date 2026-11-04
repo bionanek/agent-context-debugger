@@ -16,7 +16,8 @@ Three properties make the tier safe enough to ship:
   content it was given cannot be checked by the reader, so it is not reportable
   as a violation - the same rule the deterministic layer already enforces.
 * **Reproducibility by cache.** Every verdict is keyed on
-  `(rule_key, candidate content hash, model id)` in a local human-readable
+  `(rule_key, question hash, candidate content hash, model id)` in a local
+  human-readable
   file, so the same session plus the same rules give the same report and a
   re-audit pays only for what changed.
 
@@ -210,6 +211,11 @@ def judge_request(rule_key, statement, positives, negatives, evidence,
         pieces.append((str(name or "evidence"), text))
     body = "\n".join(f"{n}\n{t}" for n, t in pieces)
     content_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    # One rule section compiles into several records sharing a rule key, and
+    # over the same file their evidence is identical too. Without the question
+    # in the key the second record is answered with the first one's verdict.
+    question = json.dumps([statement or "", list(positives or []), list(negatives or [])])
+    question_hash = hashlib.sha256(question.encode("utf-8")).hexdigest()[:16]
     nonce = content_hash[:12]
     return {
         "ruleKey": rule_key,
@@ -219,7 +225,7 @@ def judge_request(rule_key, statement, positives, negatives, evidence,
         "evidence": pieces,
         "model": model,
         "contentHash": content_hash,
-        "cacheKey": f"{rule_key}|{content_hash}|{model}",
+        "cacheKey": f"{rule_key}|{question_hash}|{content_hash}|{model}",
         "injections": scan_for_injection(body),
         "prompt": build_prompt(statement, positives, negatives, pieces, nonce),
         # Named on the request rather than assumed by the runner: the relevance
@@ -473,7 +479,7 @@ class Judge:
             # the code: caching it would pin one bad round-trip onto this
             # candidate for every future run.
             self.errors.append(UNPARSED)
-            return dict(verdict, cached=False)
+            return dict(verdict, cached=False, unavailable=True)
         self._cache[key] = dict(verdict, model=self.model, ruleKey=request["ruleKey"],
                                 askedAt=time.strftime("%Y-%m-%dT%H:%M:%S"))
         self.save()
@@ -484,17 +490,26 @@ class Judge:
 
         Written as it goes rather than at the end: these answers cost the user
         real calls, and a run interrupted half way must not throw away the ones
-        already paid for.
+        already paid for. The file is re-read and merged first, ours winning,
+        because a concurrent run that saved since we loaded paid for its
+        verdicts too.
         """
         if not self._writable:
             return
         path = self.cache_file
+        on_disk, unreadable = _read_cache(path)
+        if unreadable:
+            self.errors.append(unreadable)
+            self._writable = False
+            return
+        merged = dict(on_disk)
+        merged.update(self._cache)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             payload = {"_note": "Verdict cache for build_real_view.py --judge. "
-                                "Keys are <rule key>|<content hash>|<model id>. "
-                                "Delete a line to re-ask that question.",
-                       "verdicts": self._cache}
+                                "Keys are <rule key>|<question hash>|<content hash>|"
+                                "<model id>. Delete a line to re-ask that question.",
+                       "verdicts": merged}
             tmp = path.with_suffix(path.suffix + ".tmp")
             tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n",
                            encoding="utf-8")
@@ -509,4 +524,4 @@ class Judge:
             parts.append(f"budget of {self.max_calls} calls exhausted")
         if self.errors:
             parts.append(f"{len(self.errors)} error(s): {self.errors[0]}")
-        return " — ".join(parts)
+        return " - ".join(parts)

@@ -174,6 +174,24 @@ def test_the_thresholds_in_the_code_are_the_ones_the_set_was_swept_at(fixture):
     assert lexical.MIN_TERMS == point["minTerms"]
 
 
+# The six constants the set was swept over carry their own operatingPoint keys
+# above; every other number in lexical.py is pinned under `thresholds`.
+SWEPT = {"COVERAGE_FLOOR", "RUN_TOKENS", "RUN_CHARS", "G2_CRITICAL",
+         "MIN_SIGNIFICANT", "MIN_TERMS"}
+
+
+def test_every_numeric_constant_in_lexical_is_pinned(fixture):
+    """A pin list curated by hand misses the next constant someone adds, and an
+    unpinned threshold can move with nothing going red."""
+    numeric = {k: v for k, v in vars(lexical).items()
+               if k.lstrip("_").isupper() and isinstance(v, (int, float))
+               and not isinstance(v, bool)}
+    pinned = fixture["operatingPoint"]["thresholds"]
+    assert set(numeric) == SWEPT | set(pinned)
+    for name, value in pinned.items():
+        assert numeric[name] == value, name
+
+
 @requires_corpus
 def test_no_pair_the_run_never_saw_scores_positive(fixture, metrics):
     """§3.2's shuffled-pair check, as a standing assertion.

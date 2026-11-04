@@ -66,7 +66,7 @@ Format: `- <block id> :: <truth> :: <mechanism tag or ->  :: <evidence>`
 - 8cdb-home-git-formic-formichmi-agents-md-4-core-ai-agent-workflow :: no-hard-verdict :: - :: no action in the session cites this block
 - 8cdb-home-git-formic-formichmi-agents-md-5-tools :: no-hard-verdict :: - :: no action in the session cites this block
 - 8cdb-home-git-formic-formichmi-agents-md-6-available-commands :: used :: F-CMDMENTION :: `pnpm lint:all`, the block's own validation command, ran verbatim
-- 8cdb-home-git-formic-formichmi-agents-md-7-git-workflow :: used :: - :: the branch created is `feature/RBT-8135-crowder-reset-block`, exactly the prescribed `feature|bugfix|hotfix/PROJ-123-description` shape, and validation ran before the commit
+- 8cdb-home-git-formic-formichmi-agents-md-7-git-workflow :: used :: - :: the branch created is `feature/TICKET-1-crowder-reset-block`, exactly the prescribed `feature|bugfix|hotfix/PROJ-123-description` shape, and validation ran before the commit
   accept: branch naming is a compiled-check question (a `tool_arg_matches` over the branch command), not a harness-defined signal
 - 8cdb-home-git-formic-formichmi-agents-md-8-things-to-avoid-doing :: no-hard-verdict :: - :: no action in the session cites this block
 - 8cdb-home-git-formic-formichmi-agents-md-9-coding-guidelines :: used :: F-BLINDSPOT :: both files the no-hardcoded-strings rule names were written: `src/translations/en.json` and `src/translations/es_MX.json`

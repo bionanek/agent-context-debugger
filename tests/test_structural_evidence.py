@@ -432,7 +432,8 @@ def test_echo_credit_replaces_the_weak_mention_of_the_same_command():
     mention = next(p for p in preds
                    if p["kind"] == "command-mention" and p["cmd"] == "pytest")
     assert not mention["applicable"](ran)
-    assert mention["applicable"](argued)
+    # `pytest` as a grep argument never ran, so it is not a mention either.
+    assert not mention["applicable"](argued)
 
 
 def test_echo_credit_also_silences_the_weak_card_for_that_command():
@@ -463,14 +464,81 @@ suite is `yarn test`.
 """
 
 
-def test_commands_in_inline_prose_backticks_are_not_echo_candidates():
-    """This phase does not widen echo to inline spans - that is a later call."""
+def test_a_multi_token_inline_command_that_ran_verbatim_is_strong_evidence():
+    """The reband "Build / run / test" anchor: the gate prescribed in inline
+    backticks ran verbatim, and the block read `dormant` because echo only
+    read fences."""
+    md = ("## Build / run / test\n\n"
+          "- Typecheck: `npm run typecheck`\n- Lint: `npm run lint`\n"
+          "- Test: `npm test`\n")
+    events = [user_text("check it", 1),
+              bash("cd app && npm run typecheck && npm run lint && npm test", 2)]
+    assert "command-echo" in fired(md, events)
+    assert verdict(md, events)["status"] == "used"
+    # ...and an inline command that never ran is still nothing.
+    assert "command-echo" not in fired(md, [user_text("x", 1),
+                                            bash("npm install", 2)])
+
+
+def test_an_inline_echo_silences_the_weak_mention_of_its_program():
     events = [user_text("test it", 1), bash("yarn test", 2)]
+    v = verdict(INLINE_COMMANDS_MD, events)
+    assert v["status"] == "used"
     preds = brv.derive_predicates(block_from(INLINE_COMMANDS_MD), rule_file())
+    mention = next(p for p in preds
+                   if p["kind"] == "command-mention" and p["cmd"] == "yarn")
+    assert not mention["applicable"](trace_for(events))
+    # A different `yarn` command is still a mention of the program.
+    assert mention["applicable"](trace_for([user_text("x", 1),
+                                            bash("yarn add left-pad", 2)]))
+    block, file = block_from(INLINE_COMMANDS_MD), rule_file()
+    moments = brv.assemble_moments(block, file, trace_for(events),
+                                   brv.derive_predicates(block, file))
+    assert "co-occurrence" not in {m["kind"] for m in moments}
+
+
+def test_single_word_inline_spans_stay_out_of_echo():
+    md = "## Tests\n\nRun `pytest` before you finish.\n"
+    preds = brv.derive_predicates(block_from(md), rule_file())
     assert not [p for p in preds if p["kind"] == "command-echo"]
-    assert "yarn" in [p["cmd"] for p in preds if p["kind"] == "command-mention"]
-    assert brv.assess_block(block_from(INLINE_COMMANDS_MD), rule_file(),
-                            trace_for(events))["status"] == "possibly-referenced"
+
+
+# ---------- a mention is the program a command runs ----------
+# Audit anchors: "`null` ran 38× this run" off `> /dev/null`, "`main` ran 8×"
+# off a branch name, "`plan` ran 1×" off an `mv` argument.
+
+MENTION_MD = """## Housekeeping
+
+Silence noise to `null`, never push to `main`, keep the `plan` current and
+run `pytest` before finishing.
+"""
+
+
+def test_a_word_inside_another_commands_arguments_is_not_a_mention():
+    events = [user_text("ship it", 1),
+              bash("ls > /dev/null 2>&1 || true", 2, tool_id="b1"),
+              bash("git push origin main", 3, tool_id="b2"),
+              bash("mv plan/old.md plan/new.md", 4, tool_id="b3")]
+    t = trace_for(events)
+    block, file = block_from(MENTION_MD), rule_file()
+    preds = brv.derive_predicates(block, file)
+    for word in ("null", "main", "plan"):
+        p = next(p for p in preds
+                 if p["kind"] == "command-mention" and p["cmd"] == word)
+        assert not p["applicable"](t), word
+        assert "ran" not in p["describe"](t).replace("did not run", ""), word
+    moments = brv.assemble_moments(block, file, t, preds)
+    assert not [m for m in moments if " ran " in m["label"]]
+    assert verdict(MENTION_MD, events)["status"] != "possibly-referenced"
+
+
+def test_a_program_a_segment_runs_is_still_a_mention():
+    events = [user_text("test it", 1), bash("cd app && pytest -q | tail -3", 2)]
+    t = trace_for(events)
+    p = next(p for p in brv.derive_predicates(block_from(MENTION_MD), rule_file())
+             if p["kind"] == "command-mention" and p["cmd"] == "pytest")
+    assert p["applicable"](t)
+    assert p["describe"](t) == "`pytest` ran as a command 1× this session"
 
 
 # ---------- an executed skill ----------
@@ -956,3 +1024,207 @@ def test_the_write_row_does_not_claim_a_file_was_never_written():
     text = _describe(LOAD_CONTEXT_MD, events, "writes-to-named-path", file=REVIEW_SKILL)
     assert "none of" not in text, text
     assert "read rather than written" in text
+
+
+def test_a_read_before_the_procedure_started_is_not_one_of_its_steps():
+    events = [bash("cat backend/AGENT.md", 1),
+              user_slash("review", "/review", 2)]
+    assert "reads-named-path" not in fired(LOAD_CONTEXT_MD, events, file=REVIEW_SKILL)
+
+
+def test_the_read_moment_carries_the_time_of_the_read():
+    events = [user_slash("review", "/review", 1),
+              bash("sed -n '1,40p' backend/AGENT.md", 2)]
+    assert brv._first_read_time("backend/AGENT.md", trace_for(events)) \
+        == "2026-01-01T00:00:02.000Z"
+
+
+# ---------- one read, several steps that name the file ----------
+# Nothing in a transcript says which step a read served. formic-core 39b9e09e
+# credited `/grill-prd` Phase 1 with a read of `figma-spec.md` that Phase 0 asked
+# for, and famigo 78c658bc credited `/review` Step 4 with a grep that was Step
+# 6's documentation check.
+
+SHARED_READ_MD = """# Review
+
+Review the change.
+
+## Step 1 - Load context
+
+Load `backend/AGENT.md` for the backend conventions.
+
+## Step 6 - Documentation check
+
+Check whether `backend/AGENT.md` needs updating after the change.
+"""
+
+ONE_STEP_MD = """# Review
+
+Review the change.
+
+## Step 1 - Load context
+
+Load `backend/AGENT.md` for the backend conventions.
+
+## Step 6 - Documentation check
+
+Check whether the docs need updating after the change.
+"""
+
+SHARED_WITH_ECHO_MD = """# Review
+
+Review the change.
+
+## Step 1 - Load context
+
+Load `backend/AGENT.md` for the backend conventions, then run:
+
+```bash
+yarn lint
+```
+
+## Step 6 - Documentation check
+
+Check whether `backend/AGENT.md` needs updating after the change.
+"""
+
+
+def _review(md):
+    return rule_file(kind="skill", name="review", path="SKILL.md", md=md)
+
+
+def _one_read():
+    return [user_slash("review", "/review", 1),
+            bash("sed -n '1,40p' backend/AGENT.md", 2)]
+
+
+@pytest.mark.parametrize("title", ["Step 1 - Load context",
+                                   "Step 6 - Documentation check"])
+def test_a_read_two_steps_name_credits_neither_step(title):
+    v = verdict(SHARED_READ_MD, _one_read(), file=_review(SHARED_READ_MD), title=title)
+    assert v["status"] == "possibly-referenced", (v["status"], v["reason"])
+    assert "several steps" in v["reason"], v["reason"]
+    rows = [e["text"] for e in v["evidence"] if "backend/AGENT.md" in e["text"]]
+    assert any("cannot be tied to this one" in r for r in rows), v["evidence"]
+
+
+def test_a_shared_read_draws_no_green_action_card():
+    v = verdict(SHARED_READ_MD, _one_read(), file=_review(SHARED_READ_MD),
+                title="Step 1 - Load context")
+    green = [m for m in v["moments"]
+             if m["kind"] == "action" and m["verdict"] == "yes"
+             and "backend/AGENT.md" in m["label"]]
+    assert not green, v["moments"]
+    assert any(m["kind"] == "co-occurrence" and "backend/AGENT.md" in m["label"]
+               for m in v["moments"]), v["moments"]
+
+
+def test_a_read_only_one_step_names_still_credits_that_step():
+    v = verdict(ONE_STEP_MD, _one_read(), file=_review(ONE_STEP_MD),
+                title="Step 1 - Load context")
+    assert v["status"] == "used", (v["status"], v["reason"])
+    assert "reads-named-path" in fired(ONE_STEP_MD, _one_read(), file=_review(ONE_STEP_MD),
+                                       title="Step 1 - Load context")
+
+
+def test_a_step_with_its_own_echo_keeps_its_green_beside_a_shared_read():
+    events = _one_read() + [bash("yarn lint", 3, tool_id="b2")]
+    file = _review(SHARED_WITH_ECHO_MD)
+    v = verdict(SHARED_WITH_ECHO_MD, events, file=file, title="Step 1 - Load context")
+    assert v["status"] == "used", (v["status"], v["reason"])
+    kinds_fired = fired(SHARED_WITH_ECHO_MD, events, file=file,
+                        title="Step 1 - Load context")
+    assert "command-echo" in kinds_fired
+    assert "reads-named-path" not in kinds_fired
+    other = verdict(SHARED_WITH_ECHO_MD, events, file=file,
+                    title="Step 6 - Documentation check")
+    assert other["status"] == "possibly-referenced", other["reason"]
+
+
+def test_the_identity_block_counts_toward_a_shared_read():
+    """Any block of the document, the title block included, names the file."""
+    md = SHARED_READ_MD.replace("Review the change.",
+                                "Review the change against `backend/AGENT.md`.")
+    md = md.replace("Check whether `backend/AGENT.md` needs updating",
+                    "Check whether the docs need updating")
+    v = verdict(md, _one_read(), file=_review(md), title="Step 1 - Load context")
+    assert v["status"] == "possibly-referenced", (v["status"], v["reason"])
+
+
+# ---------- shell shapes ----------
+
+def test_a_redirection_ampersand_does_not_split_the_command():
+    assert brv._command_segments("echo x 2>&1 | pbcopy", keep_pipes=True) \
+        == ["echo x 2>&1 | pbcopy"]
+    assert brv._command_segments("sleep 1 & yarn test") == ["sleep 1", "yarn test"]
+
+
+def test_a_here_string_is_not_a_heredoc_that_swallows_later_lines():
+    assert brv._command_echo_count("yarn test", ['cat <<< "x"\nyarn test']) == 1
+
+
+def test_an_in_place_sed_is_a_write_not_a_read():
+    assert brv._shell_read_targets("sed -i s/a/b/ README.md") == []
+    assert brv._shell_read_targets("sed -n 1,5p README.md") == ["README.md"]
+
+
+def test_an_input_redirection_is_a_read():
+    assert brv._shell_read_targets("cat < notes.md") == ["notes.md"]
+
+
+# ---------- the path join ----------
+
+@pytest.mark.parametrize("named,touched", [
+    ("backend/AGENT.md", "/r/backend/old/AGENT.md"),
+    ("src/index.ts", "/repo/src/components/index.ts"),
+])
+def test_the_named_directories_must_sit_directly_above_the_file(named, touched):
+    assert not brv._path_names_target(named, touched)
+
+
+def test_the_named_directories_directly_above_the_file_still_join():
+    assert brv._path_names_target("docs/decisions/DECISIONS.md",
+                                  "/x/docs/decisions/DECISIONS.md")
+
+
+# ---------- an inline step command counts only while its skill runs ----------
+# Anchor: formic-core 39b9e09e. `git branch --show-current` ran for the user's
+# own checkout request before `Skill commit`, and again under `/create-pr`
+# after it; the commit run itself never checked the branch, yet its Step 3
+# read `used`.
+
+COMMIT_SKILL_MD = """# commit
+
+Commit the staged work.
+
+## Step 3 - Check the branch
+
+Look at the current branch (`git branch --show-current`) and stop if it looks wrong.
+"""
+
+
+def _commit_step3_verdict(events):
+    file = rule_file(kind="skill", name="commit", path="skills/commit/SKILL.md",
+                     md=COMMIT_SKILL_MD)
+    return brv.assess_block(block_from(COMMIT_SKILL_MD, "Step 3 - Check the branch"),
+                            file, trace_for(events))
+
+
+def test_an_inline_step_command_outside_its_skill_run_is_not_echo():
+    events = [user_text("branch off, then /commit and /create-pr", 1),
+              bash("git branch --show-current", 2, tool_id="b1"),
+              assistant_tool_use("Skill", {"skill": "commit"}, 3, tool_id="s1"),
+              bash("git commit -m x", 4, tool_id="b2"),
+              assistant_tool_use("Skill", {"skill": "create-pr"}, 5, tool_id="s2"),
+              bash("git branch --show-current", 6, tool_id="b3")]
+    assert _commit_step3_verdict(events)["status"] != "used"
+
+
+def test_an_inline_step_command_inside_its_skill_run_is_echo():
+    events = [user_text("/commit", 1),
+              assistant_tool_use("Skill", {"skill": "commit"}, 2, tool_id="s1"),
+              bash("git branch --show-current", 3, tool_id="b1"),
+              bash("git commit -m x", 4, tool_id="b2")]
+    v = _commit_step3_verdict(events)
+    assert v["status"] == "used"
+    assert any("while this document was running" in e["text"] for e in v["evidence"])

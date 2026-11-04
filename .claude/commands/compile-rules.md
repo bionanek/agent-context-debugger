@@ -11,14 +11,14 @@ The document to compile: $ARGUMENTS
 If no path was given, compile the first of these that exists, and say which you picked:
 `./CLAUDE.md`, `~/.claude/CLAUDE.md`, `./AGENTS.md`, `./.claude/rules/*.md`.
 
-Read @prompts/translate-rules.md and follow the flow in it exactly — it is the
+Read @prompts/translate-rules.md and follow the flow in it exactly - it is the
 authoritative specification of the record format, the vocabulary, the buckets and the
 gates the consuming tool applies at load time. Do not paraphrase it from memory.
 
 Two things it asks of you that are easy to skip:
 
 - Verify every fixture against the vocabulary table before writing the file, and then say
-  out loud that your verification does not count — the tool re-runs them with its own
+  out loud that your verification does not count - the tool re-runs them with its own
   matcher and demotes what disagrees.
 - Stop at the review gate. Name the file, report the per-bucket counts, and hand it to the
   user to read before committing. Do not commit it yourself.

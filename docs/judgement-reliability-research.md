@@ -12,19 +12,19 @@ Status of the code at the time of this analysis: commit `3bc378e`.
 
 ## 1. How the current logic works (the three pillars)
 
-### Pillar 1 — recognising rules in files
+### Pillar 1 - recognising rules in files
 - `parse_claude_md` (build_real_view.py ~104) splits CLAUDE.md / rules / skills at H1/H2
   headings, skipping headings inside code fences. **The block is the unit of judgement**,
   never the individual sentence-level rule inside it.
 - `classify_block` (~149) types blocks by crude keyword tests: "always"/"never"/"must" → rule,
   "trigger:" or a backticked `/cmd` → skill, "see "/"@"/".md)" → reference. English-only.
 
-### Pillar 2 — turning rules into checkable items
+### Pillar 2 - turning rules into checkable items
 - `derive_predicates` (~1790) extracts exactly **4 predicate kinds** from prose:
   - `trigger` (strong): "Trigger: /foo" or "When the user types `/foo`". BUG: the predicate
     lambda uses bare substring `c in user_prompt` (~1829-1830) while the moments builder uses
-    the properly right-bounded `_is_triggered` (~1375) — the two disagree, see F-TRIGGER below.
-  - `path-table` (strong): a markdown table matching "Project path contains" — literally the
+    the properly right-bounded `_is_triggered` (~1375) - the two disagree, see F-TRIGGER below.
+  - `path-table` (strong): a markdown table matching "Project path contains" - literally the
     header of the author's own global CLAUDE.md gh-account table. Applicability = cwd contains
     a row token; satisfaction = the row's backticked command appears as a *substring of any
     bash command*.
@@ -45,7 +45,7 @@ Status of the code at the time of this analysis: commit `3bc378e`.
   confidence, never turns a block red). **Well-designed but starving: none of the audited
   projects has a checks file.**
 
-### Pillar 3 — judging usage
+### Pillar 3 - judging usage
 - `assess_block` (~2626): delivery gates first (`not-loaded`, `undelivered` from
   `delivered_ranges`); then strong predicate applicable+satisfied → `used`, unsatisfied →
   `ignored`, mixed → `used-partial`; weak hits only → `possibly-referenced`; predicates but
@@ -63,7 +63,7 @@ Status of the code at the time of this analysis: commit `3bc378e`.
 Reads: visible assistant text, bash command strings, Edit/Write tool-call presence, user
 prompt, cwd, Read calls. **Never reads:** Skill tool invocations (used only for skill
 *loading*), the content written via Write/Edit, writes to files a rule names by path,
-bash-heredoc edits, tool-call *ordering*, thinking text (hardcoded to `""` at ~2874 — but in
+bash-heredoc edits, tool-call *ordering*, thinking text (hardcoded to `""` at ~2874 - but in
 a recent famigo transcript 43/82 thinking blocks carried readable text; availability is
 mixed per model/version).
 
@@ -95,7 +95,7 @@ Ground-truth sources for every finding in this section are the raw transcripts u
 Distribution note: in every session the vast majority of blocks are `not-loaded` (correct,
 delivery-based). The judged population per session is ~40–120 blocks.
 
-### Measured after the work (Phase 14, re-measured in Phase 8 of the repair plan)
+### Measured after the work (Phase 14, re-measured in Phase 8 of the repair plan and again after the branch review)
 
 The 8 anchor sessions were frozen (Phase 0), a ground truth was written per block from the
 frozen transcripts before either report was read, and the same frozen inputs were re-baked at
@@ -110,26 +110,31 @@ below are the re-measurement, with the ground truth re-derived blind, the ruling
 once in [`snapshots/expected/RULINGS.md`](../snapshots/expected/RULINGS.md), and the two halves
 reported apart.
 
-**Rule-document blocks — the half the judging mechanisms decide, one block at a time. This is
+**Rule-document blocks - the half the judging mechanisms decide, one block at a time. This is
 the number the reliability claim is about.**
 
 | over 326 scored blocks | before | after |
 |---|---|---|
-| agrees with the ground truth | 250 (77%) | 280 (86%) |
+| agrees with the ground truth | 250 (77%) | 273 (84%) |
 | false green (`used` where nothing tied the block to the run) | 4 | **0** |
 | false red (`ignored` with no citable violation) | 10 | **0** |
-| under-credit (compliance the tool would not claim) | 50 | 46 |
+| under-credit (compliance the tool would not claim) | 50 | 53 |
 | block never judged at all | 12 | **0** |
 
-**Skill and command blocks — credited wholesale by the invoked-skill ruling (RULINGS.md 4), so
-these rows move together and say more about that ruling than about the judging.**
+**Skill and command blocks - governed by the invoked-skill ruling (RULINGS.md 4), which
+credits an invocation to the document's identity block alone, so every step is scored on
+evidence of its own.**
 
 | over 210 scored blocks | before | after |
 |---|---|---|
-| agrees with the ground truth | 5 | 207 |
-| false green / false red | 0 / 0 | 0 / 0 |
-| under-credit | 187 | 3 |
-| block never judged at all | 18 | **0** |
+| agrees with the ground truth | 68 | 126 |
+| false green / false red | 0 / 0 | 1 / 0 |
+| under-credit | 142 | 83 |
+| block never judged at all | 0 | **0** |
+
+The one false green is the formic-core `39b9e09e` `/grill-prd` Phase 1 block: the run read the
+file it names inside the running command, but during Phase 0, and nothing structural tells one
+section of a running document from another. It is named here rather than patched around.
 
 Red-side coverage, stated because a false-red count of zero is otherwise unmeasurable: the
 corpus carries **2 `violated` truths** (the famigo `5448a718` and `9dd3cc8a` commit-message
@@ -141,7 +146,8 @@ comes from a new judgement input as well as from the code, and the baseline coul
 reached them at all. Everything else in the two tables is the same frozen input judged by
 different code.
 
-**Regressed verdicts: 2**, and they are not incidental. Both are `~/.claude/CLAUDE.md` blocks in
+**Regressed verdicts: 3.** One is the Phase 1 false green above. The other two are not
+incidental: both are `~/.claude/CLAUDE.md` blocks in
 the two formicHMI sessions whose skill really was invoked: the ctxlog hook's recorded size and
 digest prove that file changed after it was loaded, so Phase 6 refuses to read any of its
 wording as a rule and the block drops from `used` to `unused`. That is the cost of judging the
@@ -163,34 +169,41 @@ Three caveats on the numbers.
   text produces, and one more - the famigo `figma-design-system` redirect stub, moved *to*
   `used` against the reading that would have flattered the scorecard, because the review's
   finding was that the descriptive-block ruling had been applied only where the tool went
-  green. The other 54 rows that moved in this pass were derived blind.
+  green. The other 54 rows that moved in this pass were derived blind. The scorecard now
+  prints the running total itself: 84 credited rows rest on a `blind: no` revision. Three
+  further rows (`/grill-prd` Phases 1 and 2, `/implement-plan-workflow` Steps) were
+  re-derived blind after the branch review, because their notes still said "only evidence was
+  the invocation" while the tool had moved on to citing reads and a written template: two came
+  back `used`, Phase 1 stayed `no-hard-verdict`.
+- Two sessions (famigo `5448a718`, `9dd3cc8a`) had their compiled checks file frozen in after
+  the baseline was baked; the scorecard names them and tags every moved row there.
 
 ### Failure mechanisms, ranked by damage (consistent across all four audits)
 
-**F-PATHTABLE — the path-table predicate is wrong in both directions.**
+**F-PATHTABLE - the path-table predicate is wrong in both directions.**
 - False green: `used` with zero gh commands because the account name `bionanek-x` from the
   table row substring-matched inside `git log --author="bionanek-x"` (formicHMI standup
   session). Also matched `grep ... CLAUDE.md` lines that merely contained the repo name.
 - False red: sessions that ran the prescribed `gh auth switch -u bionanek-x` verbatim (one ran
   it 13 times) still scored `ignored`. The rule says "switch **if needed**"; the predicate
   demands the literal switch string before any gh command and cannot represent "status
-  checked, account already correct" — so it cites the rule-mandated `gh auth status` as the
+  checked, account already correct" - so it cites the rule-mandated `gh auth status` as the
   violation.
 - Applicability is keyed on cwd alone, so turns with zero gh activity score `ignored` instead
-  of `dormant` ("No gh command this session, so no switch needed" — printed by its own moment
+  of `dormant` ("No gh command this session, so no switch needed" - printed by its own moment
   while the status is red).
 - In formic repos the row token "formic" substring-matches the cwd inside essentially every
   bash command, flooding moments with fake "[yes] Bash ran `formic`" cards (mkdir, sleep,
-  wc — anything).
+  wc - anything).
 
-**F-COMBINE — `combine_verdicts` + independently regenerated session reason.**
+**F-COMBINE - `combine_verdicts` + independently regenerated session reason.**
 One mis-scored turn paints a session red over a dozen provably compliant turns (ignored beats
 used), and because the session-scope reason/moments are recomputed independently, one record
 can describe three realities at once: status `ignored`, reason "applied **and were
 satisfied**", moments `[yes]`. Observed in every multi-turn session inspected. Also the
 inverse: `dormant` status above a possibly-referenced-style reason.
 
-**F-TRIGGER — prefix bug, the largest source of false greens.**
+**F-TRIGGER - prefix bug, the largest source of false greens.**
 `/implement-plan` fires on `/implement-plan-workflow` in **every project audited** (hyphen
 defeats the boundary; the predicate lambda is bare substring while `_is_triggered` is
 bounded). Verdict and its own moment card contradict each other on screen ("used" above
@@ -198,59 +211,59 @@ bounded). Verdict and its own moment card contradict each other on screen ("used
 (no `Trigger:` line in its SKILL.md → no strong predicate) scores `possibly-referenced` while
 the non-invoked pointer scores `used`.
 
-**F-EOM — end-of-message heuristic red-flags real compliance.**
+**F-EOM - end-of-message heuristic red-flags real compliance.**
 - `has_tech` scans the whole final message: a textbook 3-sentence compliant summary failed
   because `setup_local_db.sh` appeared five paragraphs earlier; another failed on "CLAUDE.md"
-  in a task that was *about* editing CLAUDE.md. Red in 4/4 formicHMI implementation sessions —
+  in a task that was *about* editing CLAUDE.md. Red in 4/4 formicHMI implementation sessions -
   a heuristic essentially no real summary passes.
 - Applicability = `bool(t["edits"])`: doc-only Writes (plan markdown) count as "implementing a
-  code change"; meanwhile **bash-heredoc edits are invisible** — a session that shipped a
+  code change"; meanwhile **bash-heredoc edits are invisible** - a session that shipped a
   3-commit feature via `cat > file <<EOF` scored the rule `dormant` ("no code changed").
 - Interactive turns that legitimately end with a question to the user score as violations.
 
-**F-CMDMENTION — command-mention harvesting explodes on dense docs.**
-One Architecture block in this repo derived **50 "command" predicates** — function names
+**F-CMDMENTION - command-mention harvesting explodes on dense docs.**
+One Architecture block in this repo derived **50 "command" predicates** - function names
 (`agent_runs`, `load_transcript`), statuses (`ignored`, `unused`), payload keys (`id`, `data`,
 `type`), plain English (`in`, `for`, `open`, `main`). The famigo Quality Gate block matched on
 `at`, `from`, `runs`, `skips` (producing "[yes] Bash ran `from`" moments pointing at a python
-heredoc) while never extracting its real command — `yarn type-check` is multi-token and
+heredoc) while never extracting its real command - `yarn type-check` is multi-token and
 fenced, so 21 actual compliance runs stayed invisible. Fence languages (`bash`) and shell
 builtins (`echo`, `printf`) from a rule's own example snippets guarantee blocks like "Copy to
 clipboard" are `possibly-referenced` in virtually every session forever (no clipboard action
 ever occurred; `echo` was a shell separator).
 
-**F-BLINDSPOT — demonstrable compliance invisible, and actively denied.**
+**F-BLINDSPOT - demonstrable compliance invisible, and actively denied.**
 The most trust-damaging class. Rules the agent visibly followed scored `unused` /
 `possibly-referenced` with reason text that *denies* compliance ("Common words match by
 coincidence, so this is a hint, not compliance"):
 - Error/Decision Memory: agent ran `tail -20 $M/ERRORS.md` at session start and appended
   entries in the rule's exact `**Decided:** / **Why:**` template to the exact files the rule
-  names — invisible, because nothing joins tool-call file paths to paths a rule names.
-- `/prd-to-plan` template blocks reproduced verbatim in a Written plan file — invisible,
+  names - invisible, because nothing joins tool-call file paths to paths a rule names.
+- `/prd-to-plan` template blocks reproduced verbatim in a Written plan file - invisible,
   because the fallback searches only `all_assistant_text`, never Write/Edit content.
 - A fully executed skill (`/create-pr`: gh auth status → learn convention → push → PR → watch
-  checks, golden rules followed) scored `unused` — the Skill tool call feeds *loading* but
+  checks, golden rules followed) scored `unused` - the Skill tool call feeds *loading* but
   never the *verdict*.
 - An AGENTS.md "Commands" block whose every command (`just palletizer-hmi-lint`, `yarn test`)
   ran repeatedly, with the agent's reasoning mirroring the block's ":8088 already running"
   caveat, scored `dormant`.
 
-**F-MOMENTS — causal narrative from coincidence.**
+**F-MOMENTS - causal narrative from coincidence.**
 For weak/keyword verdicts the "How the agent ended up here" cards label unrelated reasoning
 "(topical)": Figma design-system blocks citing rate-limiting review text (overlap: the word
 "design"); a tech-stack table citing an Effect-vs-react-query discussion (overlap: "React",
-"Native", "TypeScript" — table headers and stack names); Decision Memory citing YIN
+"Native", "TypeScript" - table headers and stack names); Decision Memory citing YIN
 pitch-detection math. The card's framing (TRIGGER→INTENT→ACTION) is a causal claim the
 evidence cannot support.
 
 **F-MISC (all verified):**
 - CLAUDE.md *documentation examples* ("Trigger: /foo", "types `/x`") in this repo's own
   Architecture section become live predicates with nonsense "[no] /foo not invoked" moments.
-- Invoked listing-only skills (`/grill-prd`, `/prd-to-plan` in reband — no SKILL.md on disk)
+- Invoked listing-only skills (`/grill-prd`, `/prd-to-plan` in reband - no SKILL.md on disk)
   render `not-loaded` despite driving ~15 turns.
 - Block ids beginning with `-` cannot be passed to `--query` (argparse consumes them; `--`
   does not help).
-- Session-scope reason can cite weak evidence ("`plan` in bash" — a filename inside an `mv`)
+- Session-scope reason can cite weak evidence ("`plan` in bash" - a filename inside an `mv`)
   under a green `used` status.
 
 ---
@@ -267,13 +280,13 @@ behaviour (the tool log), refuse honestly everywhere else.**
   instructions ([VerIF/VerInstruct](https://arxiv.org/html/2506.09942)); across 50 real
   agentic systems: formatting 38.5%, semantic 46.5%, tool 15%
   ([AgentIF](https://arxiv.org/abs/2505.16944), [taxonomy detail](https://www.themoonlight.io/en/review/agentif-benchmarking-instruction-following-of-large-language-models-in-agentic-scenarios)).
-  Our observed 69% `not_checkable` from translate-rules.md matches the literature — it is the
+  Our observed 69% `not_checkable` from translate-rules.md matches the literature - it is the
   honest number.
 - **Decompose blocks into atoms; report "k of n".** Decomposed binary criteria nearly double
   judge reliability vs holistic verdicts
   ([InFoBench/DRFR](https://arxiv.org/html/2401.03601v1): Fleiss' κ 0.532 vs 0.284;
   [CheckEval](https://arxiv.org/abs/2403.18771): +0.45 agreement, lower variance).
-  Structurally kills fake narratives — a story built from named atoms cannot be coincidental
+  Structurally kills fake narratives - a story built from named atoms cannot be coincidental
   the way a 2-of-8 word match is.
 - **Judge behaviour, not prose.**
   [The Compliance Gap / BS-Bench](https://arxiv.org/pdf/2605.01771): agents verbally agree to
@@ -283,7 +296,7 @@ behaviour (the tool log), refuse honestly everywhere else.**
   [Anthropic faithfulness work](https://www.anthropic.com/research/reasoning-models-dont-say-think):
   <20% verbalization of actually-used hints;
   [Measuring faithfulness in CoT](https://www.anthropic.com/research/measuring-faithfulness-in-chain-of-thought-reasoning)).
-- **Conditional rules need two-stage verdicts** (antecedent fired? consequent satisfied? —
+- **Conditional rules need two-stage verdicts** (antecedent fired? consequent satisfied? -
   reported separately). >30% of real conditional failures are wrong condition-checking
   ([AgentIF](https://arxiv.org/abs/2505.16944)); composition vocabulary
   (And / Chain / Selection) from [ComplexBench](https://arxiv.org/abs/2407.03978). This is
@@ -307,16 +320,16 @@ behaviour (the tool log), refuse honestly everywhere else.**
   ([Instruction Adherence in Coding Agent Configuration Files](https://arxiv.org/abs/2605.10039))
   found NO effect of CLAUDE.md file size, instruction position, or cross-file contradictions
   on compliance after correction; the only robust effect is ~5.6% lower compliance odds per
-  additional generated function within a session (per-turn drift — our per-turn scoping is the
+  additional generated function within a session (per-turn drift - our per-turn scoping is the
   right substrate to surface it). This contradicts
   [lost-in-the-middle](https://direct.mit.edu/tacl/article/doi/10.1162/tacl_a_00638/119630/Lost-in-the-Middle-How-Language-Models-Use-Long)
   folklore; trust the domain-matched study, and do not build verdict logic on "the rule was
   buried" heuristics.
 - **Anti-recommendations:** lexical overlap is never evidence of use at any threshold
   (no benchmark in the landscape uses it as a compliance signal; n-gram metrics correlate
-  worst with human judgement —
+  worst with human judgement -
   [BLEU/ROUGE limits](https://www.adaline.ai/blog/understanding-bleu-rouge-and-modern-nlp-metrics));
-  embeddings measure "similar to the rule text", not "complied" (and break stdlib-only —
+  embeddings measure "similar to the rule text", not "complied" (and break stdlib-only -
   [BERTScore limits](https://futureagi.com/blog/what-is-bleu-rouge-bertscore-2026/),
   [analysis](https://galileo.ai/blog/bert-score-explained-guide)); don't parse "never X" out
   of prose mechanically (RuLES hand-authors every prohibition; keep the fallback
@@ -332,43 +345,43 @@ behaviour (the tool log), refuse honestly everywhere else.**
 
 ### 3.2 Lexical matching under stdlib constraints
 
-The keyword mechanism is not fixable by threshold tuning — the **vocabulary** must change.
+The keyword mechanism is not fixable by threshold tuning - the **vocabulary** must change.
 
 - **Three background distributions**, all computable offline: D1 block-collection IDF (all
   blocks of all loaded context files across all baked sessions; use Lucene's non-negative
-  `log(1 + (N-df+0.5)/(df+0.5))` form — textbook RSJ IDF goes negative at df>50%:
+  `log(1 + (N-df+0.5)/(df+0.5))` form - textbook RSJ IDF goes negative at df>50%:
   [Lucene BM25Similarity](https://lucene.apache.org/core/7_0_1/core/org/apache/lucene/search/similarities/BM25Similarity.html),
   [Robertson 2004 on IDF](https://www.emerald.com/insight/content/doi/10.1108/00220410410560582/full/html));
-  D2 general English (bake a Zipf-scale frequency list — [rspeer/wordfreq](https://github.com/rspeer/wordfreq)
+  D2 general English (bake a Zipf-scale frequency list - [rspeer/wordfreq](https://github.com/rspeer/wordfreq)
   data, [plain-JSON export](https://github.com/aparrish/wordfreq-en-25000); drop zipf≥5 terms,
-  ramp 3.0–5.0); D3 **project background from the transcript itself** — fraction of the
+  ramp 3.0–5.0); D3 **project background from the transcript itself** - fraction of the
   session's assistant segments containing the term; ≥0.35 → weight 0. D3 alone kills
   "React"/"Framework"/"TypeScript" in a React repo, i.e. most observed false positives.
   Corpus-linguistics support for domain-matched reference corpora:
   [LADAL keyness](https://ladal.edu.au/tutorials/keywords/keywords.html),
   [Choosing a Reference Corpus](http://isli.khu.ac.kr/journal/content/data/28_1/13.pdf);
   the mechanical equivalent is [passim](https://github.com/dasmiq/passim)'s `--maxDF` ceiling.
-- **`K(block)`** = top ~12 terms by combined weight (plus bigram/trigram pseudo-terms — a
+- **`K(block)`** = top ~12 terms by combined weight (plus bigram/trigram pseudo-terms - a
   rule's identity usually lives in a phrase). **If |K| < 3 the block is
-  `not-lexically-scorable`** — the correct verdict for tables and boilerplate; never score
+  `not-lexically-scorable`** - the correct verdict for tables and boilerplate; never score
   with whatever generic tokens survive.
 - **Scoring:** BM25 with block-as-query, assistant turn text as document; k1=0.9 (short
-  passages), b=0.75 (highly variable turn lengths) — parameter guidance:
+  passages), b=0.75 (highly variable turn lengths) - parameter guidance:
   [Practical BM25 pt 3](https://www.elastic.co/blog/practical-bm25-part-3-considerations-for-picking-b-and-k1-in-elasticsearch);
   saturation semantics: [Robertson & Zaragoza, BM25 and Beyond](https://www.staff.city.ac.uk/~sbrp622/papers/foundations_bm25_review.pdf).
-  Normalise to a coverage figure. Query text = assistant text and thinking segments ONLY —
+  Normalise to a coverage figure. Query text = assistant text and thinking segments ONLY -
   exclude tool inputs, tool results, fenced code, and spans copied from Read files (a read
   file's content in the query makes every block of that file self-match: the most likely new
   false-positive source).
 - **Significance gate:** Dunning G² log-likelihood per term (2×2 vs the rest of the session's
-  assistant text) — [Dunning 1993](https://www.microsoft.com/en-us/research/wp-content/uploads/2004/07/rare-events-final-rev.pdf);
+  assistant text) - [Dunning 1993](https://www.microsoft.com/en-us/research/wp-content/uploads/2004/07/rare-events-final-rev.pdf);
   critical values 3.84/6.63/10.83/15.13 and effect-size bands from the
   [UCREL log-likelihood wizard](https://ucrel.lancs.ac.uk/llwizard.html); require observed
   count ≥2 per term; use the 15.13 bar per term given multiple testing. Block-level "topical"
   requires ≥2 distinct K-terms each clearing G²≥6.63 AND BM25 coverage ≥0.25 AND ≥1 term with
   zipf<4.
 - **Quote detector** (the only lexical path near "strong"): 5-word shingle containment
-  (containment, not Jaccard — length-asymmetric:
+  (containment, not Jaccard - length-asymmetric:
   [Broder, near-duplicate documents](https://cs.brown.edu/courses/cs253/papers/nearduplicate.pdf))
   ≥0.15 with ≥3 matched shingles each containing a distinctive term → `paraphrased`;
   `difflib.SequenceMatcher(autojunk=False)` longest common run ≥8 tokens or ≥50 chars
@@ -381,13 +394,13 @@ The keyword mechanism is not fixable by threshold tuning — the **vocabulary** 
 - **Rename labels to name the evidence, never the mechanism:** `echoed`, `topical-overlap`,
   `no-lexical-trace`, `not-lexically-scorable`. Lexical evidence can never establish
   causality, only co-occurrence; absence of overlap is not evidence of non-use (silent
-  behavioural compliance leaves no lexical trace — vocabulary mismatch hits short texts
+  behavioural compliance leaves no lexical trace - vocabulary mismatch hits short texts
   hardest: [Sease](https://sease.io/2022/01/tackling-vocabulary-mismatch-with-document-expansion.html),
   [Kenter & de Rijke](https://staff.fnwi.uva.nl/m.derijke/wp-content/papercite-data/pdf/kenter-short-2015.pdf));
   even a verbatim quote is self-report ([Turpin et al.](https://arxiv.org/abs/2305.04388)).
 - **Calibration:** hand-label 200–300 (block, turn) pairs (`quoted` / `topically-drawn-on` /
   `coincidental` / `undecidable`), sweep, pick a precision-first operating point (≥0.90
-  precision, recall falls where it does —
+  precision, recall falls where it does -
   [precision-recall operating points](https://scikit-learn.org/stable/auto_examples/model_selection/plot_precision_recall.html)),
   commit the labelled set as a regression fixture, and add a **shuffled-pair test**: score
   every block against turns from an unrelated session; anything above threshold there is a
@@ -448,9 +461,9 @@ shuffled-pair check passing over 196 pairs.
   beaten by [YAKE](https://www.sciencedirect.com/science/article/abs/pii/S0020025519308588)
   on all evaluated datasets), TextRank (blocks too small for the graph;
   [Mihalcea & Tarau 2004](https://www.researchgate.net/publication/200042361_TextRank_Bringing_Order_into_Text)),
-  χ² (unreliable at expected<5 — [Dunning 1993](https://www.microsoft.com/en-us/research/wp-content/uploads/2004/07/rare-events-final-rev.pdf)),
-  Jaccard (length asymmetry — [Broder](https://cs.brown.edu/courses/cs253/papers/nearduplicate.pdf)),
-  hypergeometric p-values taken literally (independence violated —
+  χ² (unreliable at expected<5 - [Dunning 1993](https://www.microsoft.com/en-us/research/wp-content/uploads/2004/07/rare-events-final-rev.pdf)),
+  Jaccard (length asymmetry - [Broder](https://cs.brown.edu/courses/cs253/papers/nearduplicate.pdf)),
+  hypergeometric p-values taken literally (independence violated -
   [overlap-significance discussion](https://www.gungorbudak.com/blog/2016/05/25/computing-significance-of-overlap/)),
   tuning k1/b before fixing vocabulary
   ([Practical BM25 pt 3](https://www.elastic.co/blog/practical-bm25-part-3-considerations-for-picking-b-and-k1-in-elasticsearch)),
@@ -459,7 +472,7 @@ shuffled-pair check passing over 196 pairs.
 
 ### 3.3 Agent-trace attribution and Claude Code signals
 
-- **No observability platform does per-prompt-section attribution** — all stop at "which
+- **No observability platform does per-prompt-section attribution** - all stop at "which
   prompt version ran": [LangSmith trajectory evals](https://docs.langchain.com/langsmith/trajectory-evals)
   / [agentevals](https://github.com/langchain-ai/agentevals),
   [Langfuse prompt-trace linking](https://langfuse.com/docs/prompt-management/features/link-to-traces),
@@ -468,7 +481,7 @@ shuffled-pair check passing over 196 pairs.
   [Braintrust online scoring](https://www.braintrust.dev/foundations/online-scoring),
   [OTel GenAI semconv](https://opentelemetry.io/blog/2026/genai-observability/)
   (`gen_ai.system_instructions` is one opaque blob). The real prior art is temporal-logic
-  trace verification: [AgentLTL](https://arxiv.org/html/2607.02599) — FO-LTL constraints over
+  trace verification: [AgentLTL](https://arxiv.org/html/2607.02599) - FO-LTL constraints over
   typed tool signatures, six layers (branching, literal args, global ordering, pairwise
   ordering, call counts, exact args), deterministic and judge-free from recorded traces;
   **ordering constraints concentrate ~73% of real failures**. Plus process mining /
@@ -477,7 +490,7 @@ shuffled-pair check passing over 196 pairs.
   fingerprint: [cross-framework SWE-agent analysis](https://arxiv.org/pdf/2605.18332);
   governing principle ("process-level accountability without model internals"):
   [provenance survey](https://arxiv.org/html/2606.04990v1).
-- **Transcript-native signals, Tier A (ground truth):** the `InstructionsLoaded` hook — fires
+- **Transcript-native signals, Tier A (ground truth):** the `InstructionsLoaded` hook - fires
   per CLAUDE.md / rules file load with `file_path`, `load_reason`
   (session_start / nested_traversal / path_glob_match / include / compact), and **full
   `content` as loaded** ([hooks reference](https://code.claude.com/docs/en/hooks)). Fixes a
@@ -485,23 +498,23 @@ shuffled-pair check passing over 196 pairs.
   edits never apply to the model ([memory docs](https://code.claude.com/docs/en/memory);
   path rules load on read, not write:
   [issue #23478](https://github.com/anthropics/claude-code/issues/23478)). Also `prompt_id`
-  (authoritative turn segmentation — can replace `_real_user_prompt_text` edge cases),
+  (authoritative turn segmentation - can replace `_real_user_prompt_text` edge cases),
   `tool_use_id`, `agent_id` + `SubagentStart/Stop` (replaces task-notification regex parsing),
   `tool_decision.source` (separates "agent complied" from "permission layer blocked the
-  alternative"), `UserPromptExpansion` (authoritative slash-command trigger) — all documented
+  alternative"), `UserPromptExpansion` (authoritative slash-command trigger) - all documented
   in [hooks](https://code.claude.com/docs/en/hooks) and
   [monitoring usage](https://code.claude.com/docs/en/monitoring-usage). Natural extension of
   the existing ctxlog hook.
-- **Cache accounting is prefix-stability evidence, not residency evidence** — "there is no
+- **Cache accounting is prefix-stability evidence, not residency evidence** - "there is no
   per-file or per-segment caching"
   ([prompt caching docs](https://code.claude.com/docs/en/prompt-caching)); keep the
   largest-remainder split but label it allocation. Newly bakeable:
   `ephemeral_1h/5m_input_tokens` split; typed cache-break reasons (model switch, effort
-  change, tool-set change, compaction, CLI upgrade — same doc).
+  change, tool-set change, compaction, CLI upgrade - same doc).
 - **Thinking text:** officially encrypted (empty `thinking` + signature:
   [issue #31143](https://github.com/anthropics/claude-code/issues/31143),
   [thinking encryption](https://docs.aws.amazon.com/bedrock/latest/userguide/claude-messages-thinking-encryption.html)),
-  but empirically mixed — 43/82 blocks readable in a recent famigo transcript (verified in
+  but empirically mixed - 43/82 blocks readable in a recent famigo transcript (verified in
   this analysis, session `4ef9a6f4` under `-Users-jakuburban-Git-famigo`). Treat as optional
   weak corroboration when present, never an evidence tier (faithfulness <20%:
   [Anthropic](https://www.anthropic.com/research/reasoning-models-dont-say-think)); INTENT
@@ -509,11 +522,11 @@ shuffled-pair check passing over 196 pairs.
   fired, the read that triggered a path rule) instead.
 - **Honest epistemic ceiling:** causal attribution needs ablations + logprobs
   ([ContextCite](https://arxiv.org/abs/2409.00729): 32–256 masked re-runs with logprob
-  readout) — impossible offline. Attention is unavailable in logs AND unreliable
+  readout) - impossible offline. Attention is unavailable in logs AND unreliable
   ([Jain & Wallace, Attention is not Explanation](https://aclanthology.org/N19-1357/)).
   The defensible verdict ladder: **delivered → applicable → conformant / violated /
   not-exercised**, plus co-occurrence labels for everything weaker. "Used" is a causal word
-  on a correlational measurement; a "How the agent ended up here" card is a causal claim —
+  on a correlational measurement; a "How the agent ended up here" card is a causal claim -
   suppress or reframe it wherever the only evidence is lexical.
 
 ---
@@ -534,7 +547,7 @@ Consequences for the plan:
    user's authoring run generates them from their own rules. Hardcode only harness-defined
    signals, identical for every user: slash-command triggers, Skill/Agent tool calls,
    tool-log ordering, file-path joins.
-2. **The authoring step becomes the onboarding step** — a first-class guided flow (run
+2. **The authoring step becomes the onboarding step** - a first-class guided flow (run
    `/compile-rules`-style command → review generated `<doc>.checks.json` → commit), not a
    README footnote. For an unknown user's rules it is the only mechanism that scales.
    User-facing shape: (a) tool works out of the box but says "not mechanically checkable"
@@ -553,13 +566,13 @@ Consequences for the plan:
 
 ---
 
-## 5. Recommended plan (tiers by cost) — SUPERSEDED by §10
+## 5. Recommended plan (tiers by cost) - SUPERSEDED by §10
 
 > This section predates the external-spec comparison (§8) and the LLM-at-audit / ast-grep
 > decisions (§9). §10 is the current consolidated plan; this section is kept because its
 > tier framing (cost ordering) and item details are referenced from §10.
 
-**Tier 0 — universal bug fixes (days):**
+**Tier 0 - universal bug fixes (days):**
 - Trigger predicate: use `_is_triggered` (right-bounded) in the predicate lambdas.
 - `combine_verdicts`: regenerate session reason from the combined status; stop letting one
   myopic red turn outrank verified compliance (or recompute at session scope).
@@ -569,7 +582,7 @@ Consequences for the plan:
 - CLI: accept block ids starting with `-` (argparse fix); listing-only invoked skills should
   not render `not-loaded`.
 
-**Tier 1 — new evidence sources (biggest precision per effort):**
+**Tier 1 - new evidence sources (biggest precision per effort):**
 - Feed the verdict layer: Skill tool invocations, Write/Edit content, writes-to-rule-named-
   files (path join, both sides resolved like `_resolve_key`), bash-heredoc edits, readable
   thinking (weak corroboration, labelled).
@@ -578,7 +591,7 @@ Consequences for the plan:
   `tool_arg_matches`, `writes_to_path`, call counts. Two-stage conditional reporting
   (antecedent / consequent). Pair findings with permission-decision source when available.
 
-**Tier 2 — rebuild the weak tier + taxonomy:**
+**Tier 2 - rebuild the weak tier + taxonomy:**
 - Contrastive keyword weighting (D1×D2×D3), G² gate, BM25 coverage, quote detector;
   `not-lexically-scorable` for |K|<3.
 - Rename: `possibly-referenced` → evidence-named labels (`echoed` / `topical-overlap` /
@@ -597,10 +610,10 @@ User's CLAUDE.md:
 
 ```markdown
 ## Copy to clipboard
-When copying text to the clipboard, always pipe through `printf` — never `echo`.
+When copying text to the clipboard, always pipe through `printf` - never `echo`.
 
 ## Styling
-Use React Native `StyleSheet.create()` — no styled-components.
+Use React Native `StyleSheet.create()` - no styled-components.
 
 ## Quality gate
 Run `yarn type-check` and `yarn lint` before committing.
@@ -619,12 +632,12 @@ third check once Tier 1 lands):
     {
       "id": "clipboard-no-echo",
       "rule_ref": "Copy to clipboard",
-      "rule_text": "always pipe through `printf` — never `echo`",
+      "rule_text": "always pipe through `printf` - never `echo`",
       "domain": "shell",
       "kind": "forbidden_command",
       "pattern": "\\becho\\b[^|]*\\|\\s*(pbcopy|xclip|xsel)",
       "confidence": "high",
-      "message": "echo piped to clipboard — the rule requires printf.",
+      "message": "echo piped to clipboard - the rule requires printf.",
       "self_test": {
         "should_match": ["echo \"$msg\" | pbcopy"],
         "should_not_match": ["printf '%s' \"$msg\" | pbcopy", "echo done"]
@@ -639,7 +652,7 @@ third check once Tier 1 lands):
       "pattern": "from ['\"]styled-components",
       "applies_to": ["**/*.tsx", "**/*.ts"],
       "confidence": "high",
-      "message": "styled-components import — the rule mandates StyleSheet.create().",
+      "message": "styled-components import - the rule mandates StyleSheet.create().",
       "self_test": {
         "should_match": ["import styled from 'styled-components'"],
         "should_not_match": ["const s = StyleSheet.create({})"]

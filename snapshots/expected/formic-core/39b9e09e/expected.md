@@ -112,21 +112,21 @@ Format: `- <block id> :: <truth> :: <mechanism tag or ->  :: <evidence>`
 - 9e09e-home-claude-skills-commit-skill-md-1-golden-rules :: no-hard-verdict :: - :: the skill ran (`/commit` typed at event 1712), but nothing in the run cites this step
   revised: ruling 4 changed - an invocation records that the document ran, not that this step was carried out, so the identity block keeps the green and every other block has to earn one. This row's only evidence was the invocation.
   blind: no
-- 9e09e-home-claude-skills-commit-skill-md-2-step-1-match-the-github-account :: no-hard-verdict :: - :: the skill ran (`/commit` typed at event 1712), but nothing in the run cites this step
-  revised: ruling 4 changed - an invocation records that the document ran, not that this step was carried out, so the identity block keeps the green and every other block has to earn one. This row's only evidence was the invocation.
-  blind: no
+- 9e09e-home-claude-skills-commit-skill-md-2-step-1-match-the-github-account :: used :: - :: `Skill commit` at 1763; `gh auth status` at 1770 shows bionanek-x active, matching the frozen `formic` row; no switch needed
+  revised: re-derived blind after inline-code commands became echo evidence: a verdict-ground-truth pass read only RULINGS.md, the frozen transcript and the frozen documents; not borderline
+  blind: yes
 - 9e09e-home-claude-skills-commit-skill-md-3-step-2-learn-the-commit-convention :: no-hard-verdict :: - :: the skill ran (`/commit` typed at event 1712), but nothing in the run cites this step
   revised: ruling 4 changed - an invocation records that the document ran, not that this step was carried out, so the identity block keeps the green and every other block has to earn one. This row's only evidence was the invocation.
   blind: no
-- 9e09e-home-claude-skills-commit-skill-md-4-step-3-check-the-branch :: no-hard-verdict :: - :: the skill ran (`/commit` typed at event 1712), but nothing in the run cites this step
-  revised: ruling 4 changed - an invocation records that the document ran, not that this step was carried out, so the identity block keeps the green and every other block has to earn one. This row's only evidence was the invocation.
-  blind: no
+- 9e09e-home-claude-skills-commit-skill-md-4-step-3-check-the-branch :: no-hard-verdict :: - :: no branch check inside the skill run (1763-1828); `git branch --show-current` at 1726 ran before the invocation, for the user's checkout request at 1712
+  revised: re-derived blind after inline-code commands became echo evidence: a verdict-ground-truth pass read only RULINGS.md, the frozen transcript and the frozen documents. The analyst called it borderline on timing, and the strict reading is kept
+  blind: yes
 - 9e09e-home-claude-skills-commit-skill-md-5-step-4-run-tests-lints :: no-hard-verdict :: - :: the skill ran (`/commit` typed at event 1712), but nothing in the run cites this step
   revised: ruling 4 changed - an invocation records that the document ran, not that this step was carried out, so the identity block keeps the green and every other block has to earn one. This row's only evidence was the invocation.
   blind: no
-- 9e09e-home-claude-skills-commit-skill-md-6-step-5-stage-and-commit :: no-hard-verdict :: - :: the skill ran (`/commit` typed at event 1712), but nothing in the run cites this step
-  revised: ruling 4 changed - an invocation records that the document ran, not that this step was carried out, so the identity block keeps the green and every other block has to earn one. This row's only evidence was the invocation.
-  blind: no
+- 9e09e-home-claude-skills-commit-skill-md-6-step-5-stage-and-commit :: used :: - :: `Skill commit` at 1763; selective `git add` at 1815 (`sim_mode_config` left unstaged, 1823), `git commit` at 1824 on the feature branch, no trailer
+  revised: re-derived blind after inline-code commands became echo evidence: a verdict-ground-truth pass read only RULINGS.md, the frozen transcript and the frozen documents; not borderline
+  blind: yes
 - 9e09e-home-claude-skills-commit-skill-md-7-step-6-report :: no-hard-verdict :: - :: the skill ran (`/commit` typed at event 1712), but nothing in the run cites this step
   revised: ruling 4 changed - an invocation records that the document ran, not that this step was carried out, so the identity block keeps the green and every other block has to earn one. This row's only evidence was the invocation.
   blind: no
@@ -144,12 +144,12 @@ Format: `- <block id> :: <truth> :: <mechanism tag or ->  :: <evidence>`
   blind: yes
 - b9e09e-home-claude-commands-grill-prd-md-0-phase-0-figma-design-optional :: used :: - :: `/grill-prd` typed at event 8; Skill call 1
   accept: the invocation record here is the `<command-name>` wrapper a typed slash command leaves, not a `Skill` tool call. Both are invocations under ruling 4 and the tool reads both; what it refuses - and what this note used to describe wrongly - is a bare `/name` mentioned in a prompt's prose, which is not one of the two
-- b9e09e-home-claude-commands-grill-prd-md-1-phase-1-grill-me :: no-hard-verdict :: - :: the skill ran (`/grill-prd` typed at event 8), but nothing in the run cites this step
-  revised: ruling 4 changed - an invocation records that the document ran, not that this step was carried out, so the identity block keeps the green and every other block has to earn one. This row's only evidence was the invocation.
-  blind: no
-- b9e09e-home-claude-commands-grill-prd-md-2-phase-2-write-the-prd :: no-hard-verdict :: - :: the skill ran (`/grill-prd` typed at event 8), but nothing in the run cites this step
-  revised: ruling 4 changed - an invocation records that the document ran, not that this step was carried out, so the identity block keeps the green and every other block has to earn one. This row's only evidence was the invocation.
-  blind: no
+- b9e09e-home-claude-commands-grill-prd-md-1-phase-1-grill-me :: no-hard-verdict :: - :: `Skill grill-prd` at [23]; the interview ran Q1-Q13 [123-293], but that is assistant behaviour, not one of the records ruling 4 accepts; the only read of `figma-spec.md` is at [31] and belongs to Phase 0 (the Figma URLs were in the opening prompt), while this block's Figma clause (a new URL mid-interview) never came up
+  revised: re-derived from the transcript after the review found the old note ("only evidence was the invocation") no longer described what the tool cites. The analyst called it borderline - `used` on behaviour, `no-hard-verdict` on a strict reading of rulings 4 and 5 - and the strict reading is kept: crediting this step through the [31] read would be a green resting on a Phase 0 action.
+  blind: yes
+- b9e09e-home-claude-commands-grill-prd-md-2-phase-2-write-the-prd :: used :: - :: `Skill write-a-prd` [307]; modules sketched [315]; asked where to save, default `plans/<feature>/prd-<feature>.md` [325]; PRD written with this block's template, including its own `## Design` section that write-a-prd's template lacks [337]; spec files written under `plans/.../designs/` [346, 352, 358]
+  revised: re-derived from the transcript after the review found the old note ("only evidence was the invocation") no longer described what the tool cites; the written PRD reproduces this block's template.
+  blind: yes
 - e09e-home-claude-commands-prd-to-plan-md-0-prd-to-plan :: used :: F-BLINDSPOT :: `/prd-to-plan` typed at event 368; the plan and design files under `plans/palletizer-cases-handling/` were written from its template
 - e09e-home-claude-commands-prd-to-plan-md-1-process :: used :: F-BLINDSPOT :: `/prd-to-plan` typed at event 368; the plan and design files under `plans/palletizer-cases-handling/` were written from its template
 - e09e-home-claude-commands-prd-to-plan-md-2-plan-feature-name :: used :: F-BLINDSPOT :: `/prd-to-plan` typed at event 368; the plan and design files under `plans/palletizer-cases-handling/` were written from its template
@@ -223,14 +223,16 @@ Format: `- <block id> :: <truth> :: <mechanism tag or ->  :: <evidence>`
 - -formic-core-docs-rules-frontend-mobx-md-0-frontend-mobx-patterns :: no-hard-verdict :: - :: no action in the session cites this block
 - c-core-docs-rules-frontend-api-errors-md-0-frontend-api-layer-error-handling :: no-hard-verdict :: - :: no action in the session cites this block
 - c-core-docs-rules-frontend-typescript-md-0-frontend-typescript-conventions :: no-hard-verdict :: - :: no action in the session cites this block
-- core-docs-rules-testing-frontend-apps-md-0-testing-frontend-apps-guide :: no-hard-verdict :: - :: no action in the session cites this block
+- core-docs-rules-testing-frontend-apps-md-0-testing-frontend-apps-guide :: used :: - :: delivered whole by `Read` at 1452; rule 12 then applied: `TestIds` import and literal replacement at 1565, 1569, 1579, 1583, and the report at 1597 cites rule 12 by number. `yarn test:browser:noUI` runs are not relied on (also prescribed elsewhere, ran before delivery); `git stash` is an anecdote in the text, not an instruction
+  revised: re-derived blind after inline-code commands became echo evidence: a verdict-ground-truth pass read only RULINGS.md, the frozen transcript and the frozen documents; not borderline for the class. The whole file is one block, so rule 12 credits all 18 rules
+  blind: yes
 - re-docs-rules-react-coding-guidelines-md-0-react-coding-guidelines :: no-hard-verdict :: - :: no action in the session cites this block
 - -skills-implement-plan-workflow-skill-md-0-what-this-skill-does :: used :: F-TRIGGER :: `<command-name>/implement-plan-workflow</command-name>` at ev 413, with the skill body delivered at ev 414
   revised: added after the after-run surfaced a block the baseline never judged; the invocation record was re-derived blind in the Phase 8 second pass
   blind: yes
-- -skills-implement-plan-workflow-skill-md-1-steps :: no-hard-verdict :: - :: the skill ran (`<command-name>/implement-plan-workflow</command-name>` at ev 413, with the skill body delivered at ev 414), but nothing in the run cites this step
-  revised: ruling 4 changed - an invocation records that the document ran, not that this step was carried out, so the identity block keeps the green and every other block has to earn one. This row's only evidence was the invocation.
-  blind: no
+- -skills-implement-plan-workflow-skill-md-1-steps :: used :: - :: asked for the missing review arg [419-420]; listed .claude/agents for QA [429]; read AGENTS.md, palletizer_hmi/AGENTS.md, palletizer_hmi/CLAUDE.md, docs/skills/* [441-456]; condensed them into a Project Context block [465]; launched Workflow with it embedded [479]
+  revised: re-derived from the transcript after the review found the old note ("only evidence was the invocation") no longer described what the tool cites. The user's args at [413] also asked for the repo's docs to be followed, so the reads have two motivations; their order (QA check, context reads, condensing, launch) ties them to this step.
+  blind: yes
 - -skills-implement-plan-workflow-skill-md-2-workflow-script :: no-hard-verdict :: - :: the skill ran (`<command-name>/implement-plan-workflow</command-name>` at ev 413, with the skill body delivered at ev 414), but nothing in the run cites this step
   revised: ruling 4 changed - an invocation records that the document ran, not that this step was carried out, so the identity block keeps the green and every other block has to earn one. This row's only evidence was the invocation.
   blind: no

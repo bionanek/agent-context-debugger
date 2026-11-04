@@ -63,3 +63,15 @@ def test_no_commit_has_ever_carried_them():
     assert proc.stdout.strip() == "", (
         "the private corpus is in the history, so ignoring it now is not "
         f"enough:\n{proc.stdout}")
+
+
+def test_no_committed_snapshot_file_carries_a_home_path():
+    """A home path names the author and lays out their machine.
+
+    `sessions.json` is read with `~` expanded where it is used, so nothing
+    committed under snapshots/ has a reason to carry one.
+    """
+    proc = _git("grep", "-n", "/Users/", "--", "snapshots")
+    assert proc.returncode in (0, 1), proc.stderr
+    assert proc.stdout.strip() == "", (
+        f"a committed file under snapshots/ carries a home path:\n{proc.stdout}")

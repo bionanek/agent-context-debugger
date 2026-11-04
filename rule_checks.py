@@ -88,14 +88,6 @@ AST_KINDS = ("ast_forbidden",)
 
 CONFIDENCES = ("high", "medium", "low")
 
-# Fields a checks file may still carry that this tool no longer reads.
-# `ignore_strings` was a per-check opt-in for blanking string literals; the
-# source path blanks them unconditionally now (see `strip_comments_and_strings`),
-# so the field is accepted and does nothing. Refusing a record for carrying it
-# would turn every file written against the old format into a document of rules
-# nobody can check, which is a worse answer than a field that no longer matters.
-IGNORED_LEGACY_FIELDS = ("ignore_strings",)
-
 # Record-format v2 (research doc §8). Every field is optional, so a v1 checks
 # file keeps loading and reporting exactly what it did: the fields say what a
 # record *is*, and a file that says nothing is read the way it always was.
@@ -140,7 +132,7 @@ _HASH_LANG_EXT = {".py", ".sh", ".bash", ".zsh", ".rb", ".yml", ".yaml", ".toml"
 _TRIPLE_QUOTE_EXT = {".py"}
 _C_LANG_EXT = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts",
                ".go", ".rs", ".java", ".kt", ".swift", ".c", ".h", ".cc", ".cpp",
-               ".hpp", ".cs", ".m", ".mm", ".php", ".scala", ".dart", ".css",
+               ".hpp", ".cs", ".m", ".mm", ".php", ".scala", ".dart",
                ".scss", ".less", ".sass", ".vue", ".svelte", ".json5", ".proto"}
 
 
@@ -156,6 +148,9 @@ def _dialect(path):
     if ext in _HASH_LANG_EXT:
         return {"line": ("#",), "block": False, "quotes": ('"', "'"),
                 "triple": ext in _TRIPLE_QUOTE_EXT}
+    if ext == ".css":
+        # Plain CSS has block comments only; `//` in `url(http://...)` is not one.
+        return {"line": (), "block": True, "quotes": ('"', "'"), "triple": False}
     if ext in _C_LANG_EXT:
         return {"line": ("//",), "block": True, "quotes": ('"', "'", "`"),
                 "triple": False}
@@ -213,6 +208,9 @@ def strip_comments_and_strings(text, path="", strip_strings=True, fill=" "):
             i = end
             continue
         marker = next((m for m in d["line"] if text.startswith(m, i)), None)
+        # Shell `$#` and `${#v}` are parameter expansions, not comments.
+        if marker == "#" and i and text[i - 1] in "${":
+            marker = None
         if marker:
             end = text.find("\n", i)
             end = n if end < 0 else end
@@ -381,7 +379,27 @@ def _net_code(calls):
     return [{"path": p, "text": state[p]} for p in order if state[p].strip()]
 
 
-def build_corpus(calls):
+def written_texts(call):
+    """The new text an edit-tool call put into its file, one string per hunk.
+
+    The one switch over the edit tools: `build_real_view`'s structural joins
+    read it too, and two copies of it disagreed about what a write contained.
+    """
+    name, inp = call.get("name"), (call.get("input") or {})
+    if name == "Write":
+        texts = [inp.get("content")]
+    elif name == "Edit":
+        texts = [inp.get("new_string")]
+    elif name == "MultiEdit":
+        texts = [(e or {}).get("new_string") for e in inp.get("edits") or []]
+    elif name == "NotebookEdit":
+        texts = [inp.get("new_source")]
+    else:
+        return []
+    return [t for t in texts if isinstance(t, str) and t.strip()]
+
+
+def build_corpus(calls, shell_writes=()):
     """What the session actually did, in the shapes a check can match.
 
     `code` groups every hunk written to a path into one entry in write order.
@@ -395,6 +413,11 @@ def build_corpus(calls):
     ordering or count constraint is decidable. `commands` and `paths` are sets
     of facts with no order between them, which is why a rule like "check the
     account before running gh" could not be expressed over them at all.
+
+    `shell_writes` is `{path, text}` per heredoc a Bash call wrote into a file.
+    Without it code authored with `cat > f <<EOF` was credited by the
+    structural joins and invisible to every source check, so it could never be
+    flagged.
     """
     code, order, commands, paths, tools = {}, [], [], [], []
     for c in calls:
@@ -414,19 +437,10 @@ def build_corpus(calls):
             if cmd:
                 commands.append(cmd)
             continue
-        path = inp.get("file_path") or ""
-        texts = []
-        if name == "Write":
-            texts.append(inp.get("content") or "")
-        elif name == "Edit":
-            texts.append(inp.get("new_string") or "")
-        elif name == "MultiEdit":
-            for e in inp.get("edits") or []:
-                texts.append((e or {}).get("new_string") or "")
-        elif name == "NotebookEdit":
-            texts.append(inp.get("new_source") or "")
-        else:
+        if name not in _WRITE_TOOLS:
             continue
+        path = inp.get("file_path") or ""
+        texts = written_texts(c)
         if path and path not in code:
             code[path] = []
             order.append(path)
@@ -434,12 +448,21 @@ def build_corpus(calls):
         for t in texts:
             if t:
                 code.setdefault(path, []).append(t)
+    final = {e["path"]: e["text"] for e in _net_code(calls)}
+    for w in shell_writes:
+        if w["path"] not in code:
+            code[w["path"]] = []
+            order.append(w["path"])
+            paths.append(w["path"])
+        code[w["path"]].append(w["text"])
+        final[w["path"]] = (final.get(w["path"], "") + "\n" + w["text"]).lstrip("\n")
     return {
         "code": [{"path": p, "text": "\n".join(code[p])} for p in order if code.get(p)],
         "commands": commands,
         "paths": paths,
         "tools": tools,
-        "final_code": _net_code(calls),
+        "final_code": [{"path": p, "text": final[p]} for p in order
+                       if final.get(p, "").strip()],
     }
 
 
@@ -673,7 +696,10 @@ def _evaluate_candidates(check, corpus):
 
 def _suppressed(text, offset, check_id):
     """True when a suppression marker sits on the match's line or the one above."""
-    lines = text.splitlines()
+    # `\n` only, as `_line_of` counts: `splitlines` also breaks on `\r` and form
+    # feeds, which would look for the marker on a different line than the one
+    # the finding cites.
+    lines = text.split("\n")
     idx = text.count("\n", 0, offset)
     for ln in (idx, idx - 1):
         if 0 <= ln < len(lines):
@@ -796,7 +822,9 @@ def _ast_grep_matches(binary, pattern, path, text):
     try:
         with tempfile.TemporaryDirectory() as d:
             target = Path(d) / ("target" + suffix)
-            target.write_text(text, encoding="utf-8", errors="surrogatepass")
+            # Bytes, not text mode: newline translation on Windows would shift
+            # every byte offset ast-grep reports after the first line.
+            target.write_bytes(text.encode("utf-8", errors="surrogatepass"))
             proc = subprocess.run(
                 [str(binary), "run", "--pattern", pattern, "--json=compact",
                  # ast-grep honours ignore files, including the user's global
@@ -959,10 +987,9 @@ def _antecedent(check, entries):
     """
     kind = check["kind"]
     if kind == "tool_precedes":
-        firsts = _matching_calls(entries, check["first_pattern"])
-        seconds = _matching_calls(entries, check["second_pattern"])
-        # Both sides must be present for an order to exist between them.
-        return firsts + seconds if firsts and seconds else []
+        # The first side alone. Requiring both read "edited and never ran the
+        # tests", the commonest way to break an "after" rule, as never tested.
+        return _matching_calls(entries, check["first_pattern"])
     if kind == "tool_arg_matches":
         return _matching_calls(entries, check["tool_pattern"])
     if kind in ("tool_required", "writes_to_path"):
@@ -986,13 +1013,12 @@ def _evaluate_tools(check, corpus):
                 for e, m in fired]
 
     if kind == "tool_precedes":
-        first_at = _matching_calls(entries, check["first_pattern"])[0][0]["index"]
-        early = [(e, m) for e, m in _matching_calls(entries, check["second_pattern"])
-                 if e["index"] < first_at]
-        if not early:
+        e, m = fired[0]
+        # Later in the same line counts, as it does for a prior: `yarn build &&
+        # yarn test` is one call that meets the obligation.
+        if any((s["index"], sm.start()) > (e["index"], m.start())
+               for s, sm in _matching_calls(entries, check["second_pattern"])):
             return satisfied
-        # Cite the call that jumped the queue: it is the event that went wrong.
-        e, m = early[0]
         return [_tool_finding(check, e, (m.start(), m.end()), STAGE_MISSED)]
 
     if kind == "tool_never_without_prior":
@@ -1130,6 +1156,12 @@ JUDGE_NO_SPAN = ("the judge reported a violation but quoted nothing that appears
                  "content it was given, so it is not reportable as one")
 
 
+def judge_unexamined_note(missing, total):
+    return (f"{missing} of {total} site(s) this rule applies to were not examined by "
+            "the judge (the per-rule site limit, the call budget, or a failed call), "
+            "so the rule was not checked against all of them")
+
+
 def _unanswered(record, answer, path, advisory):
     """A question the judge never got to answer, reported as unchecked.
 
@@ -1201,7 +1233,7 @@ def _injection_findings(record, request, advisory):
         # and the offsets here are into content that was clipped for the model.
         out.append(_judge_finding(
             record, where, "", (0, 0), "note",
-            f"{judge_tier.INJECTION_NOTE} — {excerpt}", "injection-attempt",
+            f"{judge_tier.INJECTION_NOTE} - {excerpt}", "injection-attempt",
             advisory, line=0))
     return out
 
@@ -1244,17 +1276,19 @@ def _judge_candidates(record, corpus, judge):
     established, and the only thing asked of the model is the narrow question
     the record states.
 
-    Returns the findings and how many sites were actually *answered* - a site
-    the budget or a dead backend swallowed is not one the rule was checked
-    against, and counting it would let the block read `clear`.
+    Returns the findings, how many sites were *answered* and how many exist.
+    A site past the limit, or one the budget or a dead backend swallowed, is
+    not one the rule was checked against, and counting it would let the block
+    read `clear`.
     """
     import judge_tier
-    out, asked, answered = [], 0, 0
+    out, asked, answered, total = [], 0, 0, 0
     globs = record.get("applies_to") or []
     for entry in _source_entries(record, corpus):
         for cand in enumerate_candidates(record["candidate"], [entry], globs):
+            total += 1
             if asked >= JUDGE_CANDIDATE_LIMIT:
-                return out, answered
+                continue
             asked += 1
             request = judge_tier.judge_request(
                 _record_key(record), record.get("statement", ""),
@@ -1266,7 +1300,7 @@ def _judge_candidates(record, corpus, judge):
                 answered += 1
             out.extend(_injection_findings(record, request, False))
             out.append(_fold_candidate(record, entry, cand, answer))
-    return out, answered
+    return out, answered, total
 
 
 def _fold_candidate(record, entry, cand, answer):
@@ -1319,7 +1353,7 @@ def _judge_semantic(record, corpus, judge):
     if not pieces:
         # Nothing the rule is about happened, so there is nothing to ask. A
         # call here would buy an answer about an empty page.
-        return []
+        return [], False
     request = judge_tier.judge_request(
         _record_key(record), record.get("statement", ""),
         record.get("examples_positive"), record.get("examples_negative"),
@@ -1328,7 +1362,7 @@ def _judge_semantic(record, corpus, judge):
     out = _injection_findings(record, request, True)
     if answer.get("unavailable"):
         out.append(_unanswered(record, answer, pieces[0][0], True))
-        return out
+        return out, False
     reason = answer.get("reason") or ""
     quote = answer.get("evidence", "")
     for name, text in request["evidence"]:
@@ -1338,13 +1372,13 @@ def _judge_semantic(record, corpus, judge):
         state = "unclear" if answer["verdict"] == "violated" else "note"
         out.append(_judge_finding(record, name, text, span, state, reason,
                                   answer["verdict"], True))
-        return out
+        return out, True
     # No citable span. A violation without one is not reportable as one, and a
     # compliant answer never had anything to cite in the first place.
     message = f"{JUDGE_NO_SPAN}. {reason}".strip() if answer["verdict"] == "violated" else reason
     out.append(_judge_finding(record, pieces[0][0], "", (0, 0), "note", message,
                               answer["verdict"], True, line=0))
-    return out
+    return out, True
 
 
 def judge_records(records, corpus, judge):
@@ -1355,21 +1389,35 @@ def judge_records(records, corpus, judge):
     whether anything was in scope at all, and one note per record saying what
     became of it - a record the tier was on for but never asked about must not
     report itself as answered, nor keep telling the reader the tier is off.
+
+    A hybrid record runs only when *every* site was answered. The unexamined
+    finding it otherwise carries is flagged `judgeIncomplete`, which is what
+    `check_block` reads to keep the block from reading `clear`.
     """
     findings, ran, in_scope, notes = [], [], False, {}
     for record in records:
         rid = record.get("id")
         if record.get("bucket") == "hybrid" and record.get("candidate") in CANDIDATE_KINDS:
-            f, asked = _judge_candidates(record, corpus, judge)
+            f, answered, total = _judge_candidates(record, corpus, judge)
             findings.extend(f)
-            notes[rid] = JUDGE_RAN_NOTE if asked else JUDGE_NOTHING_TO_ASK
-            if asked:
+            if not total:
+                notes[rid] = JUDGE_NOTHING_TO_ASK
+            elif answered < total:
+                why = judge_unexamined_note(total - answered, total)
+                gap = _judge_finding(record, "", "", (0, 0), "note", why,
+                                     "unavailable", False, line=0)
+                gap["judgeIncomplete"] = True
+                findings.append(gap)
+                notes[rid] = why
+            else:
+                notes[rid] = JUDGE_RAN_NOTE
                 ran.append(record)
+            if answered:
                 in_scope = True
         else:
-            f = _judge_semantic(record, corpus, judge)
+            f, answered = _judge_semantic(record, corpus, judge)
             findings.extend(f)
-            notes[rid] = JUDGE_ADVISORY_NOTE if f else JUDGE_NOTHING_TO_ASK
+            notes[rid] = JUDGE_ADVISORY_NOTE if answered else JUDGE_NOTHING_TO_ASK
     return findings, ran, in_scope, notes
 
 
@@ -1669,7 +1717,7 @@ def compile_state(block, loaded):
     key = rule_key(block.get("title"), block.get("content"))
     applied = stale = False
     for c in loaded.get("checks") or []:
-        if not _entry_matches_block(c, block):
+        if not _entry_matches_block(c, block, loaded):
             continue
         if c.get("rule_key") and c["rule_key"] != key:
             stale = True
@@ -1680,7 +1728,7 @@ def compile_state(block, loaded):
     if stale:
         return "stale"
     answered = ((loaded.get("notCheckable") or []) + (loaded.get("judged") or []))
-    if any(_entry_matches_block(e, block) for e in answered):
+    if any(_entry_matches_block(e, block, loaded) for e in answered):
         return "refused"
     return "uncompiled"
 
@@ -1799,7 +1847,29 @@ def checks_for_doc(doc_path):
                 "demoted": [], "judged": [], "judgeable": []}
     loaded = load_checks(data)
     loaded["source"] = loaded.get("source") or str(path)
+    loaded["headings"] = _doc_headings(doc_path)
     return loaded
+
+
+def _doc_headings(doc_path):
+    """The document's H1/H2 headings, normalised: the titles its blocks carry.
+
+    Fence-aware the way the block parser is, or a `# comment` inside a shell
+    fence would count as an exact heading and stop a real one binding.
+    """
+    try:
+        text = Path(doc_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    out, in_fence = [], False
+    for line in text.splitlines():
+        if re.match(r"^\s*(```|~~~)", line):
+            in_fence = not in_fence
+            continue
+        m = None if in_fence else re.match(r"^#{1,2}\s+(.*?)\s*$", line)
+        if m:
+            out.append(_normalise_ref(m.group(1)))
+    return out
 
 
 # ---------- fallback for documents with no checks file ----------
@@ -1876,8 +1946,14 @@ def _normalise_ref(s):
     return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
 
 
-def _entry_matches_block(entry, block):
-    """Bind a checks-file entry to a block by heading, or by source line number."""
+def _entry_matches_block(entry, block, loaded=None):
+    """Bind a checks-file entry to a block by heading, or by source line number.
+
+    Containment is the fallback for a ref that names no heading exactly. With
+    an exact heading in the document it would also bind "Rules" to "Global
+    Claude Code Rules" and to "Rule checks", applying one rule's check to two
+    others.
+    """
     ref = (entry.get("rule_ref") or "").strip()
     if not ref:
         return False
@@ -1887,7 +1963,11 @@ def _entry_matches_block(entry, block):
     ref_n, title_n = _normalise_ref(ref), _normalise_ref(block.get("title"))
     if not ref_n or not title_n:
         return False
-    return ref_n == title_n or title_n in ref_n or ref_n in title_n
+    if ref_n == title_n:
+        return True
+    if ref_n in ((loaded or {}).get("headings") or ()):
+        return False
+    return title_n in ref_n or ref_n in title_n
 
 
 # Every cue the mechanical fallback reads (NEGATION_RE) has to be in here too:
@@ -1976,11 +2056,13 @@ def check_block(block, loaded, corpus, fallback=True, doc_path="", judge=None):
 
     States: `violated` (a citable span, strict and normalised agreeing),
     `acknowledged` (a violation the code deliberately suppresses at the site),
-    `unclear` (a candidate the two views disagree about), `clear` (checks ran
-    over code in their scope and found nothing), `not-exercised` (checks ran but
-    the session wrote nothing they apply to), `not-checkable` (the rule was
-    refused, its check failed its own self-tests, or its check no longer
-    matches the rule's text).
+    `unclear` (a candidate the two views disagree about, or a judge verdict that
+    could not settle it), `clear` (checks ran over code in their scope and found
+    nothing), `not-exercised` (the session wrote nothing the checks apply to, a
+    conditional's antecedent never fired, or an omission rule found no candidate
+    site), `not-checkable` (the rule was refused, its check failed its own
+    self-tests, its check no longer matches the rule's text, its backend is
+    missing, or the judge left some of its sites unexamined).
 
     `demoted` and `judged` list the records that were not applied and why - a
     deterministic check whose fixtures stopped reproducing here, and a bucket
@@ -2005,7 +2087,7 @@ def check_block(block, loaded, corpus, fallback=True, doc_path="", judge=None):
         source = "checks-file"
         block_key = rule_key(block.get("title"), block.get("content"))
         for c in loaded.get("checks") or []:
-            if not _entry_matches_block(c, block):
+            if not _entry_matches_block(c, block, loaded):
                 continue
             if c.get("rule_key") and c["rule_key"] != block_key:
                 stale.append({"id": c["id"], "ruleRef": c.get("rule_ref", ""),
@@ -2017,13 +2099,13 @@ def check_block(block, loaded, corpus, fallback=True, doc_path="", judge=None):
         # ran it" are different facts from "this rule cannot be expressed", and
         # a reader who cannot tell them apart cannot tell which one to fix.
         for entry in loaded.get("demoted") or []:
-            if _entry_matches_block(entry, block):
+            if _entry_matches_block(entry, block, loaded):
                 demoted.append(entry)
         for entry in loaded.get("judged") or []:
-            if _entry_matches_block(entry, block):
+            if _entry_matches_block(entry, block, loaded):
                 judged.append(entry)
         for entry in loaded.get("notCheckable") or []:
-            if _entry_matches_block(entry, block):
+            if _entry_matches_block(entry, block, loaded):
                 not_checkable.append({"ruleRef": entry.get("rule_ref", ""),
                                       "ruleText": entry.get("rule_text", ""),
                                       "why": entry.get("why", "")})
@@ -2031,7 +2113,7 @@ def check_block(block, loaded, corpus, fallback=True, doc_path="", judge=None):
             # A file-level rejection (unreadable JSON) names no rule, so it
             # belongs on every block of the document: the alternative is a
             # document that quietly looks unchecked.
-            if entry.get("id") == "(file)" or _entry_matches_block(entry, block):
+            if entry.get("id") == "(file)" or _entry_matches_block(entry, block, loaded):
                 rejected.append(entry)
                 not_checkable.append({"ruleRef": entry.get("ruleRef", ""),
                                       "ruleText": entry.get("ruleText", ""),
@@ -2072,7 +2154,7 @@ def check_block(block, loaded, corpus, fallback=True, doc_path="", judge=None):
     judgeable, jnotes = [], {}
     if judge is not None and loaded:
         for r in loaded.get("judgeable") or []:
-            if not _entry_matches_block(r, block):
+            if not _entry_matches_block(r, block, loaded):
                 continue
             if r.get("rule_key") and r["rule_key"] != block_key:
                 why = "the rule's text changed since this check was authored"
@@ -2115,6 +2197,11 @@ def check_block(block, loaded, corpus, fallback=True, doc_path="", judge=None):
         })
 
     state = _state_from(findings, applied, not_checkable, stale, in_scope)
+    if state == "clear" and any(f.get("judgeIncomplete") for f in findings):
+        # Sites nobody examined could hold the violation, so the rule was not
+        # checked. "Not checked" rather than `unclear`, for the reason
+        # `_unanswered` gives.
+        state = "not-checkable"
     # When something fired, the reported confidence is that of the findings
     # that fired - never a bystander's. A caller deciding whether to paint the
     # block red must not inherit an unrelated check's high confidence.

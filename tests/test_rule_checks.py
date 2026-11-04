@@ -340,11 +340,9 @@ def test_the_same_pattern_outside_a_string_is_still_a_violation():
 def test_a_v1_record_carrying_a_retired_field_still_loads():
     """The retired fields are accepted and do nothing. Refusing one would turn
     every checks file written against the old format into unchecked rules."""
-    assert rc.IGNORED_LEGACY_FIELDS == ("ignore_strings",)
-    for field in rc.IGNORED_LEGACY_FIELDS:
-        loaded = rc.load_checks(doc(checks=[check(**{field: True})]))
-        assert [c["id"] for c in loaded["checks"]] == ["no-reaction"], field
-        assert loaded["rejected"] == [], field
+    loaded = rc.load_checks(doc(checks=[check(ignore_strings=True)]))
+    assert [c["id"] for c in loaded["checks"]] == ["no-reaction"]
+    assert loaded["rejected"] == []
 
 
 def test_a_strict_match_the_stripped_view_loses_is_unclear():
@@ -748,3 +746,68 @@ def test_a_rule_the_checks_file_does_not_cover_says_exactly_that():
     v = rc.check_block(block, loaded, corpus_for(events))
     assert v["state"] == "not-checkable"
     assert "checks file says nothing about this rule" in v["notCheckable"][0]["why"]
+
+
+# ---------- review round: heading binding, suppression lines, dialects ----------
+
+def test_a_rule_ref_binds_to_the_exact_heading_before_a_containing_one(tmp_path):
+    """"Rules" is contained in "Global Claude Code Rules", but with an exact
+    "Rules" heading in the document the record binds there alone."""
+    src = tmp_path / "RULES.md"
+    src.write_text("# Global Claude Code Rules\n\nNever call reaction().\n\n"
+                   "## Rules\n\nNever call reaction() in a component.\n")
+    (tmp_path / "RULES.md.checks.json").write_text(
+        json.dumps(doc(checks=[check(rule_ref="Rules")])))
+    rc.checks_for_doc.cache_clear()
+    loaded = rc.checks_for_doc(str(src))
+    glob_block, rules_block = brv.parse_claude_md(src.read_text())
+    corpus = corpus_for([user_text("go", 1)])
+    assert rc.check_block(rules_block, loaded, corpus)["checksApplied"] == ["no-reaction"]
+    assert rc.check_block(glob_block, loaded, corpus)["checksApplied"] == []
+
+
+def test_a_rule_ref_still_binds_by_containment_when_no_heading_is_exact(tmp_path):
+    src = tmp_path / "RULES.md"
+    src.write_text("## Reactions in components\n\nNever call reaction().\n")
+    (tmp_path / "RULES.md.checks.json").write_text(json.dumps(doc(checks=[check()])))
+    rc.checks_for_doc.cache_clear()
+    loaded = rc.checks_for_doc(str(src))
+    block = brv.parse_claude_md(src.read_text())[0]
+    out = rc.check_block(block, loaded, corpus_for([user_text("go", 1)]))
+    assert out["checksApplied"] == ["no-reaction"]
+
+
+def test_suppression_is_found_on_the_line_the_finding_cites():
+    """Line numbers count `\\n` only; a stray form feed must not shift which
+    line the marker is looked for on."""
+    text = "a\x0cb\x0cc\nd\n// ctx-allow: no-reaction\nreaction(x);\n"
+    offset = text.index("reaction(")
+    assert rc._line_of(text, offset) == 4
+    assert rc._suppressed(text, offset, "no-reaction")
+
+
+def test_a_css_url_is_not_a_line_comment():
+    src = "a { background: url(http://x/y.png); } /* gone */\n"
+    out = rc.strip_comments_and_strings(src, "a.css")
+    assert "y.png" in out and "gone" not in out
+
+
+def test_scss_keeps_its_line_comments():
+    assert "gone" not in rc.strip_comments_and_strings("a { b: c; } // gone\n", "a.scss")
+
+
+def test_shell_parameter_hashes_are_not_comments():
+    src = 'echo "$#" $# args ${#v} kept # gone\n'
+    out = rc.strip_comments_and_strings(src, "run.sh")
+    assert "args" in out and "kept" in out and "gone" not in out
+
+
+def test_code_written_by_a_heredoc_is_in_the_corpus_a_source_check_reads():
+    """The structural joins credit a heredoc write; a source check has to be
+    able to see the same code or it can never flag it."""
+    events = [bash("cat > src/app.py <<'EOF'\nprint('debug')\nEOF", 1)]
+    calls = brv.tool_calls(events)
+    t = brv.build_trace(events, calls, brv.assistant_text_segments(events), "q")
+    corpus = t["rule_corpus"]
+    assert [e["path"] for e in corpus["code"]] == ["src/app.py"]
+    assert "print('debug')" in corpus["final_code"][0]["text"]

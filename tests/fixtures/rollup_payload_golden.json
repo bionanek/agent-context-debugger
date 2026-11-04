@@ -42,11 +42,11 @@
          "kind": "non-event",
          "label": "Not lexically scorable",
          "t": null,
-         "text": "Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary \u2014 too few to score. Not a statement about whether the block was followed.",
+         "text": "Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed.",
          "verdict": "no"
         }
        ],
-       "reason": "No predicate derivable, so only the wording could be compared. Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary \u2014 too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now \u2014 the transcript carries no copy of what was delivered, so this wording may postdate the session.",
+       "reason": "No predicate derivable, so only the wording could be compared. Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now - the transcript carries no copy of what was delivered, so this wording may postdate the session.",
        "status": "unused",
        "title": "Talking",
        "type": "instruction"
@@ -74,11 +74,11 @@
          "kind": "non-event",
          "label": "Not lexically scorable",
          "t": null,
-         "text": "Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary \u2014 too few to score. Not a statement about whether the block was followed.",
+         "text": "Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed.",
          "verdict": "no"
         }
        ],
-       "reason": "No predicate derivable, so only the wording could be compared. Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary \u2014 too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now \u2014 the transcript carries no copy of what was delivered, so this wording may postdate the session.",
+       "reason": "No predicate derivable, so only the wording could be compared. Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now - the transcript carries no copy of what was delivered, so this wording may postdate the session.",
        "ruleCheck": {
         "checksApplied": [],
         "confidence": "low",
@@ -132,11 +132,11 @@
          "kind": "non-event",
          "label": "Not lexically scorable",
          "t": null,
-         "text": "Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary \u2014 too few to score. Not a statement about whether the block was followed.",
+         "text": "Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed.",
          "verdict": "no"
         }
        ],
-       "reason": "No predicate derivable, so only the wording could be compared. Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary \u2014 too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now \u2014 the transcript carries no copy of what was delivered, so this wording may postdate the session.",
+       "reason": "No predicate derivable, so only the wording could be compared. Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now - the transcript carries no copy of what was delivered, so this wording may postdate the session.",
        "status": "unused",
        "title": "Build",
        "type": "instruction"
@@ -155,11 +155,11 @@
          "kind": "non-event",
          "label": "Not lexically scorable",
          "t": null,
-         "text": "Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary \u2014 too few to score. Not a statement about whether the block was followed.",
+         "text": "Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed.",
          "verdict": "no"
         }
        ],
-       "reason": "No predicate derivable, so only the wording could be compared. Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary \u2014 too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now \u2014 the transcript carries no copy of what was delivered, so this wording may postdate the session.",
+       "reason": "No predicate derivable, so only the wording could be compared. Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now - the transcript carries no copy of what was delivered, so this wording may postdate the session.",
        "status": "unused",
        "title": "Tests",
        "type": "instruction"
@@ -314,11 +314,11 @@
            "kind": "non-event",
            "label": "Not lexically scorable",
            "t": null,
-           "text": "Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary \u2014 too few to score. Not a statement about whether the block was followed.",
+           "text": "Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed.",
            "verdict": "no"
           }
          ],
-         "reason": "No predicate derivable, so only the wording could be compared. Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary \u2014 too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now \u2014 the transcript carries no copy of what was delivered, so this wording may postdate the session.",
+         "reason": "No predicate derivable, so only the wording could be compared. Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now - the transcript carries no copy of what was delivered, so this wording may postdate the session.",
          "status": "unused",
          "title": "Talking",
          "type": "instruction"
@@ -346,11 +346,11 @@
            "kind": "non-event",
            "label": "Not lexically scorable",
            "t": null,
-           "text": "Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary \u2014 too few to score. Not a statement about whether the block was followed.",
+           "text": "Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed.",
            "verdict": "no"
           }
          ],
-         "reason": "No predicate derivable, so only the wording could be compared. Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary \u2014 too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now \u2014 the transcript carries no copy of what was delivered, so this wording may postdate the session.",
+         "reason": "No predicate derivable, so only the wording could be compared. Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now - the transcript carries no copy of what was delivered, so this wording may postdate the session.",
          "ruleCheck": {
           "checksApplied": [],
           "confidence": "low",
@@ -404,11 +404,11 @@
            "kind": "non-event",
            "label": "Not lexically scorable",
            "t": null,
-           "text": "Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary \u2014 too few to score. Not a statement about whether the block was followed.",
+           "text": "Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed.",
            "verdict": "no"
           }
          ],
-         "reason": "No predicate derivable, so only the wording could be compared. Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary \u2014 too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now \u2014 the transcript carries no copy of what was delivered, so this wording may postdate the session.",
+         "reason": "No predicate derivable, so only the wording could be compared. Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now - the transcript carries no copy of what was delivered, so this wording may postdate the session.",
          "status": "unused",
          "title": "Build",
          "type": "instruction"
@@ -427,11 +427,11 @@
            "kind": "non-event",
            "label": "Not lexically scorable",
            "t": null,
-           "text": "Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary \u2014 too few to score. Not a statement about whether the block was followed.",
+           "text": "Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed.",
            "verdict": "no"
           }
          ],
-         "reason": "No predicate derivable, so only the wording could be compared. Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary \u2014 too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now \u2014 the transcript carries no copy of what was delivered, so this wording may postdate the session.",
+         "reason": "No predicate derivable, so only the wording could be compared. Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now - the transcript carries no copy of what was delivered, so this wording may postdate the session.",
          "status": "unused",
          "title": "Tests",
          "type": "instruction"
@@ -560,11 +560,11 @@
            "kind": "non-event",
            "label": "Not lexically scorable",
            "t": null,
-           "text": "Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary \u2014 too few to score. Not a statement about whether the block was followed.",
+           "text": "Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed.",
            "verdict": "no"
           }
          ],
-         "reason": "No predicate derivable, so only the wording could be compared. Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary \u2014 too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now \u2014 the transcript carries no copy of what was delivered, so this wording may postdate the session.",
+         "reason": "No predicate derivable, so only the wording could be compared. Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now - the transcript carries no copy of what was delivered, so this wording may postdate the session.",
          "status": "unused",
          "title": "Talking",
          "type": "instruction"
@@ -592,11 +592,11 @@
            "kind": "non-event",
            "label": "Not lexically scorable",
            "t": null,
-           "text": "Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary \u2014 too few to score. Not a statement about whether the block was followed.",
+           "text": "Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed.",
            "verdict": "no"
           }
          ],
-         "reason": "No predicate derivable, so only the wording could be compared. Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary \u2014 too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now \u2014 the transcript carries no copy of what was delivered, so this wording may postdate the session.",
+         "reason": "No predicate derivable, so only the wording could be compared. Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now - the transcript carries no copy of what was delivered, so this wording may postdate the session.",
          "ruleCheck": {
           "checksApplied": [],
           "confidence": "low",
@@ -650,11 +650,11 @@
            "kind": "non-event",
            "label": "Not lexically scorable",
            "t": null,
-           "text": "Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary \u2014 too few to score. Not a statement about whether the block was followed.",
+           "text": "Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed.",
            "verdict": "no"
           }
          ],
-         "reason": "No predicate derivable, so only the wording could be compared. Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary \u2014 too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now \u2014 the transcript carries no copy of what was delivered, so this wording may postdate the session.",
+         "reason": "No predicate derivable, so only the wording could be compared. Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now - the transcript carries no copy of what was delivered, so this wording may postdate the session.",
          "status": "unused",
          "title": "Build",
          "type": "instruction"
@@ -673,11 +673,11 @@
            "kind": "non-event",
            "label": "Not lexically scorable",
            "t": null,
-           "text": "Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary \u2014 too few to score. Not a statement about whether the block was followed.",
+           "text": "Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed.",
            "verdict": "no"
           }
          ],
-         "reason": "No predicate derivable, so only the wording could be compared. Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary \u2014 too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now \u2014 the transcript carries no copy of what was delivered, so this wording may postdate the session.",
+         "reason": "No predicate derivable, so only the wording could be compared. Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now - the transcript carries no copy of what was delivered, so this wording may postdate the session.",
          "status": "unused",
          "title": "Tests",
          "type": "instruction"

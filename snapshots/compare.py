@@ -17,9 +17,10 @@ set that truth class allows. The classes are coarse on purpose: `dormant` vs
 the run, or a red over a rule nobody can cite a violation of, is exactly the
 error the audit measured.
 
-`regressed` (agreed before, wrong after) is a release blocker. `still-wrong`
-rows are listed in full with the ground truth's own `accept:` note where the
-miss is a known and accepted limit.
+`regressed` (agreed before, wrong after) and `new-wrong` (not judged before,
+wrong after) are release blockers. `still-wrong` rows are listed in full with
+the ground truth's own `accept:` note where the miss is a known and accepted
+limit. A session missing either half fails the run unless `--allow-partial`.
 """
 import argparse
 import gzip
@@ -31,15 +32,11 @@ SNAPSHOTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SNAPSHOTS_DIR))
 
 import audit_sessions  # noqa: E402
+import take_baseline as tb  # noqa: E402
 
 DEFAULT_BASELINE = SNAPSHOTS_DIR / "baseline"
 DEFAULT_AFTER = SNAPSHOTS_DIR / "after"
 DEFAULT_EXPECTED = SNAPSHOTS_DIR / "expected"
-
-# Statuses that say nothing about the judging logic - the block never reached
-# the model. Mirrors take_baseline.DELIVERY_STATUSES; duplicated rather than
-# imported so this scorer stays readable on its own.
-DELIVERY_STATUSES = frozenset({"not-loaded", "undelivered"})
 
 # What each truth class allows the tool to say. `used-partial` is allowed under
 # `violated` because a session that broke a rule in one turn and followed it in
@@ -120,11 +117,18 @@ def load_expected(path):
     last = None
     for raw in text.splitlines():
         line = raw.strip()
+        if line and raw[0] not in " \t" and not (line.startswith("- ") and " :: " in line):
+            # A note belongs to the row it is indented under; an `accept:` in a
+            # later prose section is about something else.
+            last = None
+            continue
         if line.startswith("- ") and " :: " in line:
             parts = [p.strip() for p in line[2:].split(" :: ", 3)]
             if len(parts) != 4:
                 raise ValueError(f"{path}: malformed verdict line: {raw}")
             bid, truth, tag, evidence = parts
+            if bid in out:
+                raise ValueError(f"{path}: block {bid} has two verdict lines")
             if truth not in TRUTHS:
                 # Never silently excluded: a misspelling would otherwise take
                 # the `undecidable` path and drop a block out of the gate.
@@ -164,10 +168,28 @@ def judged_statuses(payload, session_id=None):
     out = {}
     for f in sessions[session_id].get("contextFiles", []):
         for b in f.get("blocks", []):
-            if b.get("status") in DELIVERY_STATUSES:
+            if b.get("status") in tb.DELIVERY_STATUSES:
                 continue
             out[b["id"]] = b.get("status")
     return out
+
+
+def delivery_statuses(payload, session_id=None):
+    """{block id: status} for the blocks the payload says never reached the model.
+
+    `judged_statuses` leaves these out because a block nobody offered for
+    judging has no verdict. A block the truth *does* cover is different: a
+    `not-loaded` there is the tool's answer about it, and `ALLOWED` already
+    names it as honest for `no-hard-verdict`. Read as absent instead, the fix
+    that stopped a file being reported in context when it never was scored as
+    51 regressions.
+    """
+    sessions = payload["perSession"]
+    if session_id is None:
+        session_id = next(iter(sessions))
+    return {b["id"]: b.get("status")
+            for f in sessions[session_id].get("contextFiles", [])
+            for b in f.get("blocks", []) if b.get("status") in tb.DELIVERY_STATUSES}
 
 
 def judged_halves(payload, session_id=None):
@@ -189,30 +211,29 @@ def judged_halves(payload, session_id=None):
     return out
 
 
+def _manifest(snap_dir):
+    if not (Path(snap_dir) / "manifest.json").is_file():
+        return {}
+    return tb._read_manifest(snap_dir)
+
+
 def has_checks_file(snap_dir):
     """Whether this snapshot froze a reviewed `<doc>.checks.json` alongside its rules.
 
     Without one, no compiled check ran, so the corpus says nothing about the
     only mechanism allowed to call a rule violated.
     """
-    manifest = Path(snap_dir) / "manifest.json"
-    if not manifest.is_file():
-        return False
-    data = json.loads(manifest.read_text(encoding="utf-8"))
     return any(str(e.get("key", "")).endswith(".checks.json")
-               for e in data.get("inputs") or [])
+               for e in _manifest(snap_dir).get("inputs") or [])
 
 
 def _session_id(snap_dir):
-    manifest = Path(snap_dir) / "manifest.json"
-    if manifest.is_file():
-        return json.loads(manifest.read_text(encoding="utf-8")).get("sessionId")
-    return None
+    return _manifest(snap_dir).get("sessionId")
 
 
 # ---------- scoring ----------
 
-def compare_session(name, baseline_dir, after_dir, expected_file):
+def compare_session(name, baseline_dir, after_dir, expected_file, input_changed=False):
     """Returns (rows, unscored) - the second being blocks no truth class covers.
 
     A block either payload judges but the ground truth does not name is not
@@ -220,6 +241,10 @@ def compare_session(name, baseline_dir, after_dir, expected_file):
     invented (a delivery reclassification adds a block, say) sit outside the
     gate entirely. A ground-truth id present in neither payload is the same
     problem pointed the other way - a stale line quietly scored as a miss.
+
+    `input_changed` marks every row whose verdict moved: the after-run read an
+    input the baseline payload never did, so the move is not evidence about
+    the judging code alone.
     """
     expected = load_expected(expected_file)
     before_payload, after_payload = read_payload(baseline_dir), read_payload(after_dir)
@@ -233,10 +258,12 @@ def compare_session(name, baseline_dir, after_dir, expected_file):
     unscored += [f"{name} {bid}: ground truth for a block neither payload judges"
                  for bid in sorted(expected)
                  if bid not in before and bid not in after]
+    before_undelivered = delivery_statuses(before_payload, _session_id(baseline_dir))
+    after_undelivered = delivery_statuses(after_payload, _session_id(after_dir))
     rows = []
     for bid, exp in expected.items():
-        b = before.get(bid, ABSENT)
-        a = after.get(bid, ABSENT)
+        b = before.get(bid) or before_undelivered.get(bid, ABSENT)
+        a = after.get(bid) or after_undelivered.get(bid, ABSENT)
         if exp["truth"] == UNDECIDABLE:
             rows.append({"session": name, "id": bid, "truth": exp["truth"],
                          "tag": exp["tag"], "before": b, "after": a,
@@ -244,11 +271,17 @@ def compare_session(name, baseline_dir, after_dir, expected_file):
                          "outcome": "excluded", "accept": exp["accept"],
                          "revised": exp["revised"], "blind": exp["blind"],
                          "evidence": exp["evidence"],
-                         "half": halves.get(bid, "rule-document")})
+                         "half": halves.get(bid, "rule-document"),
+                         "inputChanged": input_changed and b != a})
             continue
         be = error_kind(exp["truth"], b)
         ae = error_kind(exp["truth"], a)
-        if be is None and ae is None:
+        if b == ABSENT:
+            # Nothing was judged before, so there is no error to have fixed or
+            # kept: counted as `fixed` it inflates the improvement, as
+            # `still-wrong` a new false green never reaches the gate.
+            outcome = "new-agreed" if ae is None else "new-wrong"
+        elif be is None and ae is None:
             outcome = "agreed"
         elif be is not None and ae is None:
             outcome = "fixed"
@@ -260,22 +293,29 @@ def compare_session(name, baseline_dir, after_dir, expected_file):
                      "before": b, "after": a, "beforeError": be, "afterError": ae,
                      "outcome": outcome, "accept": exp["accept"], "revised": exp["revised"],
                      "blind": exp["blind"], "evidence": exp["evidence"],
-                     "half": halves.get(bid, "rule-document")})
+                     "half": halves.get(bid, "rule-document"),
+                     "inputChanged": input_changed and b != a})
     return rows, unscored
 
 
 def _tally(rows):
     t = {k: 0 for k in ("scored", "excluded", "agreed", "fixed", "regressed", "still-wrong",
-                        "agreedBefore", "agreedAfter", "falseGreenBefore", "falseGreenAfter",
+                        "new-agreed", "new-wrong", "nonBlindCredited", "agreedBefore", "agreedAfter", "falseGreenBefore", "falseGreenAfter",
                         "falseRedBefore", "falseRedAfter", "missedBefore", "missedAfter",
-                        "absentBefore", "absentAfter", "violatedTruths")}
+                        "absentBefore", "absentAfter", "violatedTruths",
+                        "nowUndelivered")}
     for r in rows:
         t[r["outcome"]] += 1
         if r["outcome"] == "excluded":
             continue
         t["scored"] += 1
+        if r["blind"] == "no" and r["outcome"] in ("fixed", "agreed", "new-agreed"):
+            t["nonBlindCredited"] += 1
         if r["truth"] == "violated":
             t["violatedTruths"] += 1
+        if (r["after"] in tb.DELIVERY_STATUSES
+                and r["before"] not in tb.DELIVERY_STATUSES and r["before"] != ABSENT):
+            t["nowUndelivered"] += 1
         for half in ("before", "after"):
             err = r[half + "Error"]
             key = "Before" if half == "before" else "After"
@@ -297,6 +337,7 @@ def compare_all(baseline_dir=None, after_dir=None, expected_dir=None):
     after_dir = Path(after_dir or DEFAULT_AFTER)
     expected_dir = Path(expected_dir or DEFAULT_EXPECTED)
     rows, missing, unscored, checks_files = [], [], [], []
+    input_changed = {}
     for exp in sorted(expected_dir.glob("*/*/expected.md")):
         project, prefix = exp.parent.parent.name, exp.parent.name
         name = f"{project}/{prefix}"
@@ -306,7 +347,10 @@ def compare_all(baseline_dir=None, after_dir=None, expected_dir=None):
             # that still have both halves reports a better number than it earned.
             missing.append(name)
             continue
-        session_rows, session_unscored = compare_session(name, b, a, exp)
+        added = tb.inputs_added_after_bake(_manifest(b))
+        if added:
+            input_changed[name] = added
+        session_rows, session_unscored = compare_session(name, b, a, exp, bool(added))
         rows.extend(session_rows)
         unscored.extend(session_unscored)
         if has_checks_file(b):
@@ -319,15 +363,18 @@ def compare_all(baseline_dir=None, after_dir=None, expected_dir=None):
     for half in ("skill", "rule-document"):
         by_half.setdefault(half, [])
     return {"rows": rows, "totals": _tally(rows), "missing": missing, "unscored": unscored,
-            "checksFiles": checks_files,
+            "checksFiles": checks_files, "inputChanged": input_changed,
             "bySession": {k: _tally(v) for k, v in by_session.items()},
             "byTag": {k: _tally(v) for k, v in by_tag.items()},
             "byHalf": {k: _tally(v) for k, v in by_half.items()}}
 
 
+BLOCKING = ("regressed", "new-wrong")
+
+
 def blockers(report):
-    """Every regression, as `<session> <block>` - each one blocks the release."""
-    return [f"{r['session']} {r['id']}" for r in report["rows"] if r["outcome"] == "regressed"]
+    """Every regression or new wrong verdict, as `<session> <block>`."""
+    return [f"{r['session']} {r['id']}" for r in report["rows"] if r["outcome"] in BLOCKING]
 
 
 # ---------- rendering ----------
@@ -335,7 +382,9 @@ def blockers(report):
 def _row_line(r):
     line = (f"- `{r['session']}` **{r['id']}** - truth `{r['truth']}`"
             f"{' [' + r['tag'] + ']' if r['tag'] else ''}: "
-            f"`{r['before']}` -> `{r['after']}`. {r['evidence']}")
+            f"`{r['before']}` -> `{r['after']}`"
+            f"{' [input changed after baseline]' if r.get('inputChanged') else ''}. "
+            f"{r['evidence']}")
     if r["accept"]:
         line += f"\n  - accepted: {r['accept']}"
     if r["revised"]:
@@ -356,7 +405,8 @@ def _half_table(report, half, title, note):
             f"| block not judged at all | {t['absentBefore']} | {t['absentAfter']} |",
             "",
             f"**{t['scored']} scored · fixed {t['fixed']} · regressed {t['regressed']} "
-            f"· still wrong {t['still-wrong']}**", ""]
+            f"· still wrong {t['still-wrong']} · new agreed {t['new-agreed']} "
+            f"· new wrong {t['new-wrong']}**", ""]
 
 
 def _coverage_lines(report):
@@ -378,6 +428,17 @@ def _coverage_lines(report):
     return out + [""]
 
 
+TABLE_HEAD = ("| {} | scored | agreed before | agreed after | fixed | regressed | still wrong "
+              "| new agreed | new wrong |")
+TABLE_RULE = "|---|---|---|---|---|---|---|---|---|"
+
+
+def _table_row(label, s):
+    return (f"| {label} | {s['scored']} | {s['agreedBefore']} | {s['agreedAfter']} | "
+            f"{s['fixed']} | {s['regressed']} | {s['still-wrong']} | {s['new-agreed']} | "
+            f"{s['new-wrong']} |")
+
+
 def render(report):
     t = report["totals"]
     out = ["# Verdict scorecard: baseline vs after vs ground truth", "",
@@ -385,7 +446,10 @@ def render(report):
            "edit by hand - regenerate it, so the numbers stay the ones the snapshots hold.",
            "",
            "Both halves are baked from the *same* frozen inputs (`snapshots/baseline/*/inputs/`),",
-           "so a verdict that moved moved because the judging code did. The ground truth in",
+           "so a verdict that moved moved because the judging code did"
+           + (" - except in the sessions marked *input changed after baseline* below."
+              if report.get("inputChanged") else "."),
+           "The ground truth in",
            "`snapshots/expected/` was written from those inputs before either payload was",
            "read. The rows that are exceptions - revised afterwards, or added for a block the",
            "baseline never judged - say so in their own line.",
@@ -402,6 +466,13 @@ def render(report):
         out += ["> Blocks outside the gate (no ground truth, or ground truth for a block",
                 "> neither payload judges):"]
         out += [f"> - {u}" for u in report["unscored"]] + [""]
+    if report.get("inputChanged"):
+        out += ["> Input changed after baseline: in these sessions the baseline payload was",
+                "> baked before the inputs named here were frozen in, so the after-run read",
+                "> something the baseline did not and a verdict that moved there may have",
+                "> moved because of the input:"]
+        out += [f"> - {name}: " + ", ".join(f"`{k}`" for k in keys)
+                for name, keys in sorted(report["inputChanged"].items())] + [""]
     out += _coverage_lines(report)
     out += [
         f"{t['scored']} judged blocks scored, {t['excluded']} excluded as `undecidable`.", "",
@@ -414,7 +485,16 @@ def render(report):
         f"| block not judged at all | {t['absentBefore']} | {t['absentAfter']} |",
         "",
         f"**fixed {t['fixed']} · regressed {t['regressed']} · still wrong {t['still-wrong']} "
-        f"· agreed throughout {t['agreed']}**", "",
+        f"· agreed throughout {t['agreed']} · new agreed {t['new-agreed']} "
+        f"· new wrong {t['new-wrong']}**", "",
+        "`new agreed` / `new wrong` are blocks the baseline never judged: there was no "
+        "earlier error to fix, so they are kept out of `fixed` and `still wrong`.", "",
+        f"{t['nonBlindCredited']} of the fixed / agreed / new-agreed rows rest on a truth "
+        "revised with `blind: no` - the edit that can ratify the tool.", "",
+        f"{t['nowUndelivered']} scored rows the baseline judged are reported by the "
+        "after-run as never having reached the model (`not-loaded` / `undelivered`). "
+        "They are scored on that answer, so a delivery change is counted here rather "
+        "than hidden in the agreement column.", "",
     ]
     out += _half_table(report, "skill", "Skill and command blocks",
                        "Governed by the invoked-skill ruling (RULINGS.md 4), which credits "
@@ -425,20 +505,17 @@ def render(report):
                        "time. This is the number the reliability claim is about.")
     out += [
         "## Per session", "",
-        "| session | scored | agreed before | agreed after | fixed | regressed | still wrong |",
-        "|---|---|---|---|---|---|---|",
+        TABLE_HEAD.format("session"), TABLE_RULE,
     ]
+    changed = report.get("inputChanged") or {}
     for name, s in sorted(report["bySession"].items()):
-        out.append(f"| {name} | {s['scored']} | {s['agreedBefore']} | {s['agreedAfter']} | "
-                   f"{s['fixed']} | {s['regressed']} | {s['still-wrong']} |")
-    out += ["", "## Per failure mechanism", "",
-            "| mechanism | scored | agreed before | agreed after | fixed | regressed | still wrong |",
-            "|---|---|---|---|---|---|---|"]
+        label = f"{name} (input changed after baseline)" if name in changed else name
+        out.append(_table_row(label, s))
+    out += ["", "## Per failure mechanism", "", TABLE_HEAD.format("mechanism"), TABLE_RULE]
     for name, s in sorted(report["byTag"].items()):
-        out.append(f"| {name} | {s['scored']} | {s['agreedBefore']} | {s['agreedAfter']} | "
-                   f"{s['fixed']} | {s['regressed']} | {s['still-wrong']} |")
-    out += ["", "## Regressed rows (release blockers)", ""]
-    reg = [r for r in report["rows"] if r["outcome"] == "regressed"]
+        out.append(_table_row(name, s))
+    out += ["", "## Release blockers (regressed and new-wrong rows)", ""]
+    reg = [r for r in report["rows"] if r["outcome"] in BLOCKING]
     out += [_row_line(r) for r in reg] or ["None."]
     out += ["", "## Rows that are still wrong", ""]
     sw = [r for r in report["rows"] if r["outcome"] == "still-wrong"]
@@ -457,6 +534,8 @@ def main():
     p.add_argument("--after-dir", type=Path, default=None)
     p.add_argument("--expected-dir", type=Path, default=None)
     p.add_argument("--out", type=Path, default=None, help="write the scorecard here too")
+    p.add_argument("--allow-partial", action="store_true",
+                   help="exit 0 even when some sessions have no baseline or after snapshot")
     args = p.parse_args()
     # Every session lands in `missing` when a whole tree is absent, and the
     # scorecard then renders zero rows and exits 0 - a clone would read that as
@@ -475,8 +554,13 @@ def main():
     if args.out:
         args.out.write_text(text, encoding="utf-8")
     print(text, end="")
-    if report["totals"]["regressed"]:
-        sys.exit(f"{report['totals']['regressed']} regressed verdict(s): release blocker")
+    blocked = blockers(report)
+    if blocked:
+        sys.exit(f"{len(blocked)} regressed or new-wrong verdict(s): release blocker")
+    if report["missing"] and not args.allow_partial:
+        sys.exit(f"{len(report['missing'])} session(s) not scored ("
+                 + ", ".join(report["missing"]) + "); pass --allow-partial to accept "
+                 "a scorecard over fewer sessions than the ground truth names")
 
 
 if __name__ == "__main__":

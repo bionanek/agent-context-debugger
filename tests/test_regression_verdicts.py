@@ -44,7 +44,8 @@ case no probe reaches does not belong here.
   `session_status_and_reason_describe_the_same_reality`.
 - **P5** `rule_checks.load_checks`: `elif bucket in ("hybrid", "judged"):` ->
   `elif False:`. A rule parked for a judge is reported as one that was
-  checked - all nine `f_eom` cases.
+  checked - all nine `f_eom` cases and both
+  `counter_anchor_eom_captured_output` cases.
 - **P6** `build_real_view._strip_table_rows`: `return text`. Table cells become
   commands again - `f_pathtable` `row_path_token`, `row_token` and
   `no_gh_activity`.
@@ -354,9 +355,20 @@ def test_f_pathtable_a_gh_command_with_no_prior_check_is_a_cited_violation():
 
 
 def test_f_pathtable_row_path_token_is_not_a_shell_command():
-    """`mkdir formic-x` is not evidence about a GitHub-account rule."""
-    cmds = set(mention_cmds(WORKED_MD, GH_RULE))
-    assert not ({"formic", "figma"} & cmds), sorted(cmds)
+    """`mkdir formic-x` is not evidence about a GitHub-account rule.
+
+    Exact on both halves: the block harvests no command at all, and a run whose
+    only call names a table row is a rule nothing triggered. A negation over
+    two names would pass with any third table cell harvested.
+    """
+    assert mention_cmds(WORKED_MD, GH_RULE) == []
+    v = compiled_verdict(GH_RULE,
+                         [user_text("make the dir", 1),
+                          bash("mkdir formic-x", 2),
+                          assistant_text("Done.", 3)],
+                         "make the dir")
+    assert v["ruleCheck"]["state"] == "not-exercised"
+    assert v["status"] == "dormant", v["reason"]
 
 
 # ---------- F-COMBINE: one mis-scored turn paints the session ----------
@@ -554,6 +566,8 @@ def test_counter_anchor_eom_captured_output_is_not_a_code_change(cmd):
               assistant_text("Build is green.", 3)]
     v = compiled_verdict(EOM_RULE, events, "check the build")
     assert v["status"] == "unused", v["reason"]
+    assert v["ruleCheck"]["state"] == "not-checkable"
+    assert [j["id"] for j in v["ruleCheck"]["judged"]] == ["closing-summary-shape"]
     assert "A rule can be followed in silence" in v["reason"]
 
 

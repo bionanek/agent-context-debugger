@@ -240,3 +240,37 @@ def test_query_dumps_are_written_and_describe_the_session(captured):
     m = _manifest(captured["snap_dir"])
     assert set(m["queries"]) == {"query/turns.txt", "query/blocks.txt",
                                  "query/verdicts.txt"}
+
+
+# ---------- what is frozen beside a rule doc, and inputs added after the bake ----------
+
+def test_only_the_checks_file_the_tool_reads_is_frozen(tmp_path):
+    """With both spellings beside a doc the tool reads the first one only.
+
+    Freezing the second too would put a file in the baseline that no bake ever
+    read, under a manifest claiming it is a judgement input.
+    """
+    doc = tmp_path / "CLAUDE.md"
+    doc.write_text("# r\n")
+    first = tmp_path / "CLAUDE.md.checks.json"
+    second = tmp_path / "CLAUDE.checks.json"
+    for p in (first, second):
+        p.write_text('{"source": "CLAUDE.md", "checks": []}')
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("")
+    paths = tb._loaded_inputs([str(doc)], tmp_path, transcript, "sid")
+    assert first in paths and second not in paths
+
+
+def test_verify_names_an_input_added_after_the_bake_as_the_reason(captured):
+    """A mismatch caused by a later-frozen input is not a broken snapshot."""
+    snap_dir = captured["snap_dir"]
+    m = _manifest(snap_dir)
+    m["payload"]["sha256"] = "0" * 64
+    m["addedAfterBake"] = ["Git/demo-project/CLAUDE.md.checks.json"]
+    (snap_dir / "manifest.json").write_text(json.dumps(m))
+    report = tb.verify_session(snap_dir, restore_root=captured["restore_root"])
+    differs = [p for p in report["problems"] if p.startswith("payload differs")]
+    assert len(differs) == 1
+    assert "added after the baseline was baked" in differs[0]
+    assert "Git/demo-project/CLAUDE.md.checks.json" in differs[0]

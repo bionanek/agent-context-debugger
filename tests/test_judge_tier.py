@@ -187,10 +187,13 @@ def test_a_verdict_without_a_citable_span_downgrades_to_unclear(tmp_path):
 
 
 def test_an_answer_outside_the_closed_set_is_not_an_answer(tmp_path):
+    """A reply nobody could read is a failed call, so the site reads as not
+    checked - never as a hard `unclear` about the code."""
     stub = Stub("Sure! This rule was definitely followed. Trust me.")
-    findings, _, _, _ = ask(hybrid(), wrote_catch(), stub, tmp_path)
-    assert [f["state"] for f in findings] == ["unclear"]
-    assert findings[0]["judgeVerdict"] == "unclear"
+    findings, ran, _, _ = ask(hybrid(), wrote_catch(), stub, tmp_path)
+    assert [f["state"] for f in findings] == ["note", "note"]
+    assert findings[0]["judgeVerdict"] == "unavailable"
+    assert ran == []
 
 
 def test_a_backend_that_cannot_be_reached_reads_as_unchecked(tmp_path):
@@ -199,7 +202,7 @@ def test_a_backend_that_cannot_be_reached_reads_as_unchecked(tmp_path):
     def broken(prompt, model):
         raise judge_tier.JudgeError("boom")
     findings, ran, in_scope, j = ask(hybrid(), wrote_catch(), broken, tmp_path)
-    assert [f["state"] for f in findings] == ["note"]
+    assert [f["state"] for f in findings] == ["note", "note"]
     assert findings[0]["judgeVerdict"] == "unavailable"
     assert ran == [] and in_scope is False
     assert j.errors and "boom" in j.errors[0]
@@ -210,9 +213,10 @@ def test_an_exhausted_budget_reads_as_unchecked_not_as_a_doubt(tmp_path):
     j = judge(stub, tmp_path, max_calls=0)
     findings, ran, in_scope, notes = rc.judge_records(
         [hybrid()], corpus_for(wrote_catch()), j)
-    assert [f["state"] for f in findings] == ["note"]
+    assert [f["state"] for f in findings] == ["note", "note"]
     assert ran == [] and in_scope is False
-    assert notes["catch-must-handle"] == rc.JUDGE_NOTHING_TO_ASK
+    # Not "nothing to ask": there was a site, and the budget left it unasked.
+    assert notes["catch-must-handle"] == rc.judge_unexamined_note(1, 1)
 
 
 def test_a_cache_that_cannot_be_read_is_never_written_over(tmp_path):
@@ -311,7 +315,7 @@ def test_the_cache_file_is_local_and_human_readable(tmp_path):
     assert "\n" in text and text.startswith("{")
     key = next(iter(data["verdicts"]))
     parts = key.split("|")
-    assert len(parts) == 3 and parts[2] == "test-model"
+    assert len(parts) == 4 and parts[3] == "test-model"
     entry = data["verdicts"][key]
     assert entry["verdict"] == "compliant" and entry["model"] == "test-model"
 
@@ -608,3 +612,93 @@ def test_a_quote_from_outside_the_candidate_is_not_a_citation(tmp_path):
     findings, _, _, _ = ask(hybrid(), wrote_catch(), stub, tmp_path)
     assert [f["state"] for f in findings] == ["unclear"]
     assert rc.JUDGE_NO_SPAN in findings[0]["message"]
+
+
+# ---------- review round: cache identity, unexamined sites, unreadable replies ----------
+
+def test_two_questions_from_one_rule_section_are_each_asked(tmp_path):
+    """Records compiled from one section share a rule key and, over the same
+    file, identical evidence. Keyed on those alone, the second question was
+    answered from the cache with the first one's verdict."""
+    key = rc.rule_key("Sec", "whole section text")
+    a = semantic(id="a", rule_ref="Sec", rule_key=key, statement="Did it print?")
+    b = semantic(id="b", rule_ref="Sec", rule_key=key, statement="Did it log to a file?")
+    stub = Stub({"verdict": "violated", "evidence": "go();", "reason": "x"},
+                {"verdict": "compliant", "evidence": "", "reason": "y"})
+    j = judge(stub, tmp_path)
+    findings, _, _, _ = rc.judge_records([a, b], corpus_for(wrote_catch()), j)
+    assert j.calls == 2
+    assert {f["checkId"]: f["judgeVerdict"] for f in findings} == {"a": "violated",
+                                                                   "b": "compliant"}
+
+
+def test_an_unchanged_question_is_answered_from_the_cache(tmp_path):
+    stub = Stub({"verdict": "compliant", "evidence": "", "reason": "fine"})
+    rc.judge_records([semantic()], corpus_for(wrote_catch()), judge(stub, tmp_path))
+    j = judge(stub, tmp_path)
+    rc.judge_records([semantic()], corpus_for(wrote_catch()), j)
+    assert j.calls == 0 and j.hits == 1
+
+
+def many_catches(n):
+    return "".join(f"try {{\n  f{i}();\n}} catch (e) {{\n  log({i});\n}}\n" for i in range(n))
+
+
+def hybrid_block(tmp_path):
+    src = tmp_path / "RULES.md"
+    src.write_text("## Error handling\n\nAlways implement the catch body.\n")
+    (tmp_path / "RULES.md.checks.json").write_text(json.dumps(doc(checks=[hybrid()])))
+    rc.checks_for_doc.cache_clear()
+    return rc.checks_for_doc(str(src)), brv.parse_claude_md(src.read_text())[0]
+
+
+def test_sites_past_the_candidate_limit_keep_the_block_from_reading_clear(tmp_path):
+    """Twenty of twenty-six sites answered is not the rule checked: the six
+    nobody asked about could hold the violation."""
+    loaded, block = hybrid_block(tmp_path)
+    n = rc.JUDGE_CANDIDATE_LIMIT + 6
+    events = [user_text("go", 1), write_call("/repo/src/a.ts", many_catches(n), 2)]
+    stub = Stub({"verdict": "compliant", "evidence": "", "reason": "handled"})
+    j = judge(stub, tmp_path)
+    out = rc.check_block(block, loaded, corpus_for(events), judge=j)
+    assert j.calls == rc.JUDGE_CANDIDATE_LIMIT
+    assert out["state"] == "not-checkable"
+    assert any("6 of 26" in f["message"] for f in out["findings"])
+
+
+def test_a_budget_that_runs_out_mid_record_keeps_the_block_from_reading_clear(tmp_path):
+    loaded, block = hybrid_block(tmp_path)
+    events = [user_text("go", 1), write_call("/repo/src/a.ts", many_catches(3), 2)]
+    stub = Stub({"verdict": "compliant", "evidence": "", "reason": "handled"})
+    out = rc.check_block(block, loaded, corpus_for(events),
+                         judge=judge(stub, tmp_path, max_calls=1))
+    assert out["state"] == "not-checkable"
+    assert any("2 of 3" in f["message"] for f in out["findings"])
+
+
+def test_an_unreadable_reply_reads_as_unchecked_not_as_a_doubt(tmp_path):
+    j = judge(Stub("blah"), tmp_path)
+    answer = j.ask(judge_tier.judge_request("k", "s", [], [], [("a", "b")], "test-model"))
+    assert answer.get("unavailable") is True
+    findings, ran, _, _ = rc.judge_records([hybrid()], corpus_for(wrote_catch()), j)
+    assert ran == []
+    assert all(f["state"] != "unclear" for f in findings)
+
+
+def test_a_semantic_record_nobody_answered_does_not_claim_it_was_judged(tmp_path):
+    def broken(prompt, model):
+        raise judge_tier.JudgeError("boom")
+    _, _, _, notes = rc.judge_records([semantic()], corpus_for(wrote_catch()),
+                                      judge(broken, tmp_path))
+    assert notes["summary-is-plain"] != rc.JUDGE_ADVISORY_NOTE
+
+
+def test_a_concurrent_runs_verdicts_survive_our_save(tmp_path):
+    """Two runs load the cache at start; the one that saves last must not erase
+    what the other paid for."""
+    stub = Stub({"verdict": "compliant", "evidence": "", "reason": "fine"})
+    first, second = judge(stub, tmp_path), judge(stub, tmp_path)
+    first.ask(judge_tier.judge_request("k1", "s", [], [], [("a", "1")], "test-model"))
+    second.ask(judge_tier.judge_request("k2", "s", [], [], [("a", "2")], "test-model"))
+    keys = json.loads(cache_file(tmp_path).read_text())["verdicts"]
+    assert {k.split("|")[0] for k in keys} == {"k1", "k2"}

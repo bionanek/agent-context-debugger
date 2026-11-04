@@ -52,6 +52,8 @@ def freeze_one(src, snap, key):
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(raw)
     manifest = tb._read_manifest(snap)
+    if "payload" in manifest:
+        manifest["addedAfterBake"] = sorted(set(tb.inputs_added_after_bake(manifest)) | {key})
     entry = {"stored": key, "key": key, "origin": str(src),
              "sha256": tb.sha256(raw), "bytes": len(raw), "gz": False}
     inputs = [e for e in manifest.get("inputs", []) if e.get("key") != key]

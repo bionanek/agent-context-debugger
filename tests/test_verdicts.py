@@ -180,9 +180,19 @@ SHARED_PARAGRAPH = ("Always prefer the simplest solution that could possibly wor
                     "and never introduce an abstraction nobody asked for today.")
 
 
-def dup_files(extra_a="", extra_b=""):
-    a_md = f"## Simplicity\n\n{SHARED_PARAGRAPH}\n{extra_a}\n"
-    b_md = f"## Simplicity again\n\n{SHARED_PARAGRAPH}\n{extra_b}\n"
+def assessed(files, trace):
+    """Blocks carry their verdict by the time duplicates are computed."""
+    trace["lexical_bg"] = brv.lexical.build_background(files, trace["query_segments"])
+    for f in files:
+        for blk in f["blocks"]:
+            v = brv.assess_block(blk, f, trace)
+            blk["status"], blk["evidenceLabel"] = v["status"], v.get("evidenceLabel")
+    return files
+
+
+def dup_files(extra_a="", extra_b="", shared=SHARED_PARAGRAPH):
+    a_md = f"## Simplicity\n\n{shared}\n{extra_a}\n"
+    b_md = f"## Simplicity again\n\n{shared}\n{extra_b}\n"
     out = []
     for path, md in (("A.md", a_md), ("B.md", b_md)):
         blocks = brv.parse_claude_md(md)
@@ -196,23 +206,28 @@ def dup_files(extra_a="", extra_b=""):
 def test_weak_only_duplicate_pair_is_redundant():
     """A never-fired negative rule plus a bare command mention is not usage."""
     events = [user_text("unrelated work", 1), bash("ls -la", 2)]
-    pairs = brv.compute_duplicates(dup_files(extra_a="Never `rimraf` anything."),
-                                   trace_for(events, "unrelated work"))
+    pairs = brv.compute_duplicates(assessed(dup_files(extra_a="Never `rimraf` anything."), trace_for(events, "unrelated work")))
     assert pairs and pairs[0]["classification"] == "redundant"
 
 
 def test_duplicate_pair_with_a_fired_predicate_is_referenced():
     events = [user_slash("graphify", "it", 1), bash("ls -la", 2)]
-    pairs = brv.compute_duplicates(dup_files(extra_a="Trigger: `/graphify`"),
-                                   trace_for(events, brv.first_real_user_prompt(events)))
+    pairs = brv.compute_duplicates(assessed(dup_files(extra_a="Trigger: `/graphify`"), trace_for(events, brv.first_real_user_prompt(events))))
     assert pairs and pairs[0]["classification"] == "referenced"
 
 
-def test_duplicate_pair_with_a_strong_topical_reference_is_referenced():
-    events = [user_text("clean it up", 1),
-              assistant_text("I'll keep the simplest solution and avoid any "
-                             "abstraction nobody asked for.", 2)]
-    pairs = brv.compute_duplicates(dup_files(), trace_for(events, "clean it up"))
+HYDRATION_PARAGRAPH = ("Rehydrate the persisted zustand slice through the migration "
+                       "shim before any hydration guard rejects a stale snapshot, "
+                       "and quarantine tombstoned records instead of dropping them.")
+
+
+def test_duplicate_pair_whose_text_the_session_quoted_is_referenced():
+    events = [user_text("fix hydration", 1),
+              assistant_text("Per the rule: rehydrate the persisted zustand slice "
+                             "through the migration shim before any hydration guard "
+                             "rejects a stale snapshot.", 2)]
+    pairs = brv.compute_duplicates(assessed(dup_files(shared=HYDRATION_PARAGRAPH),
+                                            trace_for(events, "fix hydration")))
     assert pairs and pairs[0]["classification"] == "referenced"
 
 
@@ -236,8 +251,7 @@ def phantom_files(*names):
 def test_listing_only_phantoms_are_not_compared_to_each_other():
     """Their shared text is boilerplate this tool wrote, not context that was sent."""
     events = [user_text("unrelated work", 1)]
-    pairs = brv.compute_duplicates(phantom_files("alpha", "beta", "gamma"),
-                                   trace_for(events, "unrelated work"))
+    pairs = brv.compute_duplicates(phantom_files("alpha", "beta", "gamma"))
     assert pairs == []
 
 
@@ -245,7 +259,7 @@ def test_phantom_boilerplate_does_not_bury_a_real_duplicate():
     events = [user_text("unrelated work", 1), bash("ls -la", 2)]
     files = dup_files(extra_a="Never `rimraf` anything.") + phantom_files(*(
         f"skill-{i}" for i in range(8)))
-    pairs = brv.compute_duplicates(files, trace_for(events, "unrelated work"))
+    pairs = brv.compute_duplicates(assessed(files, trace_for(events, "unrelated work")))
     assert len(pairs) == 1
     assert pairs[0]["classification"] == "redundant"
 

@@ -128,6 +128,24 @@ def test_a_block_the_after_run_no_longer_judges_counts_as_absent_not_agreement(t
     assert report["totals"]["absentAfter"] == 1
 
 
+def test_a_block_the_after_run_reports_undelivered_is_scored_on_that_answer(tmp_path):
+    """`not-loaded` is the tool's answer about a block, not silence, and the
+    totals count the delivery change so it is not hidden in `agreed`."""
+    root = _triple_files(tmp_path)
+    after = root / "after" / "proj" / "synth" / "payload.json"
+    payload = json.loads(after.read_text())
+    for b in payload["perSession"]["synthetic-session"]["contextFiles"][0]["blocks"]:
+        if b["id"] in ("agreed-quiet", "agreed-green"):
+            b["status"] = "not-loaded"
+    after.write_text(json.dumps(payload), encoding="utf-8")
+    report = compare.compare_all(root / "baseline", root / "after", root / "expected")
+    quiet = next(r for r in report["rows"] if r["id"] == "agreed-quiet")
+    green = next(r for r in report["rows"] if r["id"] == "agreed-green")
+    assert (quiet["after"], quiet["outcome"]) == ("not-loaded", "agreed")
+    assert (green["afterError"], green["outcome"]) == ("missed-compliance", "regressed")
+    assert report["totals"]["nowUndelivered"] == 2
+
+
 def test_a_block_no_ground_truth_covers_is_reported_as_outside_the_gate(tmp_path):
     """A green the after-run invented must not escape scoring in silence.
 
@@ -366,3 +384,186 @@ def test_the_two_halves_are_tallied_separately(tmp_path):
     assert report["byHalf"]["rule-document"]["fixed"] == 1
     text = "\n".join(compare.render(report))
     assert "## Skill and command blocks" in text and "## Rule-document blocks" in text
+
+
+# ---------- a block the baseline never judged, and truth revised with sight ----------
+
+def _two_tree_files(tmp_path, rows, baseline_manifest=None):
+    """rows: (block, truth, before status or None for absent, after status or None)."""
+    sid = "s"
+    exp = tmp_path / "expected" / "proj" / "synth"
+    exp.mkdir(parents=True)
+    (exp / "expected.md").write_text(
+        _expected_with_header([(b, t, "-", "ev") for b, t, _, _ in rows]),
+        encoding="utf-8")
+    for tree, idx in (("baseline", 2), ("after", 3)):
+        d = tmp_path / tree / "proj" / "synth"
+        d.mkdir(parents=True)
+        manifest = {"sessionId": sid, "project": "proj"}
+        if tree == "baseline" and baseline_manifest:
+            manifest.update(baseline_manifest)
+        (d / "manifest.json").write_text(json.dumps(manifest))
+        payload = _payload(sid, {r[0]: r[idx] for r in rows if r[idx] is not None})
+        (d / "payload.json").write_text(json.dumps(payload), encoding="utf-8")
+    return tmp_path
+
+
+def _report(root):
+    return compare.compare_all(root / "baseline", root / "after", root / "expected")
+
+
+def test_a_block_the_baseline_never_judged_gets_its_own_outcome(tmp_path):
+    """Absent before is not an error the after-run fixed or kept.
+
+    Filed as `fixed` it inflates the improvement; filed as `still-wrong` a new
+    false green never reaches the release gate.
+    """
+    root = _two_tree_files(tmp_path, [
+        ("new-right", "no-hard-verdict", None, "dormant"),
+        ("new-green", "no-hard-verdict", None, "used"),
+    ])
+    report = _report(root)
+    got = {r["id"]: r["outcome"] for r in report["rows"]}
+    assert got == {"new-right": "new-agreed", "new-green": "new-wrong"}
+    t = report["totals"]
+    assert (t["new-agreed"], t["new-wrong"], t["fixed"], t["still-wrong"]) == (1, 1, 0, 0)
+
+
+def test_a_new_wrong_row_is_a_release_blocker(tmp_path):
+    root = _two_tree_files(tmp_path, [("new-green", "no-hard-verdict", None, "used")])
+    report = _report(root)
+    assert compare.blockers(report) == ["proj/synth new-green"]
+    text = "\n".join(compare.render(report))
+    blockers_section = text.split("## Release blockers")[1].split("\n## ")[0]
+    assert "new-green" in blockers_section
+    assert "new agreed 0" in text and "new wrong 1" in text
+
+
+def test_rows_resting_on_a_non_blind_revision_are_counted(tmp_path):
+    """A correction made while looking at the answer can ratify the tool."""
+    root = _two_tree_files(tmp_path, [
+        ("fixed-seen", "used", "unused", "used"),
+        ("agreed-seen", "used", "used", "used"),
+        ("new-seen", "used", None, "used"),
+        ("fixed-blind", "used", "unused", "used"),
+        ("wrong-seen", "used", "unused", "unused"),
+    ])
+    exp = root / "expected" / "proj" / "synth" / "expected.md"
+    lines = exp.read_text().splitlines()
+    out = []
+    for line in lines:
+        out.append(line)
+        for bid, blind in (("fixed-seen", "no"), ("agreed-seen", "no"),
+                           ("new-seen", "no"), ("fixed-blind", "yes"),
+                           ("wrong-seen", "no")):
+            if line.startswith(f"- {bid} ::"):
+                out += ["  revised: re-derived", f"  blind: {blind}"]
+    exp.write_text("\n".join(out) + "\n", encoding="utf-8")
+    report = _report(root)
+    assert report["totals"]["nonBlindCredited"] == 3
+    text = "\n".join(compare.render(report))
+    assert "3 of the fixed / agreed / new-agreed rows rest on a truth revised with `blind: no`" in text
+
+
+def test_a_repeated_block_id_is_refused(tmp_path):
+    """The second line would silently overwrite the first's truth."""
+    path = tmp_path / "expected.md"
+    path.write_text(_expected_with_header([("b1", "used", "-", "a"),
+                                           ("b1", "no-hard-verdict", "-", "b")]),
+                    encoding="utf-8")
+    with pytest.raises(ValueError) as e:
+        compare.load_expected(path)
+    assert "b1" in str(e.value)
+
+
+def test_a_note_in_a_later_prose_section_does_not_attach_to_the_last_row(tmp_path):
+    path = tmp_path / "expected.md"
+    path.write_text(_expected_with_header([("b1", "used", "-", "cited")])
+                    + "\n## Notes\n\naccept: this is prose about something else\n",
+                    encoding="utf-8")
+    assert compare.load_expected(path)["b1"]["accept"] is None
+
+
+def test_an_indented_note_still_attaches_after_a_blank_line(tmp_path):
+    path = tmp_path / "expected.md"
+    path.write_text(_expected_with_header([("b1", "used", "-", "cited")])
+                    + "\n  accept: known limit\n", encoding="utf-8")
+    assert compare.load_expected(path)["b1"]["accept"] == "known limit"
+
+
+# ---------- an input frozen into the baseline after its payload was baked ----------
+
+def test_an_input_added_after_the_bake_is_named_on_the_session_and_its_moved_rows(tmp_path):
+    """The after-run reads the added file and the baseline payload never did.
+
+    A verdict that moved there may have moved because of the input, so the
+    header's "same inputs" claim has to stop being made about that session.
+    """
+    root = _two_tree_files(tmp_path, [
+        ("moved", "used", "unused", "used"),
+        ("still", "used", "used", "used"),
+    ], baseline_manifest={"payload": {"sha256": "x"},
+                          "addedAfterBake": ["home/CLAUDE.md.checks.json"]})
+    report = _report(root)
+    assert report["inputChanged"] == {"proj/synth": ["home/CLAUDE.md.checks.json"]}
+    flags = {r["id"]: r["inputChanged"] for r in report["rows"]}
+    assert flags == {"moved": True, "still": False}
+    text = "\n".join(compare.render(report))
+    assert "input changed after baseline" in text
+    per_session = text.split("## Per session")[1].split("\n## ")[0]
+    assert "proj/synth (input changed after baseline)" in per_session
+
+
+def test_a_legacy_manifest_is_read_off_the_origin_freeze_checks_wrote(tmp_path):
+    """Manifests frozen before `addedAfterBake` existed still say so.
+
+    `capture` rewrites the manifest and bakes in one call, so an entry whose
+    origin is the committed checks tree can only have been added afterwards.
+    """
+    root = _two_tree_files(tmp_path, [("moved", "used", "unused", "used")],
+                           baseline_manifest={"payload": {"sha256": "x"}, "inputs": [
+                               {"key": "home/CLAUDE.md", "origin": "/h/CLAUDE.md"},
+                               {"key": "home/CLAUDE.md.checks.json",
+                                "origin": "/x/repo/snapshots/checks/proj/synth/home/"
+                                          "CLAUDE.md.checks.json"}]})
+    assert _report(root)["inputChanged"] == {"proj/synth": ["home/CLAUDE.md.checks.json"]}
+
+
+def test_a_session_with_unchanged_inputs_keeps_the_same_inputs_claim(tmp_path):
+    root = _triple_files(tmp_path)
+    report = compare.compare_all(root / "baseline", root / "after", root / "expected")
+    assert report["inputChanged"] == {}
+    assert "input changed after baseline" not in "\n".join(compare.render(report))
+
+
+# ---------- exit status ----------
+
+def _run_main(monkeypatch, root, *extra):
+    monkeypatch.setattr(sys, "argv", ["compare.py", "--baseline-dir", str(root / "baseline"),
+                                      "--after-dir", str(root / "after"),
+                                      "--expected-dir", str(root / "expected"), *extra])
+    compare.main()
+
+
+def _clean_two_sessions(tmp_path):
+    root = _two_tree_files(tmp_path, [("ok", "used", "used", "used")])
+    second = root / "expected" / "proj" / "other"
+    second.mkdir(parents=True)
+    (second / "expected.md").write_text(
+        (root / "expected" / "proj" / "synth" / "expected.md").read_text())
+    return root
+
+
+def test_a_partial_corpus_exits_non_zero(tmp_path, monkeypatch, capsys):
+    """A gate scored over fewer sessions than it names reports a number it did not earn."""
+    root = _clean_two_sessions(tmp_path)
+    with pytest.raises(SystemExit) as e:
+        _run_main(monkeypatch, root)
+    assert e.value.code not in (0, None)
+    assert "proj/other" in str(e.value.code)
+
+
+def test_a_partial_corpus_passes_only_when_allowed_explicitly(tmp_path, monkeypatch, capsys):
+    root = _clean_two_sessions(tmp_path)
+    _run_main(monkeypatch, root, "--allow-partial")
+    assert "proj/other" in capsys.readouterr().out

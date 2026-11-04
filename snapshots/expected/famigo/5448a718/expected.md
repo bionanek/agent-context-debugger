@@ -122,9 +122,9 @@ Format: `- <block id> :: <truth> :: <mechanism tag or ->  :: <evidence>`
 - 8a718-home-claude-skills-commit-skill-md-1-golden-rules :: no-hard-verdict :: - :: the skill ran (`/commit` typed at event 682), but nothing in the run cites this step
   revised: ruling 4 changed - an invocation records that the document ran, not that this step was carried out, so the identity block keeps the green and every other block has to earn one. This row's only evidence was the invocation.
   blind: no
-- 8a718-home-claude-skills-commit-skill-md-2-step-1-match-the-github-account :: no-hard-verdict :: - :: the skill ran (`/commit` typed at event 682), but nothing in the run cites this step
-  revised: ruling 4 changed - an invocation records that the document ran, not that this step was carried out, so the identity block keeps the green and every other block has to earn one. This row's only evidence was the invocation.
-  blind: no
+- 8a718-home-claude-skills-commit-skill-md-2-step-1-match-the-github-account :: no-hard-verdict :: - :: `Skill commit` at 685; `gh auth status` at 691 then `gh auth switch -u bionanek` at 696 - but the frozen account table has no famigo row, so the step as frozen says skip, and the delivered CLAUDE.md is not recoverable
+  revised: re-derived blind after inline-code commands became echo evidence: a verdict-ground-truth pass read only RULINGS.md, the frozen transcript and the frozen documents. The analyst read `used` and called it borderline (was the switch required?), so the strict reading is kept
+  blind: yes
 - 8a718-home-claude-skills-commit-skill-md-3-step-2-learn-the-commit-convention :: no-hard-verdict :: - :: the skill ran (`/commit` typed at event 682), but nothing in the run cites this step
   revised: ruling 4 changed - an invocation records that the document ran, not that this step was carried out, so the identity block keeps the green and every other block has to earn one. This row's only evidence was the invocation.
   blind: no
@@ -134,9 +134,9 @@ Format: `- <block id> :: <truth> :: <mechanism tag or ->  :: <evidence>`
 - 8a718-home-claude-skills-commit-skill-md-5-step-4-run-tests-lints :: no-hard-verdict :: - :: the skill ran (`/commit` typed at event 682), but nothing in the run cites this step
   revised: ruling 4 changed - an invocation records that the document ran, not that this step was carried out, so the identity block keeps the green and every other block has to earn one. This row's only evidence was the invocation.
   blind: no
-- 8a718-home-claude-skills-commit-skill-md-6-step-5-stage-and-commit :: no-hard-verdict :: - :: the skill ran (`/commit` typed at event 682), but nothing in the run cites this step
-  revised: ruling 4 changed - an invocation records that the document ran, not that this step was carried out, so the identity block keeps the green and every other block has to earn one. This row's only evidence was the invocation.
-  blind: no
+- 8a718-home-claude-skills-commit-skill-md-6-step-5-stage-and-commit :: used :: - :: `Skill commit` at 685; selective `git add` at 710, `git diff --cached --name-only` at 714, `git commit` at 716 with no trailer, two more add+commit pairs at 718-724
+  revised: re-derived blind after inline-code commands became echo evidence: a verdict-ground-truth pass read only RULINGS.md, the frozen transcript and the frozen documents; not borderline
+  blind: yes
 - 8a718-home-claude-skills-commit-skill-md-7-step-6-report :: no-hard-verdict :: - :: the skill ran (`/commit` typed at event 682), but nothing in the run cites this step
   revised: ruling 4 changed - an invocation records that the document ran, not that this step was carried out, so the identity block keeps the green and every other block has to earn one. This row's only evidence was the invocation.
   blind: no
@@ -144,24 +144,24 @@ Format: `- <block id> :: <truth> :: <mechanism tag or ->  :: <evidence>`
 - git-famigo-claude-skills-review-skill-md-1-role :: no-hard-verdict :: - :: the skill ran (`/review` typed at event 583), but nothing in the run cites this step
   revised: ruling 4 changed - an invocation records that the document ran, not that this step was carried out, so the identity block keeps the green and every other block has to earn one. This row's only evidence was the invocation.
   blind: no
-- git-famigo-claude-skills-review-skill-md-2-step-1-load-context :: used :: - :: the step says to read `CLAUDE.md` and, by scope, the `AGENT.md` files; call 167 (event 597, inside the `/review` turn) runs `sed -n '65,72p;95,100p' AGENT.md` and greps `../backend/AGENT.md`, and call 179 greps `CLAUDE.md`
-  revised: the read join: this step's evidence is the run reading the files it names, which nothing recorded until now. Derived from the frozen action list after the after payload had been read, so not blind.
-  blind: no
+- git-famigo-claude-skills-review-skill-md-2-step-1-load-context :: no-hard-verdict :: - :: the window (`/review` at event 583 to `/sync-agent-docs` at 636) never reads root `CLAUDE.md` or `backend/API_CONTRACT.md`; the `AGENT.md` reads in it (calls 164, 167, 170) are keyword greps and slices aimed at staleness, and they are Step 6's evidence too, so one read serves several steps and credits none
+  revised: re-derived blind (2026-11-04) by a verdict-ground-truth pass given only RULINGS.md, the frozen transcript and the frozen documents; borderline: a lenient reader credits calls 164 and 167 as loading the scope's AGENT.md files; strict reading kept
+  blind: yes
 - git-famigo-claude-skills-review-skill-md-3-step-2-confirm-understanding :: no-hard-verdict :: - :: the skill ran (`/review` typed at event 583), but nothing in the run cites this step
   revised: ruling 4 changed - an invocation records that the document ran, not that this step was carried out, so the identity block keeps the green and every other block has to earn one. This row's only evidence was the invocation.
   blind: no
 - git-famigo-claude-skills-review-skill-md-4-step-3-run-checks-before-review :: used :: - :: the three commands this step spells out ran verbatim - `yarn type-check` 18x, `yarn lint` 16x, `yarn test` 51x
   revised: ruling 4's change dropped this row to no-hard-verdict on the old evidence line, which named only the invocation. The step's own fenced commands did run, which is evidence of its own, so the row is `used` again on that ground rather than on the invocation. Found by reading the after payload, then confirmed against the frozen SKILL.md and the tool log.
   blind: no
-- git-famigo-claude-skills-review-skill-md-5-step-4-review :: used :: - :: the step's item 1 asks whether the implementation aligns with `API_CONTRACT.md` and `AGENT.md`, and item 7 asks about swallowed errors: call 167 (event 597) reads `AGENT.md` and `../backend/AGENT.md`, call 76 reads `API_CONTRACT.md`, and call 166 (event 596) prints the `catch (err)` body of `hooks/useUserLocation.ts`
-  revised: the read join: this step's evidence is the run reading the files it names, which nothing recorded until now. Derived from the frozen action list after the after payload had been read, so not blind.
-  blind: no
+- git-famigo-claude-skills-review-skill-md-5-step-4-review :: no-hard-verdict :: - :: `API_CONTRACT.md` is not read inside the window; the `AGENT.md` reads and writes there are Step 6's; call 166 prints the `catch (err)` body of `hooks/useUserLocation.ts`, a file the step does not name, so nothing ruling 4 accepts ties the run to this step
+  revised: re-derived blind (2026-11-04) by a verdict-ground-truth pass given only RULINGS.md, the frozen transcript and the frozen documents; borderline: call 166 performs item 7 almost literally; strict reading kept
+  blind: yes
 - git-famigo-claude-skills-review-skill-md-6-step-5-apply-fixes :: no-hard-verdict :: - :: the skill ran (`/review` typed at event 583), but nothing in the run cites this step
   revised: ruling 4 changed - an invocation records that the document ran, not that this step was carried out, so the identity block keeps the green and every other block has to earn one. This row's only evidence was the invocation.
   blind: no
-- git-famigo-claude-skills-review-skill-md-7-step-6-verify-documentation :: used :: - :: the step names `backend/AGENT.md`, `mobile/AGENT.md` and `README.md` and asks whether they are complete: calls 164, 167 and 170 grep `AGENT.md` for the entries the change would need, and calls 171 and 172 apply the doc fix
-  revised: the read join: this step's evidence is the run reading the files it names, which nothing recorded until now. Derived from the frozen action list after the after payload had been read, so not blind.
-  blind: no
+- git-famigo-claude-skills-review-skill-md-7-step-6-verify-documentation :: used :: - :: inside the `/review` window call 171 writes `mobile/AGENT.md` and call 172 writes `mobile/AGENT.md` and `backend/AGENT.md` (the doc fix the step asks for), and call 173 checks `.env.example`
+  revised: re-derived blind (2026-11-04) by a verdict-ground-truth pass given only RULINGS.md, the frozen transcript and the frozen documents; not borderline
+  blind: yes
 - git-famigo-claude-skills-review-skill-md-8-step-7-mark-task-done :: no-hard-verdict :: - :: the skill ran (`/review` typed at event 583), but nothing in the run cites this step
   revised: ruling 4 changed - an invocation records that the document ran, not that this step was carried out, so the identity block keeps the green and every other block has to earn one. This row's only evidence was the invocation.
   blind: no

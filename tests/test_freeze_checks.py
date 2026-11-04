@@ -67,3 +67,43 @@ def test_an_edited_source_is_reported_stale_rather_than_frozen(tmp_path):
     assert fc.pending(checks, baseline)[0][3] is True
     src.write_text('{"source": "x", "checks": [], "note": "drifted"}', encoding="utf-8")
     assert fc.pending(checks, baseline)[0][3] is False
+
+
+def _with_payload(snap, **extra):
+    m = json.loads((snap / "manifest.json").read_text())
+    m["payload"] = {"file": "payload.json.gz", "sha256": "1" * 64, "bytes": 1}
+    m.update(extra)
+    (snap / "manifest.json").write_text(json.dumps(m))
+
+
+def test_freezing_into_an_already_baked_snapshot_records_it_as_added_after(tmp_path):
+    """The baseline payload never read this file, and the scorecard must know."""
+    checks, baseline, src, snap = _corpus(tmp_path)
+    _with_payload(snap)
+    fc.freeze_one(src, snap, "home/CLAUDE.md.checks.json")
+    m = json.loads((snap / "manifest.json").read_text())
+    assert m["addedAfterBake"] == ["home/CLAUDE.md.checks.json"]
+    assert tb.inputs_added_after_bake(m) == ["home/CLAUDE.md.checks.json"]
+
+
+def test_freezing_before_any_bake_records_nothing_as_added_after(tmp_path):
+    checks, baseline, src, snap = _corpus(tmp_path)
+    fc.freeze_one(src, snap, "home/CLAUDE.md.checks.json")
+    m = json.loads((snap / "manifest.json").read_text())
+    assert "addedAfterBake" not in m
+    assert tb.inputs_added_after_bake(m) == []
+
+
+def test_a_legacy_entry_is_carried_into_the_new_record(tmp_path):
+    """A manifest frozen before the field existed must not lose its earlier add."""
+    checks, baseline, src, snap = _corpus(tmp_path)
+    m = json.loads((snap / "manifest.json").read_text())
+    m["inputs"].append({"key": "home/AGENTS.md.checks.json", "stored": "home/AGENTS.md.checks.json",
+                        "origin": str(tmp_path / "repo" / "snapshots" / "checks" / "proj" /
+                                      "abc12345" / "home" / "AGENTS.md.checks.json"),
+                        "sha256": "0" * 64, "bytes": 1, "gz": False})
+    (snap / "manifest.json").write_text(json.dumps(m))
+    _with_payload(snap)
+    fc.freeze_one(src, snap, "home/CLAUDE.md.checks.json")
+    m = json.loads((snap / "manifest.json").read_text())
+    assert m["addedAfterBake"] == ["home/AGENTS.md.checks.json", "home/CLAUDE.md.checks.json"]

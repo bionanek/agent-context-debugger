@@ -407,3 +407,39 @@ def test_an_overruled_aggregate_reason_keeps_its_text_source_clause(
     assert b["reason"].startswith("Combined from")
     assert b["textSource"] == "disk"
     assert b["reason"].endswith(brv.DISK_TEXT_CAVEAT.strip())
+
+
+def test_stale_text_is_not_compared_with_the_run_by_wording(monkeypatch):
+    """A coincidental word match with text the model never saw is about nothing."""
+    def boom(*a, **k):
+        raise AssertionError("lexical tier consulted on stale text")
+    monkeypatch.setattr(brv, "_lexical_result", boom)
+    block = brv.parse_claude_md("## Style\n\nPrefer terse distinctive phrasing.\n")[0]
+    file = {"loaded": True, "kind": "project", "path": "CLAUDE.md",
+            "abs_path": "/tmp/CLAUDE.md", "text_source": "stale",
+            "text_note": "The file no longer matches what was loaded.", "blocks": [block]}
+    events = [user_text("q", 0)]
+    trace = brv.build_trace(events, [], brv.assistant_text_segments(events), "q")
+    v = brv.assess_block(block, file, trace)
+    assert v["status"] == "unused"
+    assert "evidenceLabel" not in v and "lexical" not in v
+    assert v["reason"].endswith("The file no longer matches what was loaded.")
+
+
+def test_a_rule_check_verdict_keeps_the_text_caveat_and_drops_the_lexical_label(
+        monkeypatch):
+    monkeypatch.setattr(brv, "_rule_check_for", lambda *a: {
+        "source": "checks-file", "state": "violated", "notCheckable": [],
+        "findings": [{"state": "violated", "confidence": "high", "checkId": "c1",
+                      "path": "a.py", "line": 3, "match": "bad()", "message": "",
+                      "ruleText": "never bad"}]})
+    block = brv.parse_claude_md("## Style\n\nNever call bad in production code.\n")[0]
+    file = {"loaded": True, "kind": "project", "path": "CLAUDE.md",
+            "abs_path": "/tmp/CLAUDE.md", "text_source": "disk", "blocks": [block]}
+    events = [user_text("q", 0)]
+    trace = brv.build_trace(events, [], brv.assistant_text_segments(events), "q")
+    trace["lexical_bg"] = brv.lexical.build_background([file], trace["query_segments"])
+    v = brv.assess_block(block, file, trace)
+    assert v["status"] == "ignored"
+    assert v["reason"].endswith(brv.DISK_TEXT_CAVEAT)
+    assert "evidenceLabel" not in v and "lexical" not in v

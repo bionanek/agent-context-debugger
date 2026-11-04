@@ -143,7 +143,12 @@ sentences. Focus on observable behavior, not technical details.
 def test_a_path_conditional_table_derives_no_strong_predicate():
     """"Project path contains" was one user's table header, not a syntax."""
     assert "path-table" not in kinds_of(PATH_TABLE_MD, "GitHub account per project")
-    assert strong_kinds_of(PATH_TABLE_MD, "GitHub account per project") == []
+    # The one strong predicate left is the inline `gh auth status` the rule
+    # prescribes, which can only fire on that command really running. The
+    # table's switch commands are cells, and derive nothing.
+    assert strong_kinds_of(PATH_TABLE_MD, "GitHub account per project") == ["command-echo"]
+    assert sorted(p["cmd"] for p in predicates_of(PATH_TABLE_MD, "GitHub account per project")
+                  if brv._is_strong(p)) == ["gh auth status"]
 
 
 def test_a_summary_rule_derives_no_strong_predicate():

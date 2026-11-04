@@ -484,3 +484,34 @@ def test_no_analysis_module_can_reach_the_network():
         assert "urllib" not in src, f"{name} reaches for the network"
         assert not re.search(r"^\s*(import|from) install_ast_grep", src, re.M), \
             f"{name} imports the installer"
+
+
+def test_a_failure_after_staging_leaves_no_part_file(tmp_path, monkeypatch):
+    data = tarball({"package/ast-grep": BINARY})
+    dest = tmp_path / "vendor"
+
+    def refuse(self, mode):
+        raise PermissionError("chmod refused")
+    monkeypatch.setattr(Path, "chmod", refuse)
+    try:
+        ig.install(pin_for(data), dest, fetch=lambda url: data)
+    except OSError:
+        pass
+    else:
+        raise AssertionError("a failed chmod must abort the install")
+    assert list(dest.iterdir()) == []
+
+
+def test_the_file_ast_grep_reads_holds_the_texts_exact_utf8_bytes(monkeypatch, tmp_path):
+    """Offsets come back in bytes of the file it read, so that file has to be
+    the UTF-8 encoding byte for byte - no platform newline translation."""
+    seen = {}
+    real_run = rc.subprocess.run
+
+    def spy(cmd, **kw):
+        seen["bytes"] = Path(cmd[-1]).read_bytes()
+        return real_run(["true"], **kw)
+    monkeypatch.setattr(rc.subprocess, "run", spy)
+    text = "a\r\nb\nź\n"
+    rc._ast_grep_matches("ast-grep", "x", "a.ts", text)
+    assert seen["bytes"] == text.encode("utf-8")

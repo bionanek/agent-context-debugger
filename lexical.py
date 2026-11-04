@@ -145,7 +145,9 @@ COPIED_LINE_LEN = 40
 # as the rare terms they are. The 4-character floor is still a Latin-script
 # assumption and is the one place this tier is not language-neutral.
 _TOKEN_RE = re.compile(r"[^\W\d_][\w-]*")
-_FENCE_RE = re.compile(r"^[ \t]*(?:```|~~~).*?(?:^[ \t]*(?:```|~~~)|\Z)", re.S | re.M)
+# The one definition of a code fence, shared with build_real_view: groups are
+# the marker, the info string and the body. An unclosed fence runs to the end.
+FENCE_RE = re.compile(r"^[ \t]*(```|~~~)([^\n]*)\n?(.*?)(?:^[ \t]*\1|\Z)", re.S | re.M)
 _INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
 _MIN_TOKEN_LEN = 4
 
@@ -177,7 +179,7 @@ def strip_code(text):
     Code the agent printed is not the agent talking about a rule, and a fence
     is routinely a slab of the very file whose blocks are being scored.
     """
-    return _INLINE_CODE_RE.sub(" ", _FENCE_RE.sub(" ", text or ""))
+    return _INLINE_CODE_RE.sub(" ", FENCE_RE.sub(" ", text or ""))
 
 
 def clean_query_segments(texts, copied=()):
@@ -566,7 +568,7 @@ def score(content, bg, q):
     if len(terms) < MIN_TERMS or len(distinct) < MIN_TERMS:
         out["reason"] = (f"Only {len(distinct)} distinctive term(s) after weighting against "
                          "the loaded documents, everyday English and this session's own "
-                         "vocabulary — too few to score. Not a statement about whether the "
+                         "vocabulary - too few to score. Not a statement about whether the "
                          "block was followed.")
         return out
     if not q["total"]:
@@ -608,7 +610,7 @@ def score(content, bg, q):
         out["label"] = TOPICAL
         out["reason"] = (f"{len(significant)} of the block's distinctive terms are "
                          f"over-represented in the run's prose ({', '.join(significant[:6])}) "
-                         f"at coverage {out['coverage']}. Shared subject matter only — "
+                         f"at coverage {out['coverage']}. Shared subject matter only - "
                          "nothing ties the behaviour back to the block.")
         return out
 

@@ -147,9 +147,12 @@ def install(pin, dest_dir, fetch=None):
     # installed, and every structural rule would then report a backend failure
     # rather than a missing backend.
     staged = out.with_name(out.name + ".part")
-    staged.write_bytes(payload)
-    staged.chmod(staged.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    os.replace(staged, out)
+    try:
+        staged.write_bytes(payload)
+        staged.chmod(staged.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        os.replace(staged, out)
+    finally:
+        staged.unlink(missing_ok=True)
     return out
 
 

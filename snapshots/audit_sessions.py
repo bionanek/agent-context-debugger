@@ -21,6 +21,7 @@ sessions it names.
 """
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -65,34 +66,46 @@ WITHHELD = [
 # between them. A failed audit is recorded exactly like a passed one: dropping
 # it would leave the self-graded tables above reading as unchallenged.
 LAST_AUDIT = {
-    "date": "2026-09-05",
+    "date": "2026-11-04",
     "runs": 3,
     "passed": False,
-    "falseGreens": 2,
+    "falseGreens": 1,
     "falseReds": 0,
+    # The sessions an auditor could actually open; a transcript the harness
+    # has since deleted cannot be audited, and the headline must not count it.
+    "audited": 11,
+    # Read by every auditor so both sides share one definition of `used`.
+    "provided": ["snapshots/expected/RULINGS.md"],
     # A zero here is unmeasurable without saying what could have produced a
-    # red, and none of the sixteen could: every `ignored` verdict needs a
-    # reviewed checks file beside the rule document, and no project in this
-    # list has one. All three runs said so unprompted.
+    # red, and none of the audited sessions could: every `ignored` verdict
+    # needs a reviewed checks file beside the rule document, and no project in
+    # this list has one. All three runs said so unprompted.
     "redSide": (
         "The zero false reds is not evidence the tool accuses correctly: none "
-        "of the sixteen sessions has a compiled checks file, so no `ignored` "
+        "of the audited sessions has a compiled checks file, so no `ignored` "
         "verdict was reachable in any of them and all three runs said so. The "
         "red path is measured on the anchor corpus instead, where two sessions "
         "carry one."),
     "note": (
-        "Both false greens are in the `agent-context-ide` sessions. "
-        "`9cf0b16d`: the `commit` skill's GitHub-account step reads `used` "
-        "because the skill was invoked, though no `gh auth` command ran in the "
-        "session - that is ruling 4 of `snapshots/expected/RULINGS.md` working "
-        "as written, and the auditor was blind to the ruling, so it is a "
-        "dispute about the ruling rather than about the code. `406bba1d`: the "
-        "`Decision Memory` block reads `used` on `template-echo`, because a "
-        "document the run wrote quotes the rule's own `**Decided:**` / "
-        "`**Why:**` template inside a sentence about this tool's blind spots; "
-        "no decision entry was appended anywhere in that session. That one is "
-        "a defect in `template-echo`, which cannot tell a template being used "
-        "from a template being quoted."),
+        "Only 11 of the 16 sessions could be audited: the transcripts of "
+        "formic-core `919f9e32`, `1916e68e`, `5171447d` and formicHMI "
+        "`7eb46245`, `13e972ee` are no longer on disk (their ctxlog files "
+        "survive). Unlike the 2026-09-05 run, each auditor was given "
+        "`snapshots/expected/RULINGS.md` so the two sides share one definition "
+        "of `used`; everything else under `snapshots/expected/` stayed "
+        "withheld. 30 greens were checked against the raw transcripts. The one "
+        "false green is famigo `78c658bc`, the `/review` skill's Step 4 block: "
+        "it reads `used` on a `grep` that searched `mobile/CLAUDE.md`, but the "
+        "skill text the session was given named `mobile/AGENT.md` there (the "
+        "tool judged the disk copy, because it does not recover a skill body "
+        "delivered as an `isMeta` user event), and the grep was Step 6's "
+        "documentation check rather than Step 4's review. It is the same "
+        "mechanism as the anchor corpus's one false green: a read inside a "
+        "running skill is credited to every step that names the file. The "
+        "audit also found misreported context that is not a green or a red: "
+        "`./AGENTS.md` and files a hook only suggested reading are marked "
+        "loaded and priced (about 1.75M tokens in formic-core `afe37732`), "
+        "and a skill read with `cat` is reported as never in context."),
 }
 
 
@@ -110,7 +123,7 @@ def project_cwds(sessions_file=DEFAULT_SESSIONS_FILE):
     CLAUDE.md somewhere else entirely.
     """
     data = json.loads(Path(sessions_file).read_text(encoding="utf-8"))
-    return {s["project"]: s["cwd"] for s in data["sessions"]}
+    return {s["project"]: os.path.expanduser(s["cwd"]) for s in data["sessions"]}
 
 
 def overlap(sessions_file=DEFAULT_SESSIONS_FILE):
@@ -156,15 +169,21 @@ def footer_lines():
     note = [LAST_AUDIT["note"], ""] if LAST_AUDIT.get("note") else []
     outcome = ("passed" if LAST_AUDIT.get("passed") else
                "**did not pass**: the gate is zero of each")
+    total = sum(len(v) for v in AUDIT_SESSIONS.values())
+    audited = LAST_AUDIT.get("audited", total)
+    scope = (f"the {total} non-anchor sessions below" if audited == total else
+             f"{audited} of the {total} non-anchor sessions below")
+    provided = LAST_AUDIT.get("provided") or []
+    except_ = (" (except " + ", ".join(f"`{x}`" for x in provided) + ")"
+               if provided else "")
     return out + [
         f"{LAST_AUDIT['date']}: {LAST_AUDIT['runs']} independent `verdict-auditor` "
-        f"runs over the {sum(len(v) for v in AUDIT_SESSIONS.values())} non-anchor "
-        f"sessions below - none of them in `sessions.json`, so none of them "
+        f"runs over {scope} - none of them in `sessions.json`, so none of them "
         f"calibrated against - reported "
         f"**{LAST_AUDIT['falseGreens']} false greens and "
         f"{LAST_AUDIT['falseReds']} false reds** between them, and so "
         f"{outcome}. {LAST_AUDIT['redSide']} Each run was withheld "
-        + ", ".join(f"`{w}`" for w in WITHHELD) + ", and derived its ground truth "
+        + ", ".join(f"`{w}`" for w in WITHHELD) + except_ + ", and derived its ground truth "
         "from the raw transcripts. Re-run the list with "
         "`python3 snapshots/audit_sessions.py`.", ""] + note + [sessions, ""]
 

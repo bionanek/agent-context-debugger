@@ -155,8 +155,9 @@ def test_tool_required_fires_only_when_its_trigger_fired():
 def test_tool_required_is_order_blind_and_the_prompt_has_to_say_so():
     """It asks only whether both things happened. An author who reaches for it
     to express "after" gets a green badge over a session that did them the wrong
-    way round, which is why the authoring prompt sends "before"/"after" to
-    `tool_precedes` and "after every edit" to `not_checkable`."""
+    way round, which is why the authoring prompt sends "after" to
+    `tool_precedes`, "before" to `tool_never_without_prior` and "after every
+    edit" to `not_checkable`."""
     check = tool_check(id="edit-needs-typecheck", kind="tool_required",
                        trigger_pattern=r"^Edit\b", pattern=r"yarn type-check",
                        self_test={"should_match": ["Edit src/a.ts"],
@@ -174,14 +175,17 @@ def test_tool_required_is_order_blind_and_the_prompt_has_to_say_so():
 # ---------- ordering ----------
 
 def precedes_check(**over):
-    base = tool_check(id="status-before-switch", kind="tool_precedes",
-                      first_pattern=r"\bgh\s+auth\s+status\b",
-                      second_pattern=r"\bgh\s+auth\s+switch\b",
+    """"Run the tests after editing": an edit is the antecedent, a test run
+    after it the obligation. A "before" rule is `tool_never_without_prior`."""
+    base = tool_check(id="test-after-edit", kind="tool_precedes",
+                      first_pattern=r"^Edit\b",
+                      second_pattern=r"\byarn\s+test\b",
                       self_test={
-                          "should_match": ["Bash gh auth switch -u a\nBash gh auth status"],
+                          "should_match": ["Bash yarn test\nEdit src/a.ts",
+                                           "Edit src/a.ts"],
                           "should_not_match": [
-                              "Bash gh auth status\nBash gh auth switch -u a",
-                              "Bash gh auth status",
+                              "Edit src/a.ts\nBash yarn test",
+                              "Bash yarn test",
                               "Bash git status"],
                       })
     base.pop("prior_pattern")
@@ -189,32 +193,43 @@ def precedes_check(**over):
     return base
 
 
+def edit(i, tool_id):
+    return assistant_tool_use("Edit", {"file_path": "/repo/a.ts", "old_string": "x",
+                                       "new_string": "y"}, i, tool_id=tool_id)
+
+
 def test_tool_precedes_fails_when_the_order_is_reversed_even_though_both_ran():
     """Order is the point: a check that only asks whether both happened would
     pass the session that did them backwards, which is the failure class the
     research puts at ~73% of real ones."""
-    events = [user_text("go", 1),
-              bash("gh auth switch -u bionanek", 2, tool_id="b1"),
-              bash("gh auth status", 3, tool_id="b2")]
+    events = [user_text("go", 1), bash("yarn test", 2, tool_id="b1"), edit(3, "e1")]
     findings = rc.evaluate_checks(loaded_ok(precedes_check())["checks"], corpus_for(events))
     assert states(findings) == ["violated"]
     assert stages(findings) == ["consequent-missed"]
-    # The citation is the call that jumped the queue, not the one it preceded.
-    assert findings[0]["match"] == "gh auth switch"
-    assert findings[0]["line"] == 1
+    # The citation is the edit nothing followed up, the call the rule is about.
+    assert findings[0]["match"] == "Edit"
+    assert findings[0]["line"] == 2
 
 
 def test_tool_precedes_passes_when_the_order_holds():
-    events = [user_text("go", 1),
-              bash("gh auth status", 2, tool_id="b1"),
-              bash("gh auth switch -u bionanek", 3, tool_id="b2")]
+    events = [user_text("go", 1), edit(2, "e1"), bash("yarn test", 3, tool_id="b1")]
     findings = rc.evaluate_checks(loaded_ok(precedes_check())["checks"], corpus_for(events))
     assert states(findings) == ["clear"]
     assert stages(findings) == ["satisfied"]
 
 
-def test_tool_precedes_with_one_side_missing_is_not_exercised():
-    events = [user_text("go", 1), bash("gh auth status", 2)]
+def test_tool_precedes_edited_and_never_tested_is_a_missed_consequent():
+    """The commonest way to break "test after editing" is to never test. This
+    used to read `not-exercised`, because the antecedent wanted both sides."""
+    events = [user_text("go", 1), edit(2, "e1")]
+    findings = rc.evaluate_checks(loaded_ok(precedes_check())["checks"], corpus_for(events))
+    assert states(findings) == ["violated"]
+    assert stages(findings) == ["consequent-missed"]
+    assert findings[0]["match"] == "Edit"
+
+
+def test_tool_precedes_with_no_first_side_is_not_exercised():
+    events = [user_text("go", 1), bash("yarn test", 2)]
     findings = rc.evaluate_checks(loaded_ok(precedes_check())["checks"], corpus_for(events))
     assert states(findings) == ["not-exercised"]
     assert stages(findings) == ["antecedent-not-fired"]
@@ -634,3 +649,13 @@ def test_an_unfired_stage_becomes_evidence_that_says_so_not_an_empty_citation(tm
     assert "antecedent-not-fired" in row["label"]
     assert "(tools):0" not in row["text"]
     assert "never tested" in row["text"]
+
+
+def test_tool_precedes_counts_a_second_side_later_in_the_same_line():
+    """`yarn build && yarn test` is the obligation met, in one call."""
+    check = precedes_check(first_pattern=r"\byarn\s+build\b",
+                           self_test={"should_match": ["Bash yarn build"],
+                                      "should_not_match": ["Bash yarn build && yarn test"]})
+    events = [user_text("go", 1), bash("yarn build && yarn test", 2)]
+    findings = rc.evaluate_checks(loaded_ok(check)["checks"], corpus_for(events))
+    assert stages(findings) == ["satisfied"]
