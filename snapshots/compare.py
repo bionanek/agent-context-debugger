@@ -526,6 +526,125 @@ def _coverage_lines(report):
     return out + [""]
 
 
+# The blind-judge experiment of 2026-11-04, recorded rather than re-run. A
+# judge was handed exactly what the ground-truth author was handed
+# (`snapshots/inventory.py`'s three views plus RULINGS.md), never the tool's
+# verdict, and scored against the same answer key on the same blocks. Its
+# numbers are the reason the judge informs a reader and never awards a badge,
+# so they belong beside the measured ones - labelled as a dated experiment,
+# because nothing in this repo can reproduce them offline.
+BLIND_JUDGE = {"when": "2026-11-04", "blocks": 399, "falseGreen": 53,
+               "falseRed": 11, "missed": 28, "agrees": 296,
+               "codeAgrees": 274, "codeFalseGreen": 2, "codeFalseRed": 0,
+               "codeMissed": 84,
+               # The four-way split, by whether each tier's answer fell inside
+               # the truth class: both right, judge only, code only, neither.
+               # Derived from the experiment's own totals, which is why it adds
+               # back to 399 and to each tier's agreement count.
+               "bothRight": 202, "judgeOnly": 94, "codeOnly": 72, "neither": 31}
+
+
+BLIND_JUDGE_PROVENANCE = (
+    "The judge row is **not a reading of this corpus**. It is the blind-judge "
+    "experiment of 2026-11-04 over 399 blocks from five sessions, and it was "
+    "not re-run for this scorecard: the harness was a one-off, 111 of its 532 "
+    "calls failed - taking three whole sessions out of the scored set, skewed "
+    "toward `used` truths - and re-running it would send a client's rule text "
+    "and transcripts to a model. The code row beside it is this corpus, baked "
+    "offline. Two different block sets, printed together because the pair of "
+    "false-green counts is the whole argument; neither row is a control for "
+    "the other.")
+
+
+def _four_way_lines():
+    """The experiment's four-way split, which is what the architecture rests on."""
+    j = BLIND_JUDGE
+    return [
+        f"On that experiment's own {j['blocks']} blocks the two tiers split four "
+        f"ways: both right {j['bothRight']}, judge right and code wrong "
+        f"{j['judgeOnly']}, code right and judge wrong {j['codeOnly']}, neither "
+        f"{j['neither']}. The judge agreed with the ground truth more often "
+        f"({j['agrees']} against {j['codeAgrees']}) and was wrong in the one "
+        f"direction that cannot be shown to a reader as a verdict: "
+        f"{j['falseGreen']} false greens against the code tier's "
+        f"{j['codeFalseGreen']}, and {j['falseRed']} false reds against "
+        f"{j['codeFalseRed']}. Where it is better is the missed compliance - "
+        f"{j['missed']} against {j['codeMissed']} - which is exactly what the "
+        f"contested chip surfaces without letting it decide anything."]
+
+
+# How often the judge contests at all, measured over the frozen corpus in the
+# phase that added the chip. A ceiling rather than an observed rate: it counts
+# every block eligible to be contested, and each still has to clear the quote
+# gate. Stated beside the false-green count because the two together are the
+# answer to "why does the judge not get a badge".
+CONTESTED_RATE = (
+    "Contested rate: at most 18 of the 11,991 session-scope blocks in the "
+    "frozen corpus (0.2%) can carry the chip at all - a block is eligible only "
+    "where its status is `unused` or `dormant` and its document parked a "
+    "record for the judge, and only 48 blocks (0.4%) have a parked record of "
+    "any kind. Beside it stands the judge's own false-green count of 53: that "
+    "is why a contested block keeps its badge and gains a chip instead.")
+
+
+# The scorecard the plan's later phases are measured against, read off this
+# file at the commit before Phase 1 (`112cff0`). Carried here because the
+# criterion is a direction, and a direction needs the number it moved from.
+PRE_PLAN_MISSED = {"all": 122, "skill": 73, "ruleDocument": 49}
+
+
+MISSED_BASELINE_NOTE = (
+    "Measured against the pre-Phase-1 reading of this same corpus - 122 over "
+    "all blocks, 73 in the skill half, 49 in the rule-document half.")
+
+
+def missed_direction(missed):
+    """Which way missed compliance moved against the pre-plan reading.
+
+    Computed from the rows rather than written down, because the criterion is
+    a direction and a hand-written one survives the measurement that falsifies
+    it.
+    """
+    base = PRE_PLAN_MISSED["all"]
+    return "unchanged" if missed == base else ("down" if missed < base else "up")
+
+
+# Why the number can be unchanged without anything having gone wrong, and why
+# that is still a criterion unmet rather than a result. Said at the number,
+# because this is the file the number is quoted from.
+MISSED_UNCHANGED_NOTE = (
+    "Unchanged is the honest reading, not a null result dressed up: the work "
+    "between those two readings added reporting surfaces - the compile-status "
+    "screen, the bucket mix, the contested chip, the judge mode - and no "
+    "verdict path, and no new checks file entered the corpus. Missed "
+    "compliance moves when rules get compiled, which is the one thing none of "
+    "it did. **Acceptance criterion unmet**, named rather than redefined.")
+
+
+def _tier_lines(report):
+    """Both tiers' false counts in one table, and what each row is made of."""
+    t = report["totals"]
+    j = BLIND_JUDGE
+    return ["## Both tiers, side by side", "",
+            "The compiled path may accuse and the judge may not. These two rows "
+            "are the reason.", "",
+            "| tier | false green | false red | missed compliance |",
+            "|---|---|---|---|",
+            f"| compiled checks (this corpus, after) | {t['falseGreenAfter']} | "
+            f"{t['falseRedAfter']} | {t['missedAfter']} |",
+            f"| blind judge ({j['when']}, {j['blocks']} blocks) | {j['falseGreen']} | "
+            f"{j['falseRed']} | {j['missed']} |",
+            "", BLIND_JUDGE_PROVENANCE, ""] + _four_way_lines() + [
+            "", CONTESTED_RATE, "",
+            f"Missed compliance in the after column is {t['missedAfter']} over all "
+            f"scored blocks, {report['byHalf']['skill']['missedAfter']} in the skill "
+            f"half and {report['byHalf']['rule-document']['missedAfter']} in the "
+            f"rule-document half, {missed_direction(t['missedAfter'])} against the "
+            f"baseline the criterion names. " + MISSED_BASELINE_NOTE
+            + (" " + MISSED_UNCHANGED_NOTE
+               if missed_direction(t["missedAfter"]) == "unchanged" else ""), ""]
+
+
 TABLE_HEAD = ("| {} | scored | agreed before | agreed after | fixed | regressed | still wrong "
               "| new agreed | new wrong |")
 TABLE_RULE = "|---|---|---|---|---|---|---|---|---|"
@@ -601,6 +720,7 @@ def render(report):
     out += _half_table(report, "rule-document", "Rule-document blocks",
                        "The half the judging mechanisms actually decide, one block at a "
                        "time. This is the number the reliability claim is about.")
+    out += _tier_lines(report)
     out += [
         "## Per session", "",
         TABLE_HEAD.format("session"), TABLE_RULE,

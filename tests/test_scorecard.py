@@ -744,4 +744,18 @@ def test_the_scorecard_states_missed_compliance_against_the_pre_plan_baseline(tm
     t = report["totals"]
     assert compare.MISSED_BASELINE_NOTE in text
     assert str(compare.PRE_PLAN_MISSED["all"]) in compare.MISSED_BASELINE_NOTE
-    assert f"missed compliance in the after column is {t['missedAfter']}" in text
+    assert f"Missed compliance in the after column is {t['missedAfter']}" in text
+
+
+def test_the_missed_compliance_line_names_the_direction_it_moved(tmp_path):
+    """A re-measurement that prints two numbers and leaves the reader to
+    subtract them is how an unchanged number gets quoted as an improvement.
+    The direction is computed from the rows, so it cannot flatter them."""
+    root = _authorised_files(tmp_path, "ignored", "ignored")
+    report = compare.compare_all(root / "baseline", root / "after", root / "expected")
+    text = "\n".join(compare.render(report))
+    missed = report["totals"]["missedAfter"]
+    base = compare.PRE_PLAN_MISSED["all"]
+    word = "unchanged" if missed == base else ("down" if missed < base else "up")
+    assert compare.missed_direction(missed) == word
+    assert word in text

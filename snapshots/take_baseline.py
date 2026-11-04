@@ -199,6 +199,19 @@ def _bake(transcript, home, cwd, out_payload, record_loads=None):
         print(proc.stderr.rstrip(), file=sys.stderr)
 
 
+def bake_argv(transcript):
+    """The argv a frozen bake runs under.
+
+    `--no-judge` is not a preference here. The judge runs by default, and a
+    bake that inherited that default would send a client's frozen transcripts
+    to a model and store a payload whose verdicts depend on an answer the
+    snapshot does not hold - so a re-run would differ from its own baseline
+    for a reason that is not the judging code, which is the one confusion this
+    harness exists to prevent.
+    """
+    return ["build_real_view.py", "--transcript", str(transcript), "--no-judge"]
+
+
 def _cmd_bake(args):
     """Child mode: run the real pipeline and write the payload it would bake."""
     loads = []
@@ -212,7 +225,7 @@ def _cmd_bake(args):
 
         brv.load_context_files = spy
 
-    sys.argv = ["build_real_view.py", "--transcript", str(args.transcript)]
+    sys.argv = bake_argv(args.transcript)
     bake_args = brv.parse_args()
     all_paths, active_path = brv.select_transcripts(bake_args)
     sessions, per_session, active_id = brv.bake_sessions(all_paths, active_path, bake_args)

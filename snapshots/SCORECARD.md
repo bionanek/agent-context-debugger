@@ -100,6 +100,23 @@ The half the judging mechanisms actually decide, one block at a time. This is th
 
 **332 scored · fixed 20 · regressed 2 · still wrong 51 · new agreed 12 · new wrong 0**
 
+## Both tiers, side by side
+
+The compiled path may accuse and the judge may not. These two rows are the reason.
+
+| tier | false green | false red | missed compliance |
+|---|---|---|---|
+| compiled checks (this corpus, after) | 2 | 4 | 122 |
+| blind judge (2026-11-04, 399 blocks) | 53 | 11 | 28 |
+
+The judge row is **not a reading of this corpus**. It is the blind-judge experiment of 2026-11-04 over 399 blocks from five sessions, and it was not re-run for this scorecard: the harness was a one-off, 111 of its 532 calls failed - taking three whole sessions out of the scored set, skewed toward `used` truths - and re-running it would send a client's rule text and transcripts to a model. The code row beside it is this corpus, baked offline. Two different block sets, printed together because the pair of false-green counts is the whole argument; neither row is a control for the other.
+
+On that experiment's own 399 blocks the two tiers split four ways: both right 202, judge right and code wrong 94, code right and judge wrong 72, neither 31. The judge agreed with the ground truth more often (296 against 274) and was wrong in the one direction that cannot be shown to a reader as a verdict: 53 false greens against the code tier's 2, and 11 false reds against 0. Where it is better is the missed compliance - 28 against 84 - which is exactly what the contested chip surfaces without letting it decide anything.
+
+Contested rate: at most 18 of the 11,991 session-scope blocks in the frozen corpus (0.2%) can carry the chip at all - a block is eligible only where its status is `unused` or `dormant` and its document parked a record for the judge, and only 48 blocks (0.4%) have a parked record of any kind. Beside it stands the judge's own false-green count of 53: that is why a contested block keeps its badge and gains a chip instead.
+
+Missed compliance in the after column is 122 over all scored blocks, 73 in the skill half and 49 in the rule-document half, unchanged against the baseline the criterion names. Measured against the pre-Phase-1 reading of this same corpus - 122 over all blocks, 73 in the skill half, 49 in the rule-document half. Unchanged is the honest reading, not a null result dressed up: the work between those two readings added reporting surfaces - the compile-status screen, the bucket mix, the contested chip, the judge mode - and no verdict path, and no new checks file entered the corpus. Missed compliance moves when rules get compiled, which is the one thing none of it did. **Acceptance criterion unmet**, named rather than redefined.
+
 ## Per session
 
 | session | scored | agreed before | agreed after | fixed | regressed | still wrong | new agreed | new wrong |
