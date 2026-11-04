@@ -811,3 +811,111 @@ def test_code_written_by_a_heredoc_is_in_the_corpus_a_source_check_reads():
     corpus = t["rule_corpus"]
     assert [e["path"] for e in corpus["code"]] == ["src/app.py"]
     assert "print('debug')" in corpus["final_code"][0]["text"]
+
+
+# ---------- the governing prompt behind a cited call ----------
+#
+# `ctx-allow` lets written code carry a deliberate exception at the violation
+# site. A transcript has no such marker, so the strongest rationale there is -
+# the user typed the action in the prompt that caused the call - was invisible
+# to the checker, and a reviewed, high-confidence rule red-badged an agent for
+# doing what it was told. The join is positional: turns already run
+# prompt-to-prompt and a tool finding already cites a call, so the prompt is
+# the one of the turn the call falls in. Nothing here reads the prompt's words.
+
+PUSH_RULE = "## Hard rules\n\n`master` takes code only through a PR with green CI.\n"
+
+
+def push_check(**over):
+    """The shape of the real `no-push-to-master` record this mechanism exists for."""
+    base = {
+        "id": "no-push-to-master",
+        "rule_ref": "Hard rules",
+        "rule_text": "`master` takes code only through a PR with green CI.",
+        "domain": "tool",
+        "kind": "tool_forbidden",
+        "pattern": r"\bgit\s+push\b[^\n]*\bmaster\b",
+        "applies_to": [],
+        "confidence": "high",
+        "message": "master is protected: land code through a PR, never a direct push.",
+        "self_test": {
+            "should_match": ["Bash git push origin master"],
+            "should_not_match": ["Bash git push -u origin feat/posts"],
+        },
+    }
+    base.update(over)
+    return base
+
+
+def push_block(tmp_path, checks=None):
+    src = tmp_path / "GUIDELINES.md"
+    src.write_text(PUSH_RULE)
+    (tmp_path / "GUIDELINES.md.checks.json").write_text(
+        json.dumps(doc(checks=checks or [push_check()])))
+    rc.checks_for_doc.cache_clear()
+    return src, brv.parse_claude_md(src.read_text())[0]
+
+
+def test_a_finding_names_the_prompt_of_the_turn_its_call_falls_in(tmp_path):
+    """Turn containment, not the nearest earlier prompt by event index.
+
+    The first push here runs *before* any prompt was typed, which is the shape
+    the two readings disagree about: the nearest earlier prompt is none at all,
+    while the turn the call falls in is the first one, because a turn absorbs
+    everything before its own prompt.
+    """
+    src, block = push_block(tmp_path)
+    events = [bash("git push origin master", 0, tool_id="b0"),
+              user_text("/commit and push to master", 1),
+              bash("git push origin master", 2, tool_id="b1"),
+              user_text("teraz wypchnij poprawke", 3),
+              bash("git push --force origin master", 4, tool_id="b2")]
+    v = brv.assess_block(block, rule_file(src), trace_for(events))
+    findings = v["ruleCheck"]["findings"]
+    assert [f["governingPrompt"]["text"] for f in findings] == [
+        "/commit and push to master", "/commit and push to master",
+        "teraz wypchnij poprawke"]
+    assert [f["governingPrompt"]["turnIndex"] for f in findings] == [0, 0, 1]
+    assert [f["governingPrompt"]["callIndex"] for f in findings] == [0, 1, 2]
+    # Offline the finding is unchanged: the reader is shown the prompt and
+    # settles it, and nothing downgrades itself without being asked.
+    assert [f["state"] for f in findings] == ["violated"] * 3
+    assert v["status"] == "ignored"
+
+
+def test_a_call_in_a_turn_with_no_user_prompt_names_no_governing_prompt(tmp_path):
+    """Absence must not read as authorisation.
+
+    A task-notification arrives on the user channel but is the result half of a
+    spawn, so it starts no turn. A session driven entirely by one has no prompt
+    to cite, and the finding stays a violation with nothing beside it.
+    """
+    src, block = push_block(tmp_path)
+    push = bash("git push origin master", 2)
+    notified = [user_text("<task-notification><status>done</status></task-notification>", 1),
+                push]
+    # The control: the identical call under a real prompt does carry one, so
+    # the assertion below cannot pass merely because the mechanism is absent.
+    prompted = [user_text("push it", 1), push]
+    assert (brv.assess_block(block, rule_file(src), trace_for(prompted))
+            ["ruleCheck"]["findings"][0]["governingPrompt"]["text"] == "push it")
+
+    v = brv.assess_block(block, rule_file(src), trace_for(notified, prompt=""))
+    finding = v["ruleCheck"]["findings"][0]
+    assert "governingPrompt" not in finding
+    assert finding["state"] == "violated"
+    assert v["status"] == "ignored"
+
+
+def test_a_shell_finding_names_its_governing_prompt_too(tmp_path):
+    """A `forbidden_command` red is as capable of being a false red as a tool one."""
+    shell = push_check(id="no-push-shell", domain="shell", kind="forbidden_command",
+                       pattern=r"\bgit\s+push\b[^\n]*\bmaster\b",
+                       self_test={"should_match": ["git push origin master"],
+                                  "should_not_match": ["git push -u origin feat/posts"]})
+    src, block = push_block(tmp_path, checks=[shell])
+    events = [user_text("push to master", 1), bash("git push origin master", 2)]
+    v = brv.assess_block(block, rule_file(src), trace_for(events))
+    governing = v["ruleCheck"]["findings"][0]["governingPrompt"]
+    assert governing["text"] == "push to master"
+    assert governing["turnIndex"] == 0 and governing["callIndex"] == 0

@@ -445,3 +445,49 @@ def test_the_judge_tier_off_never_worsens_a_verdict(tmp_path):
     assert off["status"] not in ACCUSING_STATUSES, off["reason"]
     assert off["ruleCheck"]["judged"], "a parked record has to say it was parked"
     assert_not_worse(on, off, "judge-tier")
+
+
+# ---------- the judge off, and a user-authorised action ----------
+
+class _AlwaysAuthorised:
+    def __call__(self, prompt, model):
+        return json.dumps({"verdict": "authorised",
+                           "reason": "the prompt instructs this push"})
+
+
+def test_the_judge_tier_off_never_acknowledges_an_authorised_action(tmp_path):
+    """Signal unavailable, not a worse verdict - and honest about the cost.
+
+    This is the one row of the matrix where the absent signal leaves an
+    accusation standing, and it is deliberate: offline the finding keeps its
+    `violated` state and the report prints the governing prompt beside the
+    cited call, so the reader settles it in one glance. What must not happen
+    is the other direction - the offline path quietly excusing a violation it
+    has no evidence was authorised.
+    """
+    from tests.test_rule_checks import push_block, trace_for
+
+    src, block = push_block(tmp_path)
+    file = {"loaded": True, "kind": "project", "path": str(src),
+            "abs_path": str(src), "name": None}
+    events = [user_text("/commit and push to master", 1),
+              assistant_tool_use("Bash", {"command": "git push origin master"}, 2,
+                                 tool_id="b1")]
+
+    def verdict(judge):
+        trace = trace_for(events, "/commit and push to master")
+        trace["judge"] = judge
+        return brv.assess_block(block, file, trace)
+
+    on = verdict(judge_tier.Judge(model="test-model",
+                                  cache=tmp_path / "judge-cache.json",
+                                  invoke=_AlwaysAuthorised()))
+    off = verdict(None)
+
+    assert on["ruleCheck"]["findings"][0]["state"] == "acknowledged"
+    assert off["ruleCheck"]["findings"][0]["state"] == "violated"
+    assert all("authorisation" not in f for f in off["ruleCheck"]["findings"])
+    # The prompt is on the finding either way: it is read off the turn
+    # structure, so switching the judge off costs the reader nothing to look at.
+    assert (off["ruleCheck"]["findings"][0]["governingPrompt"]
+            == on["ruleCheck"]["findings"][0]["governingPrompt"])

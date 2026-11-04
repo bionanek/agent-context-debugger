@@ -702,3 +702,77 @@ def test_a_concurrent_runs_verdicts_survive_our_save(tmp_path):
     second.ask(judge_tier.judge_request("k2", "s", [], [], [("a", "2")], "test-model"))
     keys = json.loads(cache_file(tmp_path).read_text())["verdicts"]
     assert {k.split("|")[0] for k in keys} == {"k1", "k2"}
+
+
+# ---------- user-authorised actions ----------
+#
+# The deterministic tier is right that the action happened and wrong about what
+# it means: six real sessions pushed to master because the user typed "push to
+# master" in the prompt that caused the push, and a reviewed, high-confidence
+# record red-badged every one of them. Whether a prompt instructs an action is
+# the one question no pattern can answer language-neutrally, and it is what the
+# judge is genuinely good at. A yes downgrades the finding to `acknowledged` -
+# the state that already means "a violation the site deliberately suppresses".
+
+from tests.test_rule_checks import push_block  # noqa: E402
+
+
+def authorisation_case(tmp_path, stub, prompt="/commit and push to master"):
+    src, block = push_block(tmp_path)
+    events = [user_text(prompt, 1), bash("git push origin master", 2)]
+    v = brv.assess_block(block, rule_file(src),
+                         dict(trace_for(events, prompt), judge=judge(stub, tmp_path)))
+    return v["ruleCheck"]
+
+
+def test_an_authorised_action_is_acknowledged_and_names_the_prompt(tmp_path):
+    stub = Stub({"verdict": "authorised", "reason": "the prompt says to push to master"})
+    rcheck = authorisation_case(tmp_path, stub)
+    finding = rcheck["findings"][0]
+    assert finding["state"] == "acknowledged"
+    assert finding["authorisation"]["verdict"] == "authorised"
+    assert finding["governingPrompt"]["text"] == "/commit and push to master"
+    assert rcheck["state"] == "acknowledged"
+
+
+def test_the_authorisation_question_is_asked_once_and_carries_only_prompt_and_call(tmp_path):
+    stub = Stub({"verdict": "authorised", "reason": "asked for"})
+    authorisation_case(tmp_path, stub)
+    assert len(stub.prompts) == 1
+    asked = stub.prompts[0][0]
+    assert "/commit and push to master" in asked
+    assert "git push origin master" in asked
+    # Not the rule, and not the rest of the session: the question is whether
+    # the user asked for this call, which the rule's own wording cannot help
+    # with and could only bias.
+    assert "green CI" not in asked
+    assert "no-push-to-master" not in asked
+
+
+def test_only_an_affirmative_answer_may_downgrade_a_violation(tmp_path):
+    """A no, an unreadable reply and an unreachable judge all leave it red."""
+    class Dead:
+        def __call__(self, prompt, model):
+            raise judge_tier.JudgeError("backend down")
+
+    for stub in (Stub({"verdict": "not-authorised", "reason": "nothing asked for it"}),
+                 Stub("I think this is probably fine, honestly"),
+                 Dead()):
+        rcheck = authorisation_case(tmp_path, stub)
+        finding = rcheck["findings"][0]
+        assert finding["state"] == "violated", stub
+        assert "authorisation" not in finding or (
+            finding["authorisation"]["verdict"] != "authorised")
+        assert rcheck["state"] == "violated"
+
+
+def test_a_finding_with_no_governing_prompt_is_never_asked(tmp_path):
+    """Nothing to quote means nothing to authorise, and no call is spent on it."""
+    src, block = push_block(tmp_path)
+    events = [user_text("<task-notification><status>done</status></task-notification>", 1),
+              bash("git push origin master", 2)]
+    stub = Stub({"verdict": "authorised", "reason": "would have said yes"})
+    v = brv.assess_block(block, rule_file(src),
+                         dict(trace_for(events, ""), judge=judge(stub, tmp_path)))
+    assert stub.prompts == []
+    assert v["ruleCheck"]["findings"][0]["state"] == "violated"

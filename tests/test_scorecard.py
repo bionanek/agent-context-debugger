@@ -567,3 +567,58 @@ def test_a_partial_corpus_passes_only_when_allowed_explicitly(tmp_path, monkeypa
     root = _clean_two_sessions(tmp_path)
     _run_main(monkeypatch, root, "--allow-partial")
     assert "proj/other" in capsys.readouterr().out
+
+
+# ---------- the `authorised` truth class ----------
+#
+# The corpus holds no clean unsupervised violation: every candidate action was
+# ordered in the prompt that caused it. So the red side is measured against
+# `authorised` rows, where the rule's action demonstrably happened and the user
+# asked for it. A red badge there is a false red - the worst failure this tool
+# has - and the header has to say that this is what the false-red count is
+# measured against, because a reader who thinks it covers unsupervised
+# violations is reading a number the corpus cannot produce.
+
+def _authorised_files(tmp_path, before, after):
+    sid = "authorised-session"
+    exp = tmp_path / "expected" / "ozz" / "auth"
+    exp.mkdir(parents=True)
+    (exp / "expected.md").write_text(
+        _expected([("push-rule", "authorised", "F-AUTHORISED", "call 12 pushed, prompt said to")]),
+        encoding="utf-8")
+    for tree, status in (("baseline", before), ("after", after)):
+        d = tmp_path / tree / "ozz" / "auth"
+        d.mkdir(parents=True)
+        (d / "manifest.json").write_text(json.dumps({"sessionId": sid, "project": "ozz"}))
+        (d / "payload.json").write_text(json.dumps(_payload(sid, {"push-rule": status})),
+                                        encoding="utf-8")
+    return tmp_path
+
+
+def test_a_red_badge_on_an_authorised_row_is_a_false_red(tmp_path):
+    root = _authorised_files(tmp_path, "ignored", "ignored")
+    report = compare.compare_all(root / "baseline", root / "after", root / "expected")
+    assert report["totals"]["falseRedBefore"] == 1
+    assert report["totals"]["falseRedAfter"] == 1
+
+
+def test_an_authorised_row_the_tool_stops_accusing_is_fixed(tmp_path):
+    root = _authorised_files(tmp_path, "ignored", "dormant")
+    report = compare.compare_all(root / "baseline", root / "after", root / "expected")
+    assert report["totals"]["falseRedAfter"] == 0
+    assert [r["outcome"] for r in report["rows"]] == ["fixed"]
+
+
+def test_a_green_on_an_authorised_row_is_still_a_false_green(tmp_path):
+    """The downgrade is to `acknowledged`, never to credit for the rule."""
+    root = _authorised_files(tmp_path, "used", "used")
+    report = compare.compare_all(root / "baseline", root / "after", root / "expected")
+    assert report["totals"]["falseGreenAfter"] == 1
+
+
+def test_the_header_says_the_red_side_is_measured_against_authorised_rows(tmp_path):
+    root = _authorised_files(tmp_path, "ignored", "dormant")
+    report = compare.compare_all(root / "baseline", root / "after", root / "expected")
+    text = "\n".join(compare.render(report))
+    assert "authorised" in text
+    assert compare.NO_UNSUPERVISED_VIOLATION in text

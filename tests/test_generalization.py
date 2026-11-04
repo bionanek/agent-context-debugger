@@ -563,3 +563,54 @@ def test_only_a_compiled_check_can_call_a_rule_violated(tmp_path):
     # applicable, and neither of them produced a red.
     assert checked, "no compiled check ran over this session at all"
     assert credited, "no credit-only predicate was applicable in this session"
+
+
+# ---------- the governing prompt is read off turn structure, never prose ----------
+
+def _push_fixture(tmp_path, prompt):
+    import json
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    src = tmp_path / "GUIDELINES.md"
+    src.write_text("## Hard rules\n\n`master` takes code only through a PR.\n")
+    (tmp_path / "GUIDELINES.md.checks.json").write_text(json.dumps({
+        "source": str(src),
+        "checks": [{
+            "id": "no-push-to-master",
+            "rule_ref": "Hard rules",
+            "rule_text": "`master` takes code only through a PR.",
+            "domain": "tool",
+            "kind": "tool_forbidden",
+            "pattern": r"\bgit\s+push\b[^\n]*\bmaster\b",
+            "applies_to": [],
+            "confidence": "high",
+            "message": "master is protected.",
+            "self_test": {"should_match": ["Bash git push origin master"],
+                          "should_not_match": ["Bash git push -u origin feat/x"]},
+        }],
+    }))
+    rc.checks_for_doc.cache_clear()
+    events = [user_text(prompt, 1), bash("git push origin master", 2)]
+    block = blocks_of(src.read_text())[0]
+    v = brv.assess_block(block, rule_file(src, kind="project"),
+                         trace_for(events, prompt))
+    return v["ruleCheck"]["findings"][0]
+
+
+def test_a_foreign_language_prompt_is_joined_to_its_call_the_same_way(tmp_path):
+    """Authorisation is never decided by matching English in the prompt.
+
+    Doing that would be the single-user prose matching step 6 retired, and it
+    would read a Polish prompt as silence - the agent accused of acting
+    unbidden because the instruction was not in English. The join is the turn
+    the call falls in, so both twins produce the identical record apart from
+    the prompt's own text.
+    """
+    en = _push_fixture(tmp_path / "en", "/commit and push to master")
+    pl = _push_fixture(tmp_path / "pl", "/commit i wypchnij na mastera")
+    for finding, text in ((en, "/commit and push to master"),
+                          (pl, "/commit i wypchnij na mastera")):
+        assert finding["governingPrompt"]["text"] == text
+        assert finding["governingPrompt"]["turnIndex"] == 0
+        assert finding["governingPrompt"]["callIndex"] == 0
+        # Offline both stay violations: the prompt is shown, not interpreted.
+        assert finding["state"] == "violated"
