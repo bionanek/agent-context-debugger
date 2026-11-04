@@ -694,3 +694,54 @@ def test_the_header_names_the_acceptance_criteria_this_corpus_does_not_meet(tmp_
     text = "\n".join(compare.render(report))
     assert compare.CRITERIA_UNMET in text
     assert compare.FROZEN_SET_SHORTFALL in text
+
+
+def test_the_scorecard_puts_both_tiers_false_counts_side_by_side(tmp_path):
+    """The pair is the whole argument for the architecture: the compiled path
+    may accuse and the judge may not, and the only thing that justifies that
+    asymmetry is the two false-green counts next to each other. Split across
+    two documents a reader quotes one of them."""
+    root = _authorised_files(tmp_path, "ignored", "ignored")
+    report = compare.compare_all(root / "baseline", root / "after", root / "expected")
+    text = "\n".join(compare.render(report))
+    t = report["totals"]
+    assert "## Both tiers, side by side" in text
+    assert (f"| compiled checks (this corpus, after) | {t['falseGreenAfter']} | "
+            f"{t['falseRedAfter']} | {t['missedAfter']} |") in text
+    assert (f"| blind judge ({compare.BLIND_JUDGE['when']}, "
+            f"{compare.BLIND_JUDGE['blocks']} blocks) | "
+            f"{compare.BLIND_JUDGE['falseGreen']} | {compare.BLIND_JUDGE['falseRed']} | "
+            f"{compare.BLIND_JUDGE['missed']} |") in text
+
+
+def test_the_judge_tier_row_says_it_was_not_re_measured(tmp_path):
+    """Those numbers are a dated experiment, not a reading of this corpus. A
+    table that prints them in the same shape as the measured row has to say
+    so in its own prose, or the pair reads as one run."""
+    root = _authorised_files(tmp_path, "ignored", "ignored")
+    report = compare.compare_all(root / "baseline", root / "after", root / "expected")
+    text = "\n".join(compare.render(report))
+    assert compare.BLIND_JUDGE_PROVENANCE in text
+
+
+def test_the_scorecard_states_the_contested_rate_beside_the_judges_false_greens(tmp_path):
+    """Why the judge gets a chip and never a badge, in one place: how often it
+    contests at all, and how often it is wrong when it says `used`."""
+    root = _authorised_files(tmp_path, "ignored", "ignored")
+    report = compare.compare_all(root / "baseline", root / "after", root / "expected")
+    text = "\n".join(compare.render(report))
+    assert compare.CONTESTED_RATE in text
+    assert str(compare.BLIND_JUDGE["falseGreen"]) in compare.CONTESTED_RATE
+
+
+def test_the_scorecard_states_missed_compliance_against_the_pre_plan_baseline(tmp_path):
+    """The criterion is a direction, so the number it is measured from has to
+    be in the file. Printed whichever way it moved: a re-measurement that only
+    prints an improvement is not a measurement."""
+    root = _authorised_files(tmp_path, "ignored", "ignored")
+    report = compare.compare_all(root / "baseline", root / "after", root / "expected")
+    text = "\n".join(compare.render(report))
+    t = report["totals"]
+    assert compare.MISSED_BASELINE_NOTE in text
+    assert str(compare.PRE_PLAN_MISSED["all"]) in compare.MISSED_BASELINE_NOTE
+    assert f"missed compliance in the after column is {t['missedAfter']}" in text

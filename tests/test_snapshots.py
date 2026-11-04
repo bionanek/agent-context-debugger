@@ -274,3 +274,25 @@ def test_verify_names_an_input_added_after_the_bake_as_the_reason(captured):
     assert len(differs) == 1
     assert "added after the baseline was baked" in differs[0]
     assert "Git/demo-project/CLAUDE.md.checks.json" in differs[0]
+
+
+def test_a_frozen_bake_never_reaches_the_judge():
+    """The snapshot harness is the measurement, so it has to stay offline.
+
+    The judge now runs by default, and a bake that inherited that default
+    would send a client's frozen transcripts to a model and make the stored
+    payload depend on an answer that is not in the snapshot - the one thing
+    this harness exists to rule out. Asserted through the real argv the child
+    process is given, not through a flag name, so a renamed flag fails here
+    rather than quietly re-enabling the tier.
+    """
+    import build_real_view as brv
+
+    argv = tb.bake_argv(Path("/tmp/does-not-matter.jsonl"))
+    old = sys.argv
+    try:
+        sys.argv = argv
+        args = brv.parse_args()
+    finally:
+        sys.argv = old
+    assert brv.make_judge(args) is None
