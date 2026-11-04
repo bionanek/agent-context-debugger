@@ -600,9 +600,10 @@ def blind_judge_provenance(j):
             f"{j['blocks']} blocks with the same `error_kind`, so the two are "
             "comparable with each other. They are not comparable with the "
             "before/after tables above, which score "
-            + (f"a few more blocks: {j['calls']} call(s) were made, "
+            + (f"a few more blocks: {j['calls']} call(s) were made and "
                f"{j['callsFailed']} failed")
-            + (f" and {unanswered} block(s) went unanswered" if unanswered else "")
+            + (f", and {unanswered} block(s) went unanswered - see the limits "
+               "below" if unanswered else "")
             + ". The code column here is this corpus baked offline, as everywhere "
             "else in this file.")
     return (
@@ -622,6 +623,27 @@ def blind_judge_provenance(j):
 # measured one. The blind-judge harness was not re-run for this scorecard and
 # no harness for it exists here, so neither the row nor the four-way split
 # below it can be reproduced or contradicted by anything in this repo.
+def judge_row_limits(j):
+    """What the reproducible row still cannot say, in one paragraph.
+
+    The unanswered count belongs here rather than mid-sentence in the
+    provenance note: a run that silently loses a seventh of its blocks is a
+    caveat a reader has to weigh, and the blocks that go missing are the long
+    ones - the half of the corpus the two tiers are most likely to differ on.
+    """
+    out = JUDGE_ROW_FALSIFIABLE
+    n = j.get("unanswered") or 0
+    if n:
+        out += (f" A fourth limit is this run's own: {n} block(s) came back "
+                f"with no answer line at all and no call failing, so they are "
+                f"counted as unanswered rather than scored. They are **not a "
+                f"random sample** - the longest blocks are over-represented, "
+                f"because a judge handed a very large block writes prose "
+                f"instead of its one line - so the row describes the "
+                f"{j['blocks']} blocks it answered and not the corpus evenly.")
+    return out
+
+
 JUDGE_ROW_FALSIFIABLE = (
     "**The judge row can be reproduced and contradicted.** Re-run it with "
     f"`python3 {HARNESS}`, which asks the question again and rewrites the "
@@ -777,7 +799,7 @@ def _tier_lines(report):
                 + (f", `{j['model']}`)" if paired else ")") + " | "
                 f"{j['falseGreen']} | {j['falseRed']} | {j['missed']} |",
                 "", blind_judge_provenance(j), "",
-                JUDGE_ROW_FALSIFIABLE if reproducible(j)
+                judge_row_limits(j) if reproducible(j)
                 else JUDGE_ROW_NOT_FALSIFIABLE,
                 ""] + _four_way_lines(j) + [""]
     return out + [
