@@ -761,25 +761,27 @@ def test_the_missed_compliance_line_names_the_direction_it_moved(tmp_path):
     assert word in text
 
 
-def test_the_judge_row_names_the_tier_it_was_measured_against(tmp_path):
-    """The judge row cannot be re-run from this repo, so the one thing the
-    scorecard can do is say whether the tier it describes is still the tier in
-    the tree. Unpinned, a later change that makes the judge worse leaves the
-    table unchanged and still green."""
+def test_the_judge_row_says_nothing_can_falsify_it(tmp_path):
+    """The harness was not re-run and no harness for it is in the repo, so the
+    row is dated history: a later change that makes the judge worse leaves the
+    table unchanged. The file a reader quotes has to say that itself."""
     root = _authorised_files(tmp_path, "ignored", "ignored")
     report = compare.compare_all(root / "baseline", root / "after", root / "expected")
     text = "\n".join(compare.render(report))
-    assert compare.judge_tier_pin_line() in text
-    assert compare.JUDGE_TIER_PIN["sha256"][:12] in text
+    assert compare.JUDGE_ROW_NOT_FALSIFIABLE in text
 
 
-def test_a_changed_judge_tier_marks_the_judge_row_stale(tmp_path, monkeypatch):
-    """The pin only earns its place if it goes red. With the tier edited under
-    it the row is a measurement of code that is no longer here, and the
-    scorecard has to say so rather than print the old numbers plainly."""
+def test_the_scorecard_never_claims_the_judge_row_describes_this_tree(tmp_path):
+    """Replaces the sha256 pin and its stale path. The pin was taken when the
+    row was published, not when the experiment ran, so the strongest thing it
+    could support was "unchanged since I was written" while the sentence it
+    rendered claimed "unchanged since the experiment" - a claim the repo holds
+    no evidence for, about a file that has been edited since. The guarantee
+    kept is the one that mattered: a reader is never told these numbers
+    describe the tier in this tree."""
     root = _authorised_files(tmp_path, "ignored", "ignored")
     report = compare.compare_all(root / "baseline", root / "after", root / "expected")
-    monkeypatch.setitem(compare.JUDGE_TIER_PIN, "sha256", "0" * 64)
-    line = compare.judge_tier_pin_line()
-    assert "stale" in line.lower()
-    assert line in "\n".join(compare.render(report))
+    text = "\n".join(compare.render(report)).lower()
+    for claim in ("byte-identical", "that experiment measured",
+                  "still describes the tier"):
+        assert claim not in text, claim
