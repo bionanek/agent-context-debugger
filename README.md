@@ -395,6 +395,27 @@ tested rather than broken. A compiled check gives credit the same way it takes
 it away - a conditional rule whose trigger fired and whose obligation was met
 reads `used`, citing the call.
 
+### The contested chip
+
+With the judge tier on, a block can carry a **contested** chip beside its badge.
+It fires in one direction only: the tool found nothing tying the block to the
+run (`unused` or `dormant`) and the judge, asked without ever seeing that
+verdict, read the same evidence as compliance - and quoted a line the tool
+could find in what it handed over. The chip is deliberately not coloured like a
+badge, because it is not one.
+
+What it licenses you to conclude is: **go and look.** The judge is measurably
+better than the pattern tier at noticing that a rule was followed, so a
+contested block is the most likely place a real compliance went unrecorded.
+What it does not license is "the verdict is wrong". On the same measurement the
+judge invented compliance 53 times to the code's twice, so a model saying
+"followed" is the single least reliable signal this tool has, and the honest
+response to the chip is to read the quote and decide for yourself. Nothing
+contested changes a status, a badge, a rollup verdict or a scorecard row; a
+judge answer of *violated* contests nothing at all, in either direction. The
+count per session is `contestedBlocks`, and `--query <block-id>` prints the
+same three fields the chip shows.
+
 ### The lexical label
 
 When nothing else has anything to say about a block, its wording is scored

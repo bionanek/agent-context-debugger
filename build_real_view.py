@@ -4499,6 +4499,12 @@ def assess_block(block, file, trace):
                 out["reason"] += " " + text_note
             elif text_source == "disk":
                 out["reason"] += DISK_TEXT_CAVEAT
+        # Read after the check has had its say, so the dissent is from the
+        # status the reader actually sees. Appended only where there is one:
+        # an empty record would read as a second opinion that agreed.
+        contested = _contested_from(out["status"], rule_check)
+        if contested:
+            out["contested"] = contested
     return out
 
 
@@ -4523,6 +4529,41 @@ def _rule_check_for(block, file, trace):
     return rule_checks.check_block(block, loaded, corpus, fallback=fallback,
                                    doc_path=file.get("path") or "",
                                    judge=trace.get("judge"))
+
+
+# The two statuses that say the trace tied this block to nothing. They are
+# where the code is measurably weakest - the blind-judge experiment counted 84
+# missed compliances against the judge's 28 - so they are the one direction in
+# which a second opinion is worth printing.
+CONTESTABLE_STATUSES = ("unused", "dormant")
+
+
+def _contested_from(status, rule_check):
+    """The judge's dissent from a NOT-USED verdict, or None.
+
+    Deliberately narrow. Judge and code disagree on 43.4% of blocks, and
+    flagging all of that is noise with a confidence score attached. Only the
+    disagreement that points at the code's known hole is reported - the judge
+    reading compliance where the code found nothing - and only when the judge
+    quoted something `_quote_span` located in the evidence it was handed, which
+    is what gives the reader somewhere to go and look.
+
+    A judge `violated` contests nothing, in either direction. That is where its
+    eleven false reds live, and the code's own red path already requires a
+    citation by construction, so there is no silence there for a model to fill.
+
+    This is not a status. It never combines, it never reaches
+    `combine_verdicts`, and it can move no badge.
+    """
+    if status not in CONTESTABLE_STATUSES:
+        return None
+    for f in (rule_check or {}).get("findings") or []:
+        if (f.get("judge") and f.get("judgeVerdict") == "compliant"
+                and f.get("judgeQuote")):
+            return {"judgeVerdict": f["judgeVerdict"],
+                    "quote": f["judgeQuote"],
+                    "reason": f.get("message") or ""}
+    return None
 
 
 def _apply_rule_check(verdict, rule_check):
@@ -6024,6 +6065,14 @@ def query_block(sid, session_data, block_id, turn=None, field=None):
                          f"{j.get('why', '')}")
         if rule_check.get("hint"):
             lines.append(f"  [todo] {rule_check['hint']}")
+    # Not a verdict and not a badge - a second reader's dissent, with the words
+    # it quoted so the first reader can go and look. The page shows the same
+    # three fields, so the CLI has to print them or the two describe one block
+    # differently.
+    contested = block.get("contested")
+    if contested:
+        lines.append(f"contested judge said {contested['judgeVerdict']}: "
+                     f"`{contested['quote'][:120]}` - {contested['reason'][:300]}")
     lines.append(f"moments  {len(block.get('moments') or [])}")
     for m in block.get("moments") or []:
         lines.append(f"  [{_moment_verdict(m)}] {_bounded(_moment_line(m), moments_cmd)}")
@@ -6934,6 +6983,12 @@ def process_session(transcript_path, args):
                 if statuses:
                     own = b["status"]
                     b["status"] = combine_verdicts(statuses)
+                    # Some turn tied this block to the run after all, so the
+                    # silence the judge was dissenting from is gone. Leaving
+                    # the flag would put "the judge read this as used" beside a
+                    # verdict that already says so.
+                    if b["status"] not in CONTESTABLE_STATUSES:
+                        b.pop("contested", None)
                     # Same rule as `delivery` and `hook`: the key appears only
                     # when there is something to report. Without it a mixed
                     # scope's downgrade to `used-partial` would leave the file
@@ -7070,6 +7125,14 @@ def process_session(transcript_path, args):
     # Same split as everywhere else: the counts are cheap enough for the picker,
     # the per-file list stays in per_session.
     summary["wastedContext"] = {k: v for k, v in waste.items() if k != "files"}
+    # Counted off the final payload, after the combine has dropped the flags it
+    # overruled, so the number and the blocks beneath it cannot disagree. Zero
+    # is baked rather than omitted: a reader has to be able to tell "the judge
+    # agreed everywhere" from "nobody asked a second opinion".
+    contested = sum(1 for f in per_session["contextFiles"] for b in f["blocks"]
+                    if b.get("contested"))
+    per_session["contestedBlocks"] = contested
+    summary["contestedBlocks"] = contested
     return summary, per_session
 
 
@@ -7602,6 +7665,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .src-transcript { border-style: solid; }
   .src-disk { color: var(--amber); }
   .src-stale { color: var(--red); border-style: solid; }
+  /* Deliberately uncoloured: this is a second reader's dissent, not a verdict,
+     and anything that reads as green or red here would be the badge the judge
+     is never allowed to award. */
+  .contested-chip { border-style: dotted; color: var(--text-dim); }
   .ev-card { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; }
   .ev-card .label { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 4px; }
   .ev-card .text { font-family: monospace; font-size: 11px; color: var(--text); word-break: break-word; white-space: pre-wrap; max-height: 220px; overflow-y: auto; }
@@ -9329,6 +9396,14 @@ function textSourceChip(b) {
   return `<span class="lex-chip src-${src}" title="Where the block text this verdict is about came from.">${escapeHtml(text)}</span>`;
 }
 
+function contestedChip(b) {
+  if (!b.contested) return '';
+  const title = `The judge, asked without seeing this verdict, read this block as used. `
+    + `It quoted: ${b.contested.quote}`
+    + (b.contested.reason ? ` - ${b.contested.reason}` : '');
+  return `<span class="lex-chip contested-chip" title="${escapeHtml(title)}">contested by the judge</span>`;
+}
+
 function lexicalChip(b) {
   if (!b.evidenceLabel) return '';
   const text = LEXICAL_CHIP[b.evidenceLabel] || b.evidenceLabel;
@@ -9504,9 +9579,13 @@ function renderDetail(blockId) {
         <span class="help-trigger" data-help="verdict" title="How is the verdict computed?">?</span>
       </h4>
       <div class="block-status status-${b.status}" style="font-size:13px;margin-bottom:8px">
-        <span class="status-dot"></span>${statusLabel}${lexicalChip(b)}${textSourceChip(b)}
+        <span class="status-dot"></span>${statusLabel}${lexicalChip(b)}${textSourceChip(b)}${contestedChip(b)}
       </div>
       <div class="reason ${b.status}">${escapeHtml(b.reason)}</div>
+      ${b.contested ? `<div class="reason" style="border-left-color:var(--border)">The judge,
+        asked without seeing this verdict, read this block as used. It quoted
+        <code>${escapeHtml(b.contested.quote)}</code>${b.contested.reason ? ' - ' + escapeHtml(b.contested.reason) : ''}.
+        That is a reason to go and look, not evidence the verdict above is wrong.</div>` : ''}
     </div>
   `;
 

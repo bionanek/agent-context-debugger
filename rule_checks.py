@@ -1264,13 +1264,20 @@ def _record_key(record):
 
 
 def _judge_finding(record, path, text, span, state, message, verdict, advisory,
-                   line=None):
+                   line=None, quote=""):
     """A judge verdict in the same shape every deterministic finding uses.
 
     Same shape on purpose: a reader should not have to learn a second record
     format to see what was found, and every consumer that already knows how to
     cite a finding cites this one too. `advisory` is the display cap, read by
     `_state_from` and by the caller that paints the block.
+
+    `quote` is what the judge itself copied out, and it is set only where
+    `_quote_span` found it in the content the judge was given. The finding's
+    `match` cannot stand in for it: on a candidate site `match` is the span
+    this tool enumerated, which is there whether the model quoted anything or
+    not, so reading it as the judge's citation would credit an answer that
+    cited nothing.
     """
     shim = dict(record)
     shim.setdefault("kind", record.get("bucket") or "judged")
@@ -1294,6 +1301,8 @@ def _judge_finding(record, path, text, span, state, message, verdict, advisory,
     f = _finding(shim, path, text, span, state, line=line, message=message)
     f["judge"] = True
     f["judgeVerdict"] = verdict
+    if quote:
+        f["judgeQuote"] = quote
     if advisory:
         f["advisory"] = True
     return f
@@ -1408,15 +1417,21 @@ def _fold_candidate(record, entry, cand, answer):
         state = ("acknowledged" if _suppressed(text, span[0], record.get("id", ""))
                  else "violated")
         return _judge_finding(record, cand["path"], text, span, state, reason,
-                              verdict, False)
+                              verdict, False, quote=quote)
     if verdict == "unclear":
         return _judge_finding(record, cand["path"], text, (start, end), "unclear",
                               reason, verdict, False)
     # Compliant. It carries no span because there is nothing wrong to point at,
     # so it is a note: the block reads `clear` from the sites having been
-    # examined, not from this one finding.
+    # examined, not from this one finding. The quote is still put through the
+    # same gate the violation above uses, because the contested flag reads it:
+    # a model that quoted nothing from the site it was shown has described
+    # something it was not given.
+    quote = answer.get("evidence", "")
+    resolved = (quote and quote in _candidate_evidence(cand)
+                and _quote_span(text, quote, start) is not None)
     return _judge_finding(record, cand["path"], text, (start, end), "note",
-                          reason, verdict, False)
+                          reason, verdict, False, quote=quote if resolved else "")
 
 
 def _judged_evidence(record, corpus):
@@ -1454,7 +1469,7 @@ def _judge_semantic(record, corpus, judge):
             continue
         state = "unclear" if answer["verdict"] == "violated" else "note"
         out.append(_judge_finding(record, name, text, span, state, reason,
-                                  answer["verdict"], True))
+                                  answer["verdict"], True, quote=quote))
         return out, True
     # No citable span. A violation without one is not reportable as one, and a
     # compliant answer never had anything to cite in the first place.
