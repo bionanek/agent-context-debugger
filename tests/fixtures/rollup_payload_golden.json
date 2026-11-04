@@ -40,13 +40,13 @@
        "moments": [
         {
          "kind": "non-event",
-         "label": "No topical reasoning detected",
+         "label": "Not lexically scorable",
          "t": null,
-         "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+         "text": "Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed.",
          "verdict": "no"
         }
        ],
-       "reason": "No predicate derivable and no keyword overlap with the assistant's reasoning.",
+       "reason": "No predicate derivable, so only the wording could be compared. Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now - the transcript carries no copy of what was delivered, so this wording may postdate the session.",
        "status": "unused",
        "title": "Talking",
        "type": "instruction"
@@ -61,6 +61,10 @@
         {
          "label": "not mechanically checkable",
          "text": "no checks file beside this document, and nothing in the rule could be extracted mechanically"
+        },
+        {
+         "label": "no reviewed check for this rule",
+         "text": "run /compile-rules on ~/.claude/CLAUDE.md"
         }
        ],
        "id": "ollup-fixture-root-home-claude-claude-md-1-commits",
@@ -68,13 +72,13 @@
        "moments": [
         {
          "kind": "non-event",
-         "label": "No topical reasoning detected",
+         "label": "Not lexically scorable",
          "t": null,
-         "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+         "text": "Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed.",
          "verdict": "no"
         }
        ],
-       "reason": "No predicate derivable and no keyword overlap with the assistant's reasoning.",
+       "reason": "No predicate derivable, so only the wording could be compared. Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now - the transcript carries no copy of what was delivered, so this wording may postdate the session.",
        "ruleCheck": {
         "checksApplied": [],
         "confidence": "low",
@@ -126,13 +130,13 @@
        "moments": [
         {
          "kind": "non-event",
-         "label": "No topical reasoning detected",
+         "label": "Not lexically scorable",
          "t": null,
-         "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+         "text": "Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed.",
          "verdict": "no"
         }
        ],
-       "reason": "No predicate derivable and no keyword overlap with the assistant's reasoning.",
+       "reason": "No predicate derivable, so only the wording could be compared. Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now - the transcript carries no copy of what was delivered, so this wording may postdate the session.",
        "status": "unused",
        "title": "Build",
        "type": "instruction"
@@ -149,13 +153,13 @@
        "moments": [
         {
          "kind": "non-event",
-         "label": "No topical reasoning detected",
+         "label": "Not lexically scorable",
          "t": null,
-         "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+         "text": "Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed.",
          "verdict": "no"
         }
        ],
-       "reason": "No predicate derivable and no keyword overlap with the assistant's reasoning.",
+       "reason": "No predicate derivable, so only the wording could be compared. Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now - the transcript carries no copy of what was delivered, so this wording may postdate the session.",
        "status": "unused",
        "title": "Tests",
        "type": "instruction"
@@ -308,13 +312,13 @@
          "moments": [
           {
            "kind": "non-event",
-           "label": "No topical reasoning detected",
+           "label": "Not lexically scorable",
            "t": null,
-           "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+           "text": "Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed.",
            "verdict": "no"
           }
          ],
-         "reason": "No predicate derivable and no keyword overlap with the assistant's reasoning.",
+         "reason": "No predicate derivable, so only the wording could be compared. Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now - the transcript carries no copy of what was delivered, so this wording may postdate the session.",
          "status": "unused",
          "title": "Talking",
          "type": "instruction"
@@ -329,6 +333,10 @@
           {
            "label": "not mechanically checkable",
            "text": "no checks file beside this document, and nothing in the rule could be extracted mechanically"
+          },
+          {
+           "label": "no reviewed check for this rule",
+           "text": "run /compile-rules on ~/.claude/CLAUDE.md"
           }
          ],
          "id": "turn0-ollup-fixture-root-home-claude-claude-md-1-commits",
@@ -336,13 +344,13 @@
          "moments": [
           {
            "kind": "non-event",
-           "label": "No topical reasoning detected",
+           "label": "Not lexically scorable",
            "t": null,
-           "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+           "text": "Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed.",
            "verdict": "no"
           }
          ],
-         "reason": "No predicate derivable and no keyword overlap with the assistant's reasoning.",
+         "reason": "No predicate derivable, so only the wording could be compared. Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now - the transcript carries no copy of what was delivered, so this wording may postdate the session.",
          "ruleCheck": {
           "checksApplied": [],
           "confidence": "low",
@@ -394,13 +402,13 @@
          "moments": [
           {
            "kind": "non-event",
-           "label": "No topical reasoning detected",
+           "label": "Not lexically scorable",
            "t": null,
-           "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+           "text": "Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed.",
            "verdict": "no"
           }
          ],
-         "reason": "No predicate derivable and no keyword overlap with the assistant's reasoning.",
+         "reason": "No predicate derivable, so only the wording could be compared. Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now - the transcript carries no copy of what was delivered, so this wording may postdate the session.",
          "status": "unused",
          "title": "Build",
          "type": "instruction"
@@ -417,13 +425,13 @@
          "moments": [
           {
            "kind": "non-event",
-           "label": "No topical reasoning detected",
+           "label": "Not lexically scorable",
            "t": null,
-           "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+           "text": "Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed.",
            "verdict": "no"
           }
          ],
-         "reason": "No predicate derivable and no keyword overlap with the assistant's reasoning.",
+         "reason": "No predicate derivable, so only the wording could be compared. Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now - the transcript carries no copy of what was delivered, so this wording may postdate the session.",
          "status": "unused",
          "title": "Tests",
          "type": "instruction"
@@ -550,13 +558,13 @@
          "moments": [
           {
            "kind": "non-event",
-           "label": "No topical reasoning detected",
+           "label": "Not lexically scorable",
            "t": null,
-           "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+           "text": "Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed.",
            "verdict": "no"
           }
          ],
-         "reason": "No predicate derivable and no keyword overlap with the assistant's reasoning.",
+         "reason": "No predicate derivable, so only the wording could be compared. Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now - the transcript carries no copy of what was delivered, so this wording may postdate the session.",
          "status": "unused",
          "title": "Talking",
          "type": "instruction"
@@ -571,6 +579,10 @@
           {
            "label": "not mechanically checkable",
            "text": "no checks file beside this document, and nothing in the rule could be extracted mechanically"
+          },
+          {
+           "label": "no reviewed check for this rule",
+           "text": "run /compile-rules on ~/.claude/CLAUDE.md"
           }
          ],
          "id": "turn1-ollup-fixture-root-home-claude-claude-md-1-commits",
@@ -578,13 +590,13 @@
          "moments": [
           {
            "kind": "non-event",
-           "label": "No topical reasoning detected",
+           "label": "Not lexically scorable",
            "t": null,
-           "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+           "text": "Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed.",
            "verdict": "no"
           }
          ],
-         "reason": "No predicate derivable and no keyword overlap with the assistant's reasoning.",
+         "reason": "No predicate derivable, so only the wording could be compared. Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now - the transcript carries no copy of what was delivered, so this wording may postdate the session.",
          "ruleCheck": {
           "checksApplied": [],
           "confidence": "low",
@@ -636,13 +648,13 @@
          "moments": [
           {
            "kind": "non-event",
-           "label": "No topical reasoning detected",
+           "label": "Not lexically scorable",
            "t": null,
-           "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+           "text": "Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed.",
            "verdict": "no"
           }
          ],
-         "reason": "No predicate derivable and no keyword overlap with the assistant's reasoning.",
+         "reason": "No predicate derivable, so only the wording could be compared. Only 0 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now - the transcript carries no copy of what was delivered, so this wording may postdate the session.",
          "status": "unused",
          "title": "Build",
          "type": "instruction"
@@ -659,13 +671,13 @@
          "moments": [
           {
            "kind": "non-event",
-           "label": "No topical reasoning detected",
+           "label": "Not lexically scorable",
            "t": null,
-           "text": "No assistant text segment had \u22652 distinctive keywords from this block.",
+           "text": "Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed.",
            "verdict": "no"
           }
          ],
-         "reason": "No predicate derivable and no keyword overlap with the assistant's reasoning.",
+         "reason": "No predicate derivable, so only the wording could be compared. Only 1 distinctive term(s) after weighting against the loaded documents, everyday English and this session's own vocabulary - too few to score. Not a statement about whether the block was followed. Judged against the file as it is on disk now - the transcript carries no copy of what was delivered, so this wording may postdate the session.",
          "status": "unused",
          "title": "Tests",
          "type": "instruction"

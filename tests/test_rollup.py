@@ -13,6 +13,13 @@ from tests.test_turns import (_Args, _write_jsonl, assistant_text,
                               assistant_tool_use, user_text, user_tool_result)
 
 GOLDEN = Path(__file__).resolve().parent / "fixtures" / "rollup_payload_golden.json"
+# The golden is a *subset* of a real payload, not a full dump: `_assert_subset`
+# only demands that the keys it names survive, so keys the original author left
+# out stay free to change. Do not refresh it by re-dumping the whole payload -
+# that silently pins every value the dump happens to contain and turns the
+# additive guard into an equality guard. When a change deliberately reworks a
+# value the golden does name, edit exactly those entries and say so in the
+# commit; a diff of more lines than the change explains is the review signal.
 
 
 def _root(tmp_path):
@@ -262,3 +269,21 @@ def test_payload_is_purely_additive(tmp_path, monkeypatch):
     golden = json.loads(GOLDEN.read_text())
     actual = _normalised(_fixture_payload(tmp_path, monkeypatch), tmp_path)
     _assert_subset(golden, actual)
+
+
+# ---------- the contested count ----------
+
+def test_the_session_rollup_counts_contested_blocks(tmp_path, monkeypatch):
+    """Baked in Python at both scopes, so the picker and the CLI agree.
+
+    Offline there is no judge, so the honest count is zero - and zero has to be
+    *present*, or a reader cannot tell "no disagreement" from "never asked".
+    """
+    summary, per_session = _run(
+        tmp_path, monkeypatch, _fixture_events(tmp_path),
+        global_md="# Talking\nbe direct and brief\n",
+        project_md="# Build\nrun the build before claiming done\n")
+    assert summary["contestedBlocks"] == 0
+    assert per_session["contestedBlocks"] == 0
+    assert not any(b.get("contested") for f in per_session["contextFiles"]
+                   for b in f["blocks"])

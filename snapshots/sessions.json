@@ -1,0 +1,39 @@
+{
+  "_comment": [
+    "The sessions the judgement-reliability baseline is measured on: the anchors",
+    "named in docs/judgement-reliability-research.md S7, spanning all four audited",
+    "projects plus this repo, and the false-red set added in Phase 0 - six sessions",
+    "whose push to master a reviewed, high-confidence record flags and whose own",
+    "prompt ordered it (see RULINGS.md 9, the `authorised` truth class).",
+    "`cwd` is the working directory the session ran in -",
+    "it is what the transcript directory name encodes, and the project CLAUDE.md",
+    "and project-relative paths resolve against it. A leading `~` is expanded",
+    "where it is read, so the committed list names no one's home directory.",
+    "Only `capture` needs these paths; `verify` runs entirely off each snapshot's",
+    "own manifest, so a machine that never had these projects can still check one.",
+    "The directories both write into - snapshots/baseline/ and snapshots/after/ -",
+    "are gitignored: they hold raw transcripts and are never committed, so a",
+    "clone has this list and none of the sessions it names. The reviewed checks",
+    "files those baselines are judged with are committed, under snapshots/checks/,",
+    "and snapshots/freeze_checks.py copies them into the private trees - except",
+    "the OZZ one, which carries a client's own rule prose and is deliberately",
+    "not published; freeze_checks.py --check fails on it as UNREVIEWED and the",
+    "one record behind its red badges is quoted in RULINGS.md 9."
+  ],
+  "sessions": [
+    {"project": "famigo", "cwd": "~/Git/famigo", "session": "9dd3cc8a"},
+    {"project": "famigo", "cwd": "~/Git/famigo", "session": "5448a718"},
+    {"project": "formic-core", "cwd": "~/Git/formic/core", "session": "39b9e09e"},
+    {"project": "formic-core", "cwd": "~/Git/formic/core", "session": "4ebe50c0"},
+    {"project": "formicHMI", "cwd": "~/Git/formic/formicHMI", "session": "12f48cdb"},
+    {"project": "formicHMI", "cwd": "~/Git/formic/formicHMI", "session": "8fd8526c"},
+    {"project": "reband", "cwd": "~/reband", "session": "22c58939"},
+    {"project": "agent-context-ide", "cwd": "~/Git/agent-context-ide", "session": "d5c3cc1a"},
+    {"project": "OZZ", "cwd": "~/Git/OZZ", "session": "c37b4f96"},
+    {"project": "OZZ", "cwd": "~/Git/OZZ", "session": "9061535d"},
+    {"project": "OZZ", "cwd": "~/Git/OZZ", "session": "a0f594f9"},
+    {"project": "OZZ", "cwd": "~/Git/OZZ", "session": "3a705721"},
+    {"project": "OZZ", "cwd": "~/Git/OZZ", "session": "d37263c9"},
+    {"project": "OZZ", "cwd": "~/Git/OZZ", "session": "1efb73f1"}
+  ]
+}

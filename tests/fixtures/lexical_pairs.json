@@ -1,0 +1,3639 @@
+{
+ "version": 1,
+ "labels": [
+  "quoted",
+  "topically-drawn-on",
+  "coincidental",
+  "undecidable"
+ ],
+ "operatingPoint": {
+  "note": "Frozen by Phase 13. Swept over coverageFloor x runChars x g2Critical on this set; 0.30 / 40 / 6.63 is the only point that reaches precision 1.0 without giving up a further true positive. See docs/judgement-reliability-research.md §3.2.",
+  "coverageFloor": 0.3,
+  "runTokens": 8,
+  "runChars": 40,
+  "g2Critical": 6.63,
+  "minSignificant": 2,
+  "minTerms": 3,
+  "thresholds": {
+    "AMBIENT_FLOOR": 0.35,
+    "MIN_AMBIENT_SEGMENTS": 8,
+    "MIN_AMBIENT_HITS": 3,
+    "ZIPF_RARE": 3.0,
+    "ZIPF_COMMON": 5.0,
+    "ZIPF_DISTINCTIVE": 4.0,
+    "K_SIZE": 12,
+    "MIN_WEIGHT": 0.5,
+    "MIN_COLLECTION": 20,
+    "BLOCK_TOKEN_CAP": 400,
+    "MIN_OBSERVATIONS": 2,
+    "REFERENCE_TOKENS": 1000000,
+    "MIN_REFERENCE": 2000,
+    "UNKNOWN_ZIPF": 2.5,
+    "BM25_K1": 0.9,
+    "BM25_B": 0.75,
+    "SHINGLE_N": 5,
+    "CONTAINMENT_FLOOR": 0.15,
+    "MIN_MATCHED_SHINGLES": 3,
+    "RUN_WINDOW": 60,
+    "RUN_BLOCK_CAP": 600,
+    "RUN_ANCHORS": 8,
+    "COPIED_LINE_LEN": 40,
+    "_MIN_TOKEN_LEN": 4
+  },
+  "minPrecision": 0.9,
+  "minTruePositives": 8,
+  "minTruePositivesInline": 3,
+  "measured": {
+   "precision": 1.0,
+   "recall": 0.5,
+   "truePositives": 9,
+   "falsePositives": 0,
+   "falseNegatives": 9,
+   "scored": 245
+  }
+ },
+ "corpora": {
+  "webshop-checkout": {
+   "documents": [
+    "Every checkout mutation carries an idempotency key derived from the cart revision. Replaying a request with the same key returns the stored receipt rather than charging again. The key is namespaced per storefront, so a cart moved between storefronts cannot collide with its own earlier receipt.",
+    "Money is a minor-unit integer everywhere. Rounding happens once, at the tax boundary, using banker's rounding; never round inside a line-item loop.",
+    "A refund writes a compensating entry to the refund ledger. Nothing is ever deleted from the ledger, so a reconciliation run can replay it end to end. The ledger is append-only and idempotent per refund reference.",
+    "Address validation is advisory. A shopper may override a failed validation, and the override is recorded on the order for the fulfilment team.",
+    "Inventory is reserved optimistically for fifteen minutes. An expired reservation is swept by the reaper job, which emits a restock event.",
+    "The pricing engine is pure: it takes a cart snapshot and returns a quote. It never reads the clock, so a quote is reproducible from its snapshot alone.",
+    "Discount stacking is resolved by precedence, not by order of application. Two discounts at the same precedence are an authoring error and fail the quote.",
+    "Gift cards settle before card payments. A partial gift-card settlement leaves the remainder on the card authorisation.",
+    "Shipping quotes are cached per postcode prefix for one hour. A carrier outage invalidates the prefix rather than the whole cache.",
+    "Tax jurisdictions come from the fulfilment address, never the billing address. A cross-border order splits into per-jurisdiction subtotals.",
+    "Order state transitions are append-only. The current state is a fold over the transition log, so a bad transition can be corrected by appending, never by editing.",
+    "Webhook delivery retries with jitter for twenty-four hours. A permanently failing endpoint is parked and reported, not dropped silently.",
+    "Card authorisations expire after seven days. An order that has not shipped by then is re-authorised, which may fail and cancel the order.",
+    "The cart is anonymous until checkout. Merging an anonymous cart into an account cart keeps the higher quantity per line, never the sum.",
+    "Fraud scoring runs asynchronously. A high score holds fulfilment but never blocks the payment, so the shopper sees a normal confirmation.",
+    "Product copy is localised per storefront. A missing translation falls back to the storefront default, and the fallback is logged once per key per day.",
+    "Search indexing is eventual. A newly published product may be missing from search for up to a minute, which the storefront must not treat as an error.",
+    "Subscription renewals are scheduled from the anniversary, not from the last successful charge, so a failed month does not shift the whole schedule.",
+    "Invoices are immutable once issued. A correction is a credit note referencing the original invoice number.",
+    "Customer exports are generated offline and delivered by signed link. The link expires in an hour and is single use.",
+    "Abandoned-cart mail is capped at two messages per shopper per week, across all storefronts, and honours the marketing opt-out.",
+    "The admin audit log records the acting user, the before value and the after value. An entry with no before value is a creation, not a missing field."
+   ],
+   "segments": [
+    "I threaded the idempotency key through the checkout mutation. Replaying a request with the same key returns the stored receipt rather than charging again, which is exactly what the rule asks for.",
+    "The cart revision is what the key is derived from, so a genuine edit produces a new key and a retry does not.",
+    "Wrote a test that replays one idempotency key three times and asserts a single charge.",
+    "The refund path now writes a compensating entry to the refund ledger rather than reversing the original row.",
+    "Nothing is deleted from the ledger, so the nightly reconciliation replays it end to end and still balances.",
+    "I left the reconciliation job alone; it already folds the ledger, so the compensating entry lands in the right period.",
+    "The ledger reference column already existed and was unused, so there is no migration.",
+    "Ran the suite: 84 tests pass. The two flaky payment tests were flaky before this too.",
+    "Next thing I would look at is the receipt renderer, which still formats money as a float.",
+    "Also renamed the handler for clarity; it was called `doCheckout`, which said nothing.",
+    "The storefront copy is untouched, and so is the admin.",
+    "I skimmed the carrier integration but did not change it - the timeout there is generous.",
+    "One question before I go further: should a partially shipped order be refundable at all?",
+    "The staging deploy is green and the smoke script passes.",
+    "Logging is unchanged apart from one debug line I removed.",
+    "There is a stale TODO in the mailer about template versioning; I left it.",
+    "The lint run flagged two unused imports in the file I touched, and I removed them.",
+    "Nothing in this change touches the search index or the product feed.",
+    "I did not bump any dependency.",
+    "Happy to split this into two commits if you would rather review the test separately."
+   ]
+  },
+  "firmware-can": {
+   "documents": [
+    "The watchdog is kicked from the supervisor task only. A worker that kicks the watchdog hides its own deadlock, which is the failure the watchdog exists to catch. The supervisor reads every worker's liveness flag before it kicks.",
+    "CAN frames are little-endian with a two-byte sequence counter. A gap in the counter is a dropped frame and must be reported, never interpolated.",
+    "The bootloader validates the image signature before erasing the application slot, so a bad image leaves the running firmware intact.",
+    "Flash writes are page aligned. An unaligned write is a programming error and traps rather than silently rounding the address.",
+    "The scheduler is cooperative. A task that runs longer than its budget is logged with its worst-case duration at the next tick, since there is no preemption to fall back on.",
+    "Sensor calibration lives in the config page and survives a firmware update. Erasing it requires the explicit factory-reset command.",
+    "Interrupt handlers push into a lock-free ring and return. All parsing happens in task context, so a burst cannot stall the bus.",
+    "The bus is terminated at both physical ends only. A stub longer than thirty centimetres is out of spec and shows up as intermittent CRC errors.",
+    "Time comes from the monotonic tick, never from the RTC. The RTC is for timestamps in logs and nothing else, because it can step backwards after a resynchronisation.",
+    "The heartbeat frame carries the uptime and the last reset cause. A reset cause of zero means the field was never populated, not a clean boot.",
+    "Firmware version is a semantic triple plus the build hash. The hash is what a field report is matched against, since the triple can be rebuilt.",
+    "Diagnostic logging is off in release builds. Turning it on changes timing enough to hide the race it is usually turned on to find.",
+    "The motor controller is disabled on any bus silence longer than a hundred milliseconds. Silence is a fault, not an idle state.",
+    "Non-volatile counters are written with a two-slot alternating scheme, so a reset during the write leaves the previous value readable.",
+    "The debug UART is receive-only in the field. A writable console on shipped hardware is a way in, and there is no authentication on it.",
+    "Stack usage is measured by painting the stack at boot and reading the high-water mark. Every task reports its margin at shutdown.",
+    "Temperature derating starts at eighty degrees and is linear to the cutout. The curve is a table, not a formula, so it can be changed without a code review.",
+    "Over-the-air updates resume from the last acknowledged chunk. A restarted transfer that starts from zero indicates a corrupted manifest.",
+    "The fault log is a circular buffer of sixty-four entries. The oldest entry is overwritten, and the overwrite count is itself recorded.",
+    "Board revisions are read from three strapping pins. An unknown combination halts at boot rather than guessing a pinout.",
+    "The current sense amplifier saturates before the fuse opens, so a saturated reading is treated as an overcurrent even though the number is wrong.",
+    "Unit tests run on the host against a simulated bus. Timing-dependent behaviour is tested on hardware, in the soak rig, never on the host."
+   ],
+   "segments": [
+    "Moved the kick into the supervisor task. A worker that kicks the watchdog hides its own deadlock, which is the whole reason the rule exists.",
+    "That immediately surfaced the stall in the parser task, which had been kicking from inside its own loop for months.",
+    "The supervisor now checks each worker's liveness flag before it kicks, and logs which worker was late.",
+    "I left the tick source alone: it is already the monotonic tick, and the RTC is only used for log timestamps.",
+    "Measured the worst-case supervisor duration at four hundred microseconds, well inside its budget, and it is logged at the next tick.",
+    "The scheduler is still cooperative, so a task over its budget shows up as a duration line rather than as a preemption.",
+    "The soak rig ran overnight with no watchdog resets, where the old build reset roughly every two hours.",
+    "No change to the bootloader or to the flash layout, so field units can take this as a normal update.",
+    "The one thing I am unsure about is whether the supervisor should kick when a worker is late, or let the reset happen.",
+    "Added a soak-rig assertion on the reset cause so a regression shows up as a failing run.",
+    "I did not touch the derating table or the current sense path.",
+    "The debug UART stayed receive-only; nothing here needed a console.",
+    "Stack high-water marks are unchanged within noise.",
+    "Host tests all pass, and I added one for the liveness flag.",
+    "No new dependency, and no change to the build hash scheme.",
+    "The fault log format is untouched.",
+    "I read the board revision code while I was in there and left it alone.",
+    "Nothing in this change is timing dependent on the host side.",
+    "Happy to run a second soak with logging on if you want the timing evidence.",
+    "The diff is about sixty lines, most of it the new liveness flag."
+   ]
+  },
+  "polish-rules": {
+   "documents": [
+    "Nigdy nie przekazuj `echo` do `pbcopy`. Uzyj `printf`, zeby usunac znak nowej linii doklejany przez terminal.",
+    "Kazda migracja bazy musi byc odwracalna. Migracja bez skryptu wycofania nie przechodzi przegladu kodu.",
+    "Logi produkcyjne nie moga zawierac danych osobowych. Identyfikator uzytkownika jest dopuszczalny, adres pocztowy nie.",
+    "Zadanie cykliczne uruchamiamy z blokada rozproszona. Dwa procesy wykonujace to samo zadanie licza wynik dwa razy.",
+    "Testy jednostkowe nie moga siegac do sieci. Zamiast tego uzywamy atrapy klienta protokolu.",
+    "Konfiguracja pochodzi ze zmiennych srodowiskowych. Wartosc wpisana w kodzie jest bledem, nawet jesli to wartosc domyslna.",
+    "Kolejka wiadomosci gwarantuje dostarczenie co najmniej raz. Odbiorca musi byc idempotentny, bo powtorzenie jest normalne.",
+    "Nazwy tabel sa w liczbie mnogiej, nazwy kolumn w pojedynczej. Skrot w nazwie kolumny wymaga komentarza w schemacie.",
+    "Blad walidacji zwracamy jako liste, nie jako pierwszy napotkany problem. Uzytkownik poprawia formularz raz, nie osiem razy.",
+    "Zaleznosci przypinamy do dokladnej wersji. Zakres wersji w pliku blokady jest bledem narzedzia, nie decyzja.",
+    "Klucz szyfrujacy rotujemy co kwartal. Stary klucz zostaje do odszyfrowania, ale nie sluzy do zapisu.",
+    "Kazdy punkt koncowy interfejsu ma limit zapytan. Punkt bez limitu jest wektorem przeciazenia.",
+    "Zdarzenia domenowe nazywamy w czasie przeszlym. Nazwa w trybie rozkazujacym opisuje polecenie, nie zdarzenie.",
+    "Kopie zapasowe odtwarzamy probnie raz w miesiacu. Kopia, ktorej nikt nie odtworzyl, nie jest kopia.",
+    "Wdrozenie odbywa sie za flaga funkcji. Wlaczenie flagi jest osobna decyzja, odwracalna bez wdrozenia.",
+    "Zapytania do bazy w petli sa zabronione. Pobieramy dane jednym zapytaniem i grupujemy w pamieci.",
+    "Strefa czasowa w bazie to zawsze UTC. Przeliczenie na strefe uzytkownika nalezy do warstwy prezentacji.",
+    "Pliki uzytkownika trafiaja do magazynu obiektowego, nigdy do systemu plikow serwera. Serwer jest wymienny.",
+    "Metryki opisujemy jednostka w nazwie. Metryka bez jednostki jest liczba, ktorej nikt nie umie zinterpretowac.",
+    "Przegladu kodu nie zatwierdza autor zmiany. Nawet poprawka literowki potrzebuje drugiej pary oczu.",
+    "Dokumentacja mieszka w repozytorium obok kodu. Dokumentacja w osobnym narzedziu rozjezdza sie w ciagu miesiaca.",
+    "Awarie opisujemy bez wskazywania winnego. Raport ma opisac mechanizm, nie osobe."
+   ],
+   "segments": [
+    "Przeniosem kopiowanie do schowka na `printf`, zeby usunac znak nowej linii doklejany przez terminal.",
+    "Zamienilem trzy miejsca, w ktorych bylo `echo`, i dodalem test sprawdzajacy zawartosc schowka.",
+    "Test porownuje bajty, a nie tekst, bo wlasnie o ten znak nowej linii tu chodzi.",
+    "Nie ruszalem konfiguracji ani zmiennych srodowiskowych, ta czesc byla poprawna.",
+    "Migracje zostawilem bez zmian, bo zadna z nich nie dotyczy schowka.",
+    "Uruchomilem cala suite: sto dwanascie testow przechodzi.",
+    "Zostaje jedna watpliwosc: czy skrot klawiszowy ma kopiowac zaznaczenie, czy caly wiersz.",
+    "Nie dodawalem nowej zaleznosci, `printf` jest wbudowane w powloke.",
+    "Opis zmiany: kopiowanie do schowka nie doklada juz pustego wiersza na koncu.",
+    "Przy okazji poprawilem nazwe funkcji, bo poprzednia nic nie mowila.",
+    "Nie zmienialem widoku ani szablonu strony.",
+    "Linter zglosil dwa nieuzywane importy w pliku, ktory ruszalem, i je usunalem.",
+    "Nic w tej zmianie nie dotyczy kolejki ani zadan cyklicznych.",
+    "Wdrozenie na srodowisko testowe przeszlo bez bledow.",
+    "Logowanie zostalo takie samo, poza jedna linia diagnostyczna, ktora usunalem.",
+    "W module poczty jest stary komentarz do zrobienia; zostawilem go.",
+    "Nie podnosilem wersji zadnej biblioteki.",
+    "Moge rozbic to na dwa commity, jesli wolisz osobno przejrzec test.",
+    "Diff ma okolo czterdziestu linii.",
+    "Reszta katalogu pozostaje bez zmian."
+   ]
+  }
+ },
+ "pairs": [
+  {
+   "id": "inspection-famigo-5448a718-research-api-rate-limiting-md-0-read-this-first-the-framing",
+   "label": "quoted",
+   "provenance": "inspection",
+   "block": {
+    "snapshot": "famigo/5448a718",
+    "doc": "home/Git/famigo/plans/api-rate-limiting/research-api-rate-limiting.md",
+    "title": "0. Read this first — the framing"
+   },
+   "corpus": {
+    "snapshot": "famigo/5448a718"
+   },
+   "note": "The session wrote and then discussed this research doc; the matched run is its own sentence."
+  },
+  {
+   "id": "inspection-famigo-5448a718-research-api-rate-limiting-md-1-current-state-verified-in-this-repo",
+   "label": "quoted",
+   "provenance": "inspection",
+   "block": {
+    "snapshot": "famigo/5448a718",
+    "doc": "home/Git/famigo/plans/api-rate-limiting/research-api-rate-limiting.md",
+    "title": "1. Current state (verified in this repo)"
+   },
+   "corpus": {
+    "snapshot": "famigo/5448a718"
+   },
+   "note": "Same document, discussed in prose ('integration tests structurally cannot catch a limiter regression')."
+  },
+  {
+   "id": "inspection-famigo-5448a718-research-api-rate-limiting-md-4-verification",
+   "label": "quoted",
+   "provenance": "inspection",
+   "block": {
+    "snapshot": "famigo/5448a718",
+    "doc": "home/Git/famigo/plans/api-rate-limiting/research-api-rate-limiting.md",
+    "title": "4. Verification"
+   },
+   "corpus": {
+    "snapshot": "famigo/5448a718"
+   },
+   "note": "Same document; the bucket-separation sentence is reproduced in the reply."
+  },
+  {
+   "id": "inspection-famigo-9dd3cc8a-claude-md-database",
+   "label": "topically-drawn-on",
+   "provenance": "inspection",
+   "block": {
+    "snapshot": "famigo/9dd3cc8a",
+    "doc": "home/Git/famigo/backend/CLAUDE.md",
+    "title": "Database"
+   },
+   "corpus": {
+    "snapshot": "famigo/9dd3cc8a"
+   },
+   "note": "The turn argues for PostGIS and GiST indexing, which is what this block is about."
+  },
+  {
+   "id": "inspection-reband-22c58939-agents-md-conventions",
+   "label": "topically-drawn-on",
+   "provenance": "inspection",
+   "block": {
+    "snapshot": "reband/22c58939",
+    "doc": "home/reband/AGENTS.md",
+    "title": "Conventions"
+   },
+   "corpus": {
+    "snapshot": "reband/22c58939"
+   },
+   "note": "The convention is `typecheck lint`; the run reports running exactly that, repeatedly."
+  },
+  {
+   "id": "inspection-reband-22c58939-decisions-md-2026-06-24-guitar-tuner-bucket-b-pure-js-pitchfi",
+   "label": "quoted",
+   "provenance": "inspection",
+   "block": {
+    "snapshot": "reband/22c58939",
+    "doc": "home/.claude/projects/-Users-jakuburban-reband/memory/DECISIONS.md",
+    "title": "[2026-06-24] Guitar tuner: Bucket B (pure-JS pitchfinder), local-mute coexistence, isolated session-switch"
+   },
+   "corpus": {
+    "snapshot": "reband/22c58939"
+   },
+   "note": "The session wrote this decision entry, so its wording appears in the reply."
+  },
+  {
+   "id": "inspection-reband-22c58939-grill-prd-md-phase-0-figma-design-optional",
+   "label": "quoted",
+   "provenance": "inspection",
+   "block": {
+    "snapshot": "reband/22c58939",
+    "doc": "home/.claude/commands/grill-prd.md",
+    "title": "Phase 0: Figma Design (optional)"
+   },
+   "corpus": {
+    "snapshot": "reband/22c58939"
+   },
+   "note": "`/grill-prd` was invoked and the agent asked the Figma question the block scripts. The frozen operating point drops this one deliberately: the identical 35-character run also sits in feature-to-prd.md, which was never invoked, so the two pairs are lexically the same evidence and precision-first means losing both."
+  },
+  {
+   "id": "inspection-reband-22c58939-feature-to-prd-md-phase-2-interview-the-user-grill-me",
+   "label": "coincidental",
+   "provenance": "inspection",
+   "block": {
+    "snapshot": "reband/22c58939",
+    "doc": "home/.claude/commands/feature-to-prd.md",
+    "title": "Phase 2: Interview the user (grill-me)"
+   },
+   "corpus": {
+    "snapshot": "reband/22c58939"
+   },
+   "note": "`/feature-to-prd` was never invoked. It shares one boilerplate sentence with grill-prd, which was - the twin of the pair above, and lexically indistinguishable from it. Both are below the frozen run-length bar."
+  },
+  {
+   "id": "inspection-formic-core-39b9e09e-standup-skill-step-3-the-list",
+   "label": "coincidental",
+   "provenance": "inspection",
+   "block": {
+    "snapshot": "formic-core/39b9e09e",
+    "doc": "home/.claude/skills/standup/SKILL.md",
+    "title": "Step 3 — the list"
+   },
+   "corpus": {
+    "snapshot": "formic-core/39b9e09e"
+   },
+   "note": "`/standup` was never invoked; the overlap is 'toggling' from a badge-layout reply and 'flagging' from a Notion enum discussion."
+  },
+  {
+   "id": "inspection-famigo-9dd3cc8a-figma-workflow-md-tech-stack",
+   "label": "coincidental",
+   "provenance": "inspection",
+   "block": {
+    "snapshot": "famigo/9dd3cc8a",
+    "doc": "home/Git/famigo/.claude/rules/figma-workflow.md",
+    "title": "Tech Stack"
+   },
+   "corpus": {
+    "snapshot": "famigo/9dd3cc8a"
+   },
+   "note": "§7's founding finding: 5/8 keyword hits against an unrelated Effect-library discussion."
+  },
+  {
+   "id": "inspection-famigo-9dd3cc8a-figma-design-system-md-figma-design-system-famigo-mobile",
+   "label": "coincidental",
+   "provenance": "inspection",
+   "block": {
+    "snapshot": "famigo/9dd3cc8a",
+    "doc": "home/Git/famigo/.claude/rules/figma-design-system.md",
+    "title": "Figma Design System — Famigo Mobile"
+   },
+   "corpus": {
+    "snapshot": "famigo/9dd3cc8a"
+   },
+   "note": "§2 F-MOMENTS: narrated by a rate-limiting review because both texts say 'design'."
+  },
+  {
+   "id": "inspection-famigo-9dd3cc8a-claude-md-implement-plan",
+   "label": "coincidental",
+   "provenance": "inspection",
+   "block": {
+    "snapshot": "famigo/9dd3cc8a",
+    "doc": "home/.claude/CLAUDE.md",
+    "title": "implement-plan"
+   },
+   "corpus": {
+    "snapshot": "famigo/9dd3cc8a"
+   },
+   "note": "§7 F-TRIGGER: `/implement-plan-workflow` was invoked, not `/implement-plan`."
+  },
+  {
+   "id": "inspection-famigo-9dd3cc8a-claude-md-github-account-per-project",
+   "label": "undecidable",
+   "provenance": "inspection",
+   "block": {
+    "snapshot": "famigo/9dd3cc8a",
+    "doc": "home/.claude/CLAUDE.md",
+    "title": "GitHub account per project"
+   },
+   "corpus": {
+    "snapshot": "famigo/9dd3cc8a"
+   },
+   "note": "Whatever the run did with `gh` lives in backticked commands, which are stripped from both sides. There is no defensible lexical ground truth for this pair."
+  },
+  {
+   "id": "inspection-famigo-9dd3cc8a-claude-md-end-of-implementation-summary",
+   "label": "undecidable",
+   "provenance": "inspection",
+   "block": {
+    "snapshot": "famigo/9dd3cc8a",
+    "doc": "home/.claude/CLAUDE.md",
+    "title": "End-of-implementation summary"
+   },
+   "corpus": {
+    "snapshot": "famigo/9dd3cc8a"
+   },
+   "note": "A response-shape rule: compliance is the closing paragraph's shape, not its vocabulary."
+  },
+  {
+   "id": "inspection-famigo-5448a718-claude-md-end-of-implementation-summary",
+   "label": "undecidable",
+   "provenance": "inspection",
+   "block": {
+    "snapshot": "famigo/5448a718",
+    "doc": "home/.claude/CLAUDE.md",
+    "title": "End-of-implementation summary"
+   },
+   "corpus": {
+    "snapshot": "famigo/5448a718"
+   },
+   "note": "Same response-shape rule, different session."
+  },
+  {
+   "id": "inspection-formic-core-4ebe50c0-claude-md-end-of-implementation-summary",
+   "label": "undecidable",
+   "provenance": "inspection",
+   "block": {
+    "snapshot": "formic-core/4ebe50c0",
+    "doc": "home/.claude/CLAUDE.md",
+    "title": "End-of-implementation summary"
+   },
+   "corpus": {
+    "snapshot": "formic-core/4ebe50c0"
+   },
+   "note": "Same response-shape rule; §7's doc-only-Write anchor."
+  },
+  {
+   "id": "inspection-formichmi-12f48cdb-claude-md-github-account-per-project",
+   "label": "undecidable",
+   "provenance": "inspection",
+   "block": {
+    "snapshot": "formicHMI/12f48cdb",
+    "doc": "home/.claude/CLAUDE.md",
+    "title": "GitHub account per project"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/12f48cdb"
+   },
+   "note": "§7 F-PATHTABLE: the switch ran 13x, all of it inside backticked commands."
+  },
+  {
+   "id": "inspection-famigo-5448a718-claude-md-error-memory",
+   "label": "topically-drawn-on",
+   "provenance": "inspection",
+   "block": {
+    "snapshot": "famigo/5448a718",
+    "doc": "home/.claude/CLAUDE.md",
+    "title": "Error Memory"
+   },
+   "corpus": {
+    "snapshot": "famigo/5448a718"
+   },
+   "note": "§7 F-BLINDSPOT: the agent appended a rule-templated entry to the file the rule names. The engagement is a file write, so the prose carries no trace of it - a recall miss by design."
+  },
+  {
+   "id": "inspection-famigo-5448a718-claude-md-decision-memory",
+   "label": "topically-drawn-on",
+   "provenance": "inspection",
+   "block": {
+    "snapshot": "famigo/5448a718",
+    "doc": "home/.claude/CLAUDE.md",
+    "title": "Decision Memory"
+   },
+   "corpus": {
+    "snapshot": "famigo/5448a718"
+   },
+   "note": "§7 F-BLINDSPOT, same session: a templated decision entry written to the named file."
+  },
+  {
+   "id": "inspection-reband-22c58939-claude-md-decision-memory",
+   "label": "topically-drawn-on",
+   "provenance": "inspection",
+   "block": {
+    "snapshot": "reband/22c58939",
+    "doc": "home/.claude/CLAUDE.md",
+    "title": "Decision Memory"
+   },
+   "corpus": {
+    "snapshot": "reband/22c58939"
+   },
+   "note": "§7 F-BLINDSPOT: reband's decision entry, written rather than discussed."
+  },
+  {
+   "id": "inspection-famigo-5448a718-claude-md-quality-gate-mandatory",
+   "label": "topically-drawn-on",
+   "provenance": "inspection",
+   "block": {
+    "snapshot": "famigo/5448a718",
+    "doc": "home/Git/famigo/CLAUDE.md",
+    "title": "Quality Gate — MANDATORY"
+   },
+   "corpus": {
+    "snapshot": "famigo/5448a718"
+   },
+   "note": "§7 F-CMDMENTION: 21 verbatim `yarn type-check && yarn lint && yarn test` runs, all of them tool calls rather than prose."
+  },
+  {
+   "id": "inspection-formic-core-39b9e09e-agents-md-commands",
+   "label": "topically-drawn-on",
+   "provenance": "inspection",
+   "block": {
+    "snapshot": "formic-core/39b9e09e",
+    "doc": "home/Git/formic/core/palletizer_hmi/AGENTS.md",
+    "title": "Commands"
+   },
+   "corpus": {
+    "snapshot": "formic-core/39b9e09e"
+   },
+   "note": "§7 F-BLINDSPOT: every documented command ran; the block is a fenced command list."
+  },
+  {
+   "id": "uninvoked-skill-agent-context-ide-d5c3cc1a-fable-md-1-read-what-the-request-is-actually-asking-for",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "agent-context-ide/d5c3cc1a",
+    "doc": "home/.claude/commands/fable.md",
+    "title": "1. Read what the request is actually asking for"
+   },
+   "corpus": {
+    "snapshot": "agent-context-ide/d5c3cc1a"
+   },
+   "note": "`/fable` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-agent-context-ide-d5c3cc1a-figma-code-connect-skill-step-1-parse-the-figma-url",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "agent-context-ide/d5c3cc1a",
+    "doc": "home/.claude/plugins/cache/claude-plugins-official/figma/2.2.107/skills/figma-code-connect/SKILL.md",
+    "title": "Step 1: Parse the Figma URL"
+   },
+   "corpus": {
+    "snapshot": "agent-context-ide/d5c3cc1a"
+   },
+   "note": "`/figma-code-connect` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-agent-context-ide-d5c3cc1a-figma-generate-library-skill-11-scripts",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "agent-context-ide/d5c3cc1a",
+    "doc": "home/.claude/plugins/cache/claude-plugins-official/figma/2.2.107/skills/figma-generate-library/SKILL.md",
+    "title": "11. Scripts"
+   },
+   "corpus": {
+    "snapshot": "agent-context-ide/d5c3cc1a"
+   },
+   "note": "`/figma-generate-library` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-agent-context-ide-d5c3cc1a-figma-use-skill-9-discover-conventions-before-creating",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "agent-context-ide/d5c3cc1a",
+    "doc": "home/.claude/plugins/cache/claude-plugins-official/figma/2.2.107/skills/figma-use/SKILL.md",
+    "title": "9. Discover Conventions Before Creating"
+   },
+   "corpus": {
+    "snapshot": "agent-context-ide/d5c3cc1a"
+   },
+   "note": "`/figma-use` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-agent-context-ide-d5c3cc1a-create-pr-skill-golden-rules",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "agent-context-ide/d5c3cc1a",
+    "doc": "home/.claude/skills/create-pr/SKILL.md",
+    "title": "Golden rules"
+   },
+   "corpus": {
+    "snapshot": "agent-context-ide/d5c3cc1a"
+   },
+   "note": "`/create-pr` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-agent-context-ide-d5c3cc1a-formic-create-release-skill-what-the-underlying-command-already-does",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "agent-context-ide/d5c3cc1a",
+    "doc": "home/.claude/skills/formic-create-release/SKILL.md",
+    "title": "What the underlying command already does"
+   },
+   "corpus": {
+    "snapshot": "agent-context-ide/d5c3cc1a"
+   },
+   "note": "`/formic-create-release` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-famigo-5448a718-fable-md-1-read-what-the-request-is-actually-asking-for",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "famigo/5448a718",
+    "doc": "home/.claude/commands/fable.md",
+    "title": "1. Read what the request is actually asking for"
+   },
+   "corpus": {
+    "snapshot": "famigo/5448a718"
+   },
+   "note": "`/fable` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-famigo-5448a718-figma-generate-design-skill-prerequisites",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "famigo/5448a718",
+    "doc": "home/.claude/plugins/cache/claude-plugins-official/figma/2.2.107/skills/figma-generate-design/SKILL.md",
+    "title": "Prerequisites"
+   },
+   "corpus": {
+    "snapshot": "famigo/5448a718"
+   },
+   "note": "`/figma-generate-design` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-famigo-5448a718-figma-use-slides-skill-reference-docs",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "famigo/5448a718",
+    "doc": "home/.claude/plugins/cache/claude-plugins-official/figma/2.2.107/skills/figma-use-slides/SKILL.md",
+    "title": "Reference Docs"
+   },
+   "corpus": {
+    "snapshot": "famigo/5448a718"
+   },
+   "note": "`/figma-use-slides` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-famigo-5448a718-expo-dev-client-skill-using-the-dev-client",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "famigo/5448a718",
+    "doc": "home/.claude/plugins/cache/expo-plugins/expo/1.0.0/skills/expo-dev-client/SKILL.md",
+    "title": "Using the Dev Client"
+   },
+   "corpus": {
+    "snapshot": "famigo/5448a718"
+   },
+   "note": "`/expo-dev-client` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-famigo-5448a718-context-audit-skill-three-failure-modes-not-one",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "famigo/5448a718",
+    "doc": "home/.claude/skills/context-audit/SKILL.md",
+    "title": "Three failure modes, not one"
+   },
+   "corpus": {
+    "snapshot": "famigo/5448a718"
+   },
+   "note": "`/context-audit` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-famigo-5448a718-graphify-skill-for-graphify-query",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "famigo/5448a718",
+    "doc": "home/.claude/skills/graphify/SKILL.md",
+    "title": "For /graphify query"
+   },
+   "corpus": {
+    "snapshot": "famigo/5448a718"
+   },
+   "note": "`/graphify` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-famigo-9dd3cc8a-fable-md-1-read-what-the-request-is-actually-asking-for",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "famigo/9dd3cc8a",
+    "doc": "home/.claude/commands/fable.md",
+    "title": "1. Read what the request is actually asking for"
+   },
+   "corpus": {
+    "snapshot": "famigo/9dd3cc8a"
+   },
+   "note": "`/fable` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-famigo-9dd3cc8a-figma-generate-design-skill-build-update-screens-and-views-from-design-syste",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "famigo/9dd3cc8a",
+    "doc": "home/.claude/plugins/cache/claude-plugins-official/figma/2.2.107/skills/figma-generate-design/SKILL.md",
+    "title": "Build / Update Screens and Views from Design System"
+   },
+   "corpus": {
+    "snapshot": "famigo/9dd3cc8a"
+   },
+   "note": "`/figma-generate-design` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-famigo-9dd3cc8a-figma-use-slides-skill-deck-building-workflow",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "famigo/9dd3cc8a",
+    "doc": "home/.claude/plugins/cache/claude-plugins-official/figma/2.2.107/skills/figma-use-slides/SKILL.md",
+    "title": "Deck-Building Workflow"
+   },
+   "corpus": {
+    "snapshot": "famigo/9dd3cc8a"
+   },
+   "note": "`/figma-use-slides` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-famigo-9dd3cc8a-expo-deployment-skill-automated-deployments",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "famigo/9dd3cc8a",
+    "doc": "home/.claude/plugins/cache/expo-plugins/expo/1.0.0/skills/expo-deployment/SKILL.md",
+    "title": "Automated Deployments"
+   },
+   "corpus": {
+    "snapshot": "famigo/9dd3cc8a"
+   },
+   "note": "`/expo-deployment` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-famigo-9dd3cc8a-animate-skill-the-build-sequence",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "famigo/9dd3cc8a",
+    "doc": "home/.claude/skills/animate/SKILL.md",
+    "title": "The Build Sequence"
+   },
+   "corpus": {
+    "snapshot": "famigo/9dd3cc8a"
+   },
+   "note": "`/animate` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-famigo-9dd3cc8a-find-animation-opportunities-skill-workflow",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "famigo/9dd3cc8a",
+    "doc": "home/.claude/skills/find-animation-opportunities/SKILL.md",
+    "title": "Workflow"
+   },
+   "corpus": {
+    "snapshot": "famigo/9dd3cc8a"
+   },
+   "note": "`/find-animation-opportunities` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-formic-core-39b9e09e-fable-md-1-read-what-the-request-is-actually-asking-for",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "formic-core/39b9e09e",
+    "doc": "home/.claude/commands/fable.md",
+    "title": "1. Read what the request is actually asking for"
+   },
+   "corpus": {
+    "snapshot": "formic-core/39b9e09e"
+   },
+   "note": "`/fable` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-formic-core-39b9e09e-figma-create-new-file-skill-editor-specific-notes",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "formic-core/39b9e09e",
+    "doc": "home/.claude/plugins/cache/claude-plugins-official/figma/2.2.107/skills/figma-create-new-file/SKILL.md",
+    "title": "Editor-specific notes"
+   },
+   "corpus": {
+    "snapshot": "formic-core/39b9e09e"
+   },
+   "note": "`/figma-create-new-file` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-formic-core-39b9e09e-figma-use-figjam-skill-text-mutations-canonical-recipe",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "formic-core/39b9e09e",
+    "doc": "home/.claude/plugins/cache/claude-plugins-official/figma/2.2.107/skills/figma-use-figjam/SKILL.md",
+    "title": "Text Mutations — Canonical Recipe"
+   },
+   "corpus": {
+    "snapshot": "formic-core/39b9e09e"
+   },
+   "note": "`/figma-use-figjam` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-formic-core-39b9e09e-animate-skill-the-build-sequence",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "formic-core/39b9e09e",
+    "doc": "home/.claude/skills/animate/SKILL.md",
+    "title": "The Build Sequence"
+   },
+   "corpus": {
+    "snapshot": "formic-core/39b9e09e"
+   },
+   "note": "`/animate` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-formic-core-39b9e09e-find-animation-opportunities-skill-workflow",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "formic-core/39b9e09e",
+    "doc": "home/.claude/skills/find-animation-opportunities/SKILL.md",
+    "title": "Workflow"
+   },
+   "corpus": {
+    "snapshot": "formic-core/39b9e09e"
+   },
+   "note": "`/find-animation-opportunities` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-formic-core-4ebe50c0-fable-md-1-read-what-the-request-is-actually-asking-for",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "formic-core/4ebe50c0",
+    "doc": "home/.claude/commands/fable.md",
+    "title": "1. Read what the request is actually asking for"
+   },
+   "corpus": {
+    "snapshot": "formic-core/4ebe50c0"
+   },
+   "note": "`/fable` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-formic-core-4ebe50c0-ddviz-skill-determine-the-user-s-intent",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "formic-core/4ebe50c0",
+    "doc": "home/.claude/plugins/cache/claude-plugins-official/datadog/0.7.17/skills/ddviz/SKILL.md",
+    "title": "Determine the user's intent"
+   },
+   "corpus": {
+    "snapshot": "formic-core/4ebe50c0"
+   },
+   "note": "`/ddviz` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-formic-core-4ebe50c0-figma-generate-library-skill-5-library-discovery-and-search-design-system-reu",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "formic-core/4ebe50c0",
+    "doc": "home/.claude/plugins/cache/claude-plugins-official/figma/2.2.107/skills/figma-generate-library/SKILL.md",
+    "title": "5. Library Discovery and search_design_system — Reuse Decision Matrix"
+   },
+   "corpus": {
+    "snapshot": "formic-core/4ebe50c0"
+   },
+   "note": "`/figma-generate-library` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-formic-core-4ebe50c0-figma-use-skill-use-figma-figma-plugin-api-skill",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "formic-core/4ebe50c0",
+    "doc": "home/.claude/plugins/cache/claude-plugins-official/figma/2.2.107/skills/figma-use/SKILL.md",
+    "title": "use_figma — Figma Plugin API Skill"
+   },
+   "corpus": {
+    "snapshot": "formic-core/4ebe50c0"
+   },
+   "note": "`/figma-use` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-formic-core-4ebe50c0-context-audit-skill-procedure",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "formic-core/4ebe50c0",
+    "doc": "home/.claude/skills/context-audit/SKILL.md",
+    "title": "Procedure"
+   },
+   "corpus": {
+    "snapshot": "formic-core/4ebe50c0"
+   },
+   "note": "`/context-audit` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-formic-core-4ebe50c0-find-animation-opportunities-skill-finding-animation-opportunities",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "formic-core/4ebe50c0",
+    "doc": "home/.claude/skills/find-animation-opportunities/SKILL.md",
+    "title": "Finding Animation Opportunities"
+   },
+   "corpus": {
+    "snapshot": "formic-core/4ebe50c0"
+   },
+   "note": "`/find-animation-opportunities` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-formichmi-12f48cdb-fable-md-1-read-what-the-request-is-actually-asking-for",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "formicHMI/12f48cdb",
+    "doc": "home/.claude/commands/fable.md",
+    "title": "1. Read what the request is actually asking for"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/12f48cdb"
+   },
+   "note": "`/fable` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-formichmi-12f48cdb-figma-code-connect-skill-step-3-fetch-component-properties",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "formicHMI/12f48cdb",
+    "doc": "home/.claude/plugins/cache/claude-plugins-official/figma/2.2.107/skills/figma-code-connect/SKILL.md",
+    "title": "Step 3: Fetch Component Properties"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/12f48cdb"
+   },
+   "note": "`/figma-code-connect` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-formichmi-12f48cdb-figma-generate-library-skill-7-naming-conventions",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "formicHMI/12f48cdb",
+    "doc": "home/.claude/plugins/cache/claude-plugins-official/figma/2.2.107/skills/figma-generate-library/SKILL.md",
+    "title": "7. Naming Conventions"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/12f48cdb"
+   },
+   "note": "`/figma-generate-library` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-formichmi-12f48cdb-figma-use-slides-skill-reference-docs",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "formicHMI/12f48cdb",
+    "doc": "home/.claude/plugins/cache/claude-plugins-official/figma/2.2.107/skills/figma-use-slides/SKILL.md",
+    "title": "Reference Docs"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/12f48cdb"
+   },
+   "note": "`/figma-use-slides` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-formichmi-12f48cdb-animation-vocabulary-skill-glossary",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "formicHMI/12f48cdb",
+    "doc": "home/.claude/skills/animation-vocabulary/SKILL.md",
+    "title": "Glossary"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/12f48cdb"
+   },
+   "note": "`/animation-vocabulary` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-formichmi-12f48cdb-find-animation-opportunities-skill-hard-rules",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "formicHMI/12f48cdb",
+    "doc": "home/.claude/skills/find-animation-opportunities/SKILL.md",
+    "title": "Hard Rules"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/12f48cdb"
+   },
+   "note": "`/find-animation-opportunities` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-formichmi-8fd8526c-fable-md-1-read-what-the-request-is-actually-asking-for",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "formicHMI/8fd8526c",
+    "doc": "home/.claude/commands/fable.md",
+    "title": "1. Read what the request is actually asking for"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/8fd8526c"
+   },
+   "note": "`/fable` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-formichmi-8fd8526c-ddsetup-skill-datadog-mcp-server",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "formicHMI/8fd8526c",
+    "doc": "home/.claude/plugins/cache/claude-plugins-official/datadog/0.7.17/skills/ddsetup/SKILL.md",
+    "title": "Datadog MCP Server"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/8fd8526c"
+   },
+   "note": "`/ddsetup` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-formichmi-8fd8526c-figma-generate-design-skill-error-recovery",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "formicHMI/8fd8526c",
+    "doc": "home/.claude/plugins/cache/claude-plugins-official/figma/2.2.107/skills/figma-generate-design/SKILL.md",
+    "title": "Error Recovery"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/8fd8526c"
+   },
+   "note": "`/figma-generate-design` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-formichmi-8fd8526c-figma-swiftui-skill-pick-the-direction",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "formicHMI/8fd8526c",
+    "doc": "home/.claude/plugins/cache/claude-plugins-official/figma/2.2.107/skills/figma-swiftui/SKILL.md",
+    "title": "Pick the direction"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/8fd8526c"
+   },
+   "note": "`/figma-swiftui` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-formichmi-8fd8526c-figma-use-skill-7-error-recovery-self-correction",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "formicHMI/8fd8526c",
+    "doc": "home/.claude/plugins/cache/claude-plugins-official/figma/2.2.107/skills/figma-use/SKILL.md",
+    "title": "7. Error Recovery & Self-Correction"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/8fd8526c"
+   },
+   "note": "`/figma-use` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-formichmi-8fd8526c-design-audit-skill-phase-1-locate-decode-the-design",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "formicHMI/8fd8526c",
+    "doc": "home/.claude/skills/design-audit/SKILL.md",
+    "title": "Phase 1 — Locate & decode the design"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/8fd8526c"
+   },
+   "note": "`/design-audit` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-reband-22c58939-fable-md-1-read-what-the-request-is-actually-asking-for",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "reband/22c58939",
+    "doc": "home/.claude/commands/fable.md",
+    "title": "1. Read what the request is actually asking for"
+   },
+   "corpus": {
+    "snapshot": "reband/22c58939"
+   },
+   "note": "`/fable` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-reband-22c58939-figma-generate-diagram-skill-step-3-universal-constraints-apply-to-every-diag",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "reband/22c58939",
+    "doc": "home/.claude/plugins/cache/claude-plugins-official/figma/2.2.107/skills/figma-generate-diagram/SKILL.md",
+    "title": "Step 3: Universal constraints (apply to every diagram type)"
+   },
+   "corpus": {
+    "snapshot": "reband/22c58939"
+   },
+   "note": "`/figma-generate-diagram` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-reband-22c58939-figma-use-skill-8-pre-flight-checklist",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "reband/22c58939",
+    "doc": "home/.claude/plugins/cache/claude-plugins-official/figma/2.2.107/skills/figma-use/SKILL.md",
+    "title": "8. Pre-Flight Checklist"
+   },
+   "corpus": {
+    "snapshot": "reband/22c58939"
+   },
+   "note": "`/figma-use` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-reband-22c58939-create-pr-skill-skill-create-pr",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "reband/22c58939",
+    "doc": "home/.claude/skills/create-pr/SKILL.md",
+    "title": "Skill: create-pr"
+   },
+   "corpus": {
+    "snapshot": "reband/22c58939"
+   },
+   "note": "`/create-pr` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "uninvoked-skill-reband-22c58939-formic-create-release-skill-skill-formic-create-release",
+   "label": "coincidental",
+   "provenance": "uninvoked-skill",
+   "block": {
+    "snapshot": "reband/22c58939",
+    "doc": "home/.claude/skills/formic-create-release/SKILL.md",
+    "title": "Skill: formic-create-release"
+   },
+   "corpus": {
+    "snapshot": "reband/22c58939"
+   },
+   "note": "`/formic-create-release` was listed for this session but never invoked, so its step-by-step instructions were not followed."
+  },
+  {
+   "id": "shuffled-agent-context-ide-d5c3cc1a-epistemic-honesty-md-what-you-read-in-famigo-5448a718",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "agent-context-ide/d5c3cc1a",
+    "doc": "home/Git/agent-context-ide/.claude/agents/epistemic-honesty.md",
+    "title": "What you read"
+   },
+   "corpus": {
+    "snapshot": "famigo/5448a718"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-agent-context-ide-d5c3cc1a-prompt-eval-designer-md-the-prompts-in-scope-in-famigo-5448a718",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "agent-context-ide/d5c3cc1a",
+    "doc": "home/Git/agent-context-ide/.claude/agents/prompt-eval-designer.md",
+    "title": "The prompts in scope"
+   },
+   "corpus": {
+    "snapshot": "famigo/5448a718"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-agent-context-ide-d5c3cc1a-verdict-auditor-md-what-counts-as-a-finding-in-famigo-5448a718",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "agent-context-ide/d5c3cc1a",
+    "doc": "home/Git/agent-context-ide/.claude/agents/verdict-auditor.md",
+    "title": "What counts as a finding"
+   },
+   "corpus": {
+    "snapshot": "famigo/5448a718"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-agent-context-ide-d5c3cc1a-epistemic-honesty-md-what-you-read-in-famigo-9dd3cc8a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "agent-context-ide/d5c3cc1a",
+    "doc": "home/Git/agent-context-ide/.claude/agents/epistemic-honesty.md",
+    "title": "What you read"
+   },
+   "corpus": {
+    "snapshot": "famigo/9dd3cc8a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-agent-context-ide-d5c3cc1a-prompt-eval-designer-md-the-prompts-in-scope-in-famigo-9dd3cc8a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "agent-context-ide/d5c3cc1a",
+    "doc": "home/Git/agent-context-ide/.claude/agents/prompt-eval-designer.md",
+    "title": "The prompts in scope"
+   },
+   "corpus": {
+    "snapshot": "famigo/9dd3cc8a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-agent-context-ide-d5c3cc1a-verdict-auditor-md-what-counts-as-a-finding-in-famigo-9dd3cc8a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "agent-context-ide/d5c3cc1a",
+    "doc": "home/Git/agent-context-ide/.claude/agents/verdict-auditor.md",
+    "title": "What counts as a finding"
+   },
+   "corpus": {
+    "snapshot": "famigo/9dd3cc8a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-agent-context-ide-d5c3cc1a-epistemic-honesty-md-what-you-read-in-formic-core-39b9e09e",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "agent-context-ide/d5c3cc1a",
+    "doc": "home/Git/agent-context-ide/.claude/agents/epistemic-honesty.md",
+    "title": "What you read"
+   },
+   "corpus": {
+    "snapshot": "formic-core/39b9e09e"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-agent-context-ide-d5c3cc1a-prompt-eval-designer-md-the-prompts-in-scope-in-formic-core-39b9e09e",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "agent-context-ide/d5c3cc1a",
+    "doc": "home/Git/agent-context-ide/.claude/agents/prompt-eval-designer.md",
+    "title": "The prompts in scope"
+   },
+   "corpus": {
+    "snapshot": "formic-core/39b9e09e"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-agent-context-ide-d5c3cc1a-verdict-auditor-md-what-counts-as-a-finding-in-formic-core-39b9e09e",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "agent-context-ide/d5c3cc1a",
+    "doc": "home/Git/agent-context-ide/.claude/agents/verdict-auditor.md",
+    "title": "What counts as a finding"
+   },
+   "corpus": {
+    "snapshot": "formic-core/39b9e09e"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-agent-context-ide-d5c3cc1a-epistemic-honesty-md-what-you-read-in-formic-core-4ebe50c0",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "agent-context-ide/d5c3cc1a",
+    "doc": "home/Git/agent-context-ide/.claude/agents/epistemic-honesty.md",
+    "title": "What you read"
+   },
+   "corpus": {
+    "snapshot": "formic-core/4ebe50c0"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-agent-context-ide-d5c3cc1a-prompt-eval-designer-md-the-prompts-in-scope-in-formic-core-4ebe50c0",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "agent-context-ide/d5c3cc1a",
+    "doc": "home/Git/agent-context-ide/.claude/agents/prompt-eval-designer.md",
+    "title": "The prompts in scope"
+   },
+   "corpus": {
+    "snapshot": "formic-core/4ebe50c0"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-agent-context-ide-d5c3cc1a-verdict-auditor-md-what-counts-as-a-finding-in-formic-core-4ebe50c0",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "agent-context-ide/d5c3cc1a",
+    "doc": "home/Git/agent-context-ide/.claude/agents/verdict-auditor.md",
+    "title": "What counts as a finding"
+   },
+   "corpus": {
+    "snapshot": "formic-core/4ebe50c0"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-agent-context-ide-d5c3cc1a-epistemic-honesty-md-what-you-read-in-formichmi-12f48cdb",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "agent-context-ide/d5c3cc1a",
+    "doc": "home/Git/agent-context-ide/.claude/agents/epistemic-honesty.md",
+    "title": "What you read"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/12f48cdb"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-agent-context-ide-d5c3cc1a-prompt-eval-designer-md-the-prompts-in-scope-in-formichmi-12f48cdb",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "agent-context-ide/d5c3cc1a",
+    "doc": "home/Git/agent-context-ide/.claude/agents/prompt-eval-designer.md",
+    "title": "The prompts in scope"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/12f48cdb"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-agent-context-ide-d5c3cc1a-verdict-auditor-md-what-counts-as-a-finding-in-formichmi-12f48cdb",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "agent-context-ide/d5c3cc1a",
+    "doc": "home/Git/agent-context-ide/.claude/agents/verdict-auditor.md",
+    "title": "What counts as a finding"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/12f48cdb"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-agent-context-ide-d5c3cc1a-epistemic-honesty-md-what-you-read-in-formichmi-8fd8526c",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "agent-context-ide/d5c3cc1a",
+    "doc": "home/Git/agent-context-ide/.claude/agents/epistemic-honesty.md",
+    "title": "What you read"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/8fd8526c"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-agent-context-ide-d5c3cc1a-prompt-eval-designer-md-the-prompts-in-scope-in-formichmi-8fd8526c",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "agent-context-ide/d5c3cc1a",
+    "doc": "home/Git/agent-context-ide/.claude/agents/prompt-eval-designer.md",
+    "title": "The prompts in scope"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/8fd8526c"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-agent-context-ide-d5c3cc1a-verdict-auditor-md-what-counts-as-a-finding-in-formichmi-8fd8526c",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "agent-context-ide/d5c3cc1a",
+    "doc": "home/Git/agent-context-ide/.claude/agents/verdict-auditor.md",
+    "title": "What counts as a finding"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/8fd8526c"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-agent-context-ide-d5c3cc1a-epistemic-honesty-md-what-you-read-in-reband-22c58939",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "agent-context-ide/d5c3cc1a",
+    "doc": "home/Git/agent-context-ide/.claude/agents/epistemic-honesty.md",
+    "title": "What you read"
+   },
+   "corpus": {
+    "snapshot": "reband/22c58939"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-agent-context-ide-d5c3cc1a-prompt-eval-designer-md-the-prompts-in-scope-in-reband-22c58939",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "agent-context-ide/d5c3cc1a",
+    "doc": "home/Git/agent-context-ide/.claude/agents/prompt-eval-designer.md",
+    "title": "The prompts in scope"
+   },
+   "corpus": {
+    "snapshot": "reband/22c58939"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-agent-context-ide-d5c3cc1a-verdict-auditor-md-what-counts-as-a-finding-in-reband-22c58939",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "agent-context-ide/d5c3cc1a",
+    "doc": "home/Git/agent-context-ide/.claude/agents/verdict-auditor.md",
+    "title": "What counts as a finding"
+   },
+   "corpus": {
+    "snapshot": "reband/22c58939"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-5448a718-qa-runtime-md-non-negotiable-distinguish-broken-from-unverifia-in-agent-context-ide-d5c3cc1a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/5448a718",
+    "doc": "home/Git/famigo/.claude/agents/qa-runtime.md",
+    "title": "Non-negotiable: distinguish \"broken\" from \"unverifiable\""
+   },
+   "corpus": {
+    "snapshot": "agent-context-ide/d5c3cc1a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-5448a718-implement-skill-step-5-verify-in-agent-context-ide-d5c3cc1a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/5448a718",
+    "doc": "home/Git/famigo/.claude/skills/implement/SKILL.md",
+    "title": "Step 5 — Verify"
+   },
+   "corpus": {
+    "snapshot": "agent-context-ide/d5c3cc1a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-5448a718-vps-ssh-skill-what-s-running-on-the-server-in-agent-context-ide-d5c3cc1a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/5448a718",
+    "doc": "home/Git/famigo/.claude/skills/vps-ssh/SKILL.md",
+    "title": "What's running on the server"
+   },
+   "corpus": {
+    "snapshot": "agent-context-ide/d5c3cc1a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-5448a718-qa-runtime-md-non-negotiable-distinguish-broken-from-unverifia-in-formic-core-39b9e09e",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/5448a718",
+    "doc": "home/Git/famigo/.claude/agents/qa-runtime.md",
+    "title": "Non-negotiable: distinguish \"broken\" from \"unverifiable\""
+   },
+   "corpus": {
+    "snapshot": "formic-core/39b9e09e"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-5448a718-implement-skill-step-5-verify-in-formic-core-39b9e09e",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/5448a718",
+    "doc": "home/Git/famigo/.claude/skills/implement/SKILL.md",
+    "title": "Step 5 — Verify"
+   },
+   "corpus": {
+    "snapshot": "formic-core/39b9e09e"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-5448a718-vps-ssh-skill-what-s-running-on-the-server-in-formic-core-39b9e09e",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/5448a718",
+    "doc": "home/Git/famigo/.claude/skills/vps-ssh/SKILL.md",
+    "title": "What's running on the server"
+   },
+   "corpus": {
+    "snapshot": "formic-core/39b9e09e"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-5448a718-qa-runtime-md-non-negotiable-distinguish-broken-from-unverifia-in-formic-core-4ebe50c0",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/5448a718",
+    "doc": "home/Git/famigo/.claude/agents/qa-runtime.md",
+    "title": "Non-negotiable: distinguish \"broken\" from \"unverifiable\""
+   },
+   "corpus": {
+    "snapshot": "formic-core/4ebe50c0"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-5448a718-implement-skill-step-5-verify-in-formic-core-4ebe50c0",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/5448a718",
+    "doc": "home/Git/famigo/.claude/skills/implement/SKILL.md",
+    "title": "Step 5 — Verify"
+   },
+   "corpus": {
+    "snapshot": "formic-core/4ebe50c0"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-5448a718-vps-ssh-skill-what-s-running-on-the-server-in-formic-core-4ebe50c0",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/5448a718",
+    "doc": "home/Git/famigo/.claude/skills/vps-ssh/SKILL.md",
+    "title": "What's running on the server"
+   },
+   "corpus": {
+    "snapshot": "formic-core/4ebe50c0"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-5448a718-qa-runtime-md-non-negotiable-distinguish-broken-from-unverifia-in-formichmi-12f48cdb",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/5448a718",
+    "doc": "home/Git/famigo/.claude/agents/qa-runtime.md",
+    "title": "Non-negotiable: distinguish \"broken\" from \"unverifiable\""
+   },
+   "corpus": {
+    "snapshot": "formicHMI/12f48cdb"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-5448a718-implement-skill-step-5-verify-in-formichmi-12f48cdb",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/5448a718",
+    "doc": "home/Git/famigo/.claude/skills/implement/SKILL.md",
+    "title": "Step 5 — Verify"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/12f48cdb"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-5448a718-vps-ssh-skill-what-s-running-on-the-server-in-formichmi-12f48cdb",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/5448a718",
+    "doc": "home/Git/famigo/.claude/skills/vps-ssh/SKILL.md",
+    "title": "What's running on the server"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/12f48cdb"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-5448a718-qa-runtime-md-non-negotiable-distinguish-broken-from-unverifia-in-formichmi-8fd8526c",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/5448a718",
+    "doc": "home/Git/famigo/.claude/agents/qa-runtime.md",
+    "title": "Non-negotiable: distinguish \"broken\" from \"unverifiable\""
+   },
+   "corpus": {
+    "snapshot": "formicHMI/8fd8526c"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-5448a718-implement-skill-step-5-verify-in-formichmi-8fd8526c",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/5448a718",
+    "doc": "home/Git/famigo/.claude/skills/implement/SKILL.md",
+    "title": "Step 5 — Verify"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/8fd8526c"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-5448a718-vps-ssh-skill-what-s-running-on-the-server-in-formichmi-8fd8526c",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/5448a718",
+    "doc": "home/Git/famigo/.claude/skills/vps-ssh/SKILL.md",
+    "title": "What's running on the server"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/8fd8526c"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-5448a718-qa-runtime-md-non-negotiable-distinguish-broken-from-unverifia-in-reband-22c58939",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/5448a718",
+    "doc": "home/Git/famigo/.claude/agents/qa-runtime.md",
+    "title": "Non-negotiable: distinguish \"broken\" from \"unverifiable\""
+   },
+   "corpus": {
+    "snapshot": "reband/22c58939"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-5448a718-implement-skill-step-5-verify-in-reband-22c58939",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/5448a718",
+    "doc": "home/Git/famigo/.claude/skills/implement/SKILL.md",
+    "title": "Step 5 — Verify"
+   },
+   "corpus": {
+    "snapshot": "reband/22c58939"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-5448a718-vps-ssh-skill-what-s-running-on-the-server-in-reband-22c58939",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/5448a718",
+    "doc": "home/Git/famigo/.claude/skills/vps-ssh/SKILL.md",
+    "title": "What's running on the server"
+   },
+   "corpus": {
+    "snapshot": "reband/22c58939"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-9dd3cc8a-qa-runtime-md-non-negotiable-distinguish-broken-from-unverifia-in-agent-context-ide-d5c3cc1a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/9dd3cc8a",
+    "doc": "home/Git/famigo/.claude/agents/qa-runtime.md",
+    "title": "Non-negotiable: distinguish \"broken\" from \"unverifiable\""
+   },
+   "corpus": {
+    "snapshot": "agent-context-ide/d5c3cc1a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-9dd3cc8a-implement-skill-step-2-confirm-understanding-in-agent-context-ide-d5c3cc1a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/9dd3cc8a",
+    "doc": "home/Git/famigo/.claude/skills/implement/SKILL.md",
+    "title": "Step 2 — Confirm understanding"
+   },
+   "corpus": {
+    "snapshot": "agent-context-ide/d5c3cc1a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-9dd3cc8a-task-skill-step-1-load-context-in-agent-context-ide-d5c3cc1a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/9dd3cc8a",
+    "doc": "home/Git/famigo/.claude/skills/task/SKILL.md",
+    "title": "Step 1 — Load context"
+   },
+   "corpus": {
+    "snapshot": "agent-context-ide/d5c3cc1a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-9dd3cc8a-qa-runtime-md-non-negotiable-distinguish-broken-from-unverifia-in-formic-core-39b9e09e",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/9dd3cc8a",
+    "doc": "home/Git/famigo/.claude/agents/qa-runtime.md",
+    "title": "Non-negotiable: distinguish \"broken\" from \"unverifiable\""
+   },
+   "corpus": {
+    "snapshot": "formic-core/39b9e09e"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-9dd3cc8a-implement-skill-step-2-confirm-understanding-in-formic-core-39b9e09e",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/9dd3cc8a",
+    "doc": "home/Git/famigo/.claude/skills/implement/SKILL.md",
+    "title": "Step 2 — Confirm understanding"
+   },
+   "corpus": {
+    "snapshot": "formic-core/39b9e09e"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-9dd3cc8a-task-skill-step-1-load-context-in-formic-core-39b9e09e",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/9dd3cc8a",
+    "doc": "home/Git/famigo/.claude/skills/task/SKILL.md",
+    "title": "Step 1 — Load context"
+   },
+   "corpus": {
+    "snapshot": "formic-core/39b9e09e"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-9dd3cc8a-qa-runtime-md-non-negotiable-distinguish-broken-from-unverifia-in-formic-core-4ebe50c0",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/9dd3cc8a",
+    "doc": "home/Git/famigo/.claude/agents/qa-runtime.md",
+    "title": "Non-negotiable: distinguish \"broken\" from \"unverifiable\""
+   },
+   "corpus": {
+    "snapshot": "formic-core/4ebe50c0"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-9dd3cc8a-implement-skill-step-2-confirm-understanding-in-formic-core-4ebe50c0",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/9dd3cc8a",
+    "doc": "home/Git/famigo/.claude/skills/implement/SKILL.md",
+    "title": "Step 2 — Confirm understanding"
+   },
+   "corpus": {
+    "snapshot": "formic-core/4ebe50c0"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-9dd3cc8a-task-skill-step-1-load-context-in-formic-core-4ebe50c0",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/9dd3cc8a",
+    "doc": "home/Git/famigo/.claude/skills/task/SKILL.md",
+    "title": "Step 1 — Load context"
+   },
+   "corpus": {
+    "snapshot": "formic-core/4ebe50c0"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-9dd3cc8a-qa-runtime-md-non-negotiable-distinguish-broken-from-unverifia-in-formichmi-12f48cdb",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/9dd3cc8a",
+    "doc": "home/Git/famigo/.claude/agents/qa-runtime.md",
+    "title": "Non-negotiable: distinguish \"broken\" from \"unverifiable\""
+   },
+   "corpus": {
+    "snapshot": "formicHMI/12f48cdb"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-9dd3cc8a-implement-skill-step-2-confirm-understanding-in-formichmi-12f48cdb",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/9dd3cc8a",
+    "doc": "home/Git/famigo/.claude/skills/implement/SKILL.md",
+    "title": "Step 2 — Confirm understanding"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/12f48cdb"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-9dd3cc8a-task-skill-step-1-load-context-in-formichmi-12f48cdb",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/9dd3cc8a",
+    "doc": "home/Git/famigo/.claude/skills/task/SKILL.md",
+    "title": "Step 1 — Load context"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/12f48cdb"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-9dd3cc8a-qa-runtime-md-non-negotiable-distinguish-broken-from-unverifia-in-formichmi-8fd8526c",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/9dd3cc8a",
+    "doc": "home/Git/famigo/.claude/agents/qa-runtime.md",
+    "title": "Non-negotiable: distinguish \"broken\" from \"unverifiable\""
+   },
+   "corpus": {
+    "snapshot": "formicHMI/8fd8526c"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-9dd3cc8a-implement-skill-step-2-confirm-understanding-in-formichmi-8fd8526c",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/9dd3cc8a",
+    "doc": "home/Git/famigo/.claude/skills/implement/SKILL.md",
+    "title": "Step 2 — Confirm understanding"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/8fd8526c"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-9dd3cc8a-task-skill-step-1-load-context-in-formichmi-8fd8526c",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/9dd3cc8a",
+    "doc": "home/Git/famigo/.claude/skills/task/SKILL.md",
+    "title": "Step 1 — Load context"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/8fd8526c"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-9dd3cc8a-qa-runtime-md-non-negotiable-distinguish-broken-from-unverifia-in-reband-22c58939",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/9dd3cc8a",
+    "doc": "home/Git/famigo/.claude/agents/qa-runtime.md",
+    "title": "Non-negotiable: distinguish \"broken\" from \"unverifiable\""
+   },
+   "corpus": {
+    "snapshot": "reband/22c58939"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-9dd3cc8a-implement-skill-step-2-confirm-understanding-in-reband-22c58939",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/9dd3cc8a",
+    "doc": "home/Git/famigo/.claude/skills/implement/SKILL.md",
+    "title": "Step 2 — Confirm understanding"
+   },
+   "corpus": {
+    "snapshot": "reband/22c58939"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-famigo-9dd3cc8a-task-skill-step-1-load-context-in-reband-22c58939",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "famigo/9dd3cc8a",
+    "doc": "home/Git/famigo/.claude/skills/task/SKILL.md",
+    "title": "Step 1 — Load context"
+   },
+   "corpus": {
+    "snapshot": "reband/22c58939"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-39b9e09e-agents-md-general-ai-agent-instructions-in-agent-context-ide-d5c3cc1a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/39b9e09e",
+    "doc": "home/Git/formic/core/AGENTS.md",
+    "title": "General AI Agent instructions"
+   },
+   "corpus": {
+    "snapshot": "agent-context-ide/d5c3cc1a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-39b9e09e-frontend-styling-constants-config-md-constants-in-agent-context-ide-d5c3cc1a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/39b9e09e",
+    "doc": "home/Git/formic/core/docs/rules/frontend_styling_constants_config.md",
+    "title": "Constants"
+   },
+   "corpus": {
+    "snapshot": "agent-context-ide/d5c3cc1a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-39b9e09e-graph-report-md-hyperedges-group-relationships-in-agent-context-ide-d5c3cc1a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/39b9e09e",
+    "doc": "home/Git/formic/core/graphify-out/GRAPH_REPORT.md",
+    "title": "Hyperedges (group relationships)"
+   },
+   "corpus": {
+    "snapshot": "agent-context-ide/d5c3cc1a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-39b9e09e-agents-md-general-ai-agent-instructions-in-famigo-5448a718",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/39b9e09e",
+    "doc": "home/Git/formic/core/AGENTS.md",
+    "title": "General AI Agent instructions"
+   },
+   "corpus": {
+    "snapshot": "famigo/5448a718"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-39b9e09e-frontend-styling-constants-config-md-constants-in-famigo-5448a718",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/39b9e09e",
+    "doc": "home/Git/formic/core/docs/rules/frontend_styling_constants_config.md",
+    "title": "Constants"
+   },
+   "corpus": {
+    "snapshot": "famigo/5448a718"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-39b9e09e-graph-report-md-hyperedges-group-relationships-in-famigo-5448a718",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/39b9e09e",
+    "doc": "home/Git/formic/core/graphify-out/GRAPH_REPORT.md",
+    "title": "Hyperedges (group relationships)"
+   },
+   "corpus": {
+    "snapshot": "famigo/5448a718"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-39b9e09e-agents-md-general-ai-agent-instructions-in-famigo-9dd3cc8a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/39b9e09e",
+    "doc": "home/Git/formic/core/AGENTS.md",
+    "title": "General AI Agent instructions"
+   },
+   "corpus": {
+    "snapshot": "famigo/9dd3cc8a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-39b9e09e-frontend-styling-constants-config-md-constants-in-famigo-9dd3cc8a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/39b9e09e",
+    "doc": "home/Git/formic/core/docs/rules/frontend_styling_constants_config.md",
+    "title": "Constants"
+   },
+   "corpus": {
+    "snapshot": "famigo/9dd3cc8a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-39b9e09e-graph-report-md-hyperedges-group-relationships-in-famigo-9dd3cc8a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/39b9e09e",
+    "doc": "home/Git/formic/core/graphify-out/GRAPH_REPORT.md",
+    "title": "Hyperedges (group relationships)"
+   },
+   "corpus": {
+    "snapshot": "famigo/9dd3cc8a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-39b9e09e-agents-md-general-ai-agent-instructions-in-formichmi-12f48cdb",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/39b9e09e",
+    "doc": "home/Git/formic/core/AGENTS.md",
+    "title": "General AI Agent instructions"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/12f48cdb"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-39b9e09e-frontend-styling-constants-config-md-constants-in-formichmi-12f48cdb",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/39b9e09e",
+    "doc": "home/Git/formic/core/docs/rules/frontend_styling_constants_config.md",
+    "title": "Constants"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/12f48cdb"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-39b9e09e-graph-report-md-hyperedges-group-relationships-in-formichmi-12f48cdb",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/39b9e09e",
+    "doc": "home/Git/formic/core/graphify-out/GRAPH_REPORT.md",
+    "title": "Hyperedges (group relationships)"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/12f48cdb"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-39b9e09e-agents-md-general-ai-agent-instructions-in-formichmi-8fd8526c",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/39b9e09e",
+    "doc": "home/Git/formic/core/AGENTS.md",
+    "title": "General AI Agent instructions"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/8fd8526c"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-39b9e09e-frontend-styling-constants-config-md-constants-in-formichmi-8fd8526c",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/39b9e09e",
+    "doc": "home/Git/formic/core/docs/rules/frontend_styling_constants_config.md",
+    "title": "Constants"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/8fd8526c"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-39b9e09e-graph-report-md-hyperedges-group-relationships-in-formichmi-8fd8526c",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/39b9e09e",
+    "doc": "home/Git/formic/core/graphify-out/GRAPH_REPORT.md",
+    "title": "Hyperedges (group relationships)"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/8fd8526c"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-39b9e09e-agents-md-general-ai-agent-instructions-in-reband-22c58939",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/39b9e09e",
+    "doc": "home/Git/formic/core/AGENTS.md",
+    "title": "General AI Agent instructions"
+   },
+   "corpus": {
+    "snapshot": "reband/22c58939"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-39b9e09e-frontend-styling-constants-config-md-constants-in-reband-22c58939",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/39b9e09e",
+    "doc": "home/Git/formic/core/docs/rules/frontend_styling_constants_config.md",
+    "title": "Constants"
+   },
+   "corpus": {
+    "snapshot": "reband/22c58939"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-39b9e09e-graph-report-md-hyperedges-group-relationships-in-reband-22c58939",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/39b9e09e",
+    "doc": "home/Git/formic/core/graphify-out/GRAPH_REPORT.md",
+    "title": "Hyperedges (group relationships)"
+   },
+   "corpus": {
+    "snapshot": "reband/22c58939"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-4ebe50c0-agents-md-general-ai-agent-instructions-in-agent-context-ide-d5c3cc1a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/4ebe50c0",
+    "doc": "home/Git/formic/core/AGENTS.md",
+    "title": "General AI Agent instructions"
+   },
+   "corpus": {
+    "snapshot": "agent-context-ide/d5c3cc1a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-4ebe50c0-agents-md-git-workflow-in-agent-context-ide-d5c3cc1a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/4ebe50c0",
+    "doc": "home/Git/formic/core/AGENTS.md",
+    "title": "GIT Workflow"
+   },
+   "corpus": {
+    "snapshot": "agent-context-ide/d5c3cc1a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-4ebe50c0-graph-report-md-community-hubs-navigation-in-agent-context-ide-d5c3cc1a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/4ebe50c0",
+    "doc": "home/Git/formic/core/graphify-out/GRAPH_REPORT.md",
+    "title": "Community Hubs (Navigation)"
+   },
+   "corpus": {
+    "snapshot": "agent-context-ide/d5c3cc1a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-4ebe50c0-agents-md-general-ai-agent-instructions-in-famigo-5448a718",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/4ebe50c0",
+    "doc": "home/Git/formic/core/AGENTS.md",
+    "title": "General AI Agent instructions"
+   },
+   "corpus": {
+    "snapshot": "famigo/5448a718"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-4ebe50c0-agents-md-git-workflow-in-famigo-5448a718",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/4ebe50c0",
+    "doc": "home/Git/formic/core/AGENTS.md",
+    "title": "GIT Workflow"
+   },
+   "corpus": {
+    "snapshot": "famigo/5448a718"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-4ebe50c0-graph-report-md-community-hubs-navigation-in-famigo-5448a718",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/4ebe50c0",
+    "doc": "home/Git/formic/core/graphify-out/GRAPH_REPORT.md",
+    "title": "Community Hubs (Navigation)"
+   },
+   "corpus": {
+    "snapshot": "famigo/5448a718"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-4ebe50c0-agents-md-general-ai-agent-instructions-in-famigo-9dd3cc8a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/4ebe50c0",
+    "doc": "home/Git/formic/core/AGENTS.md",
+    "title": "General AI Agent instructions"
+   },
+   "corpus": {
+    "snapshot": "famigo/9dd3cc8a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-4ebe50c0-agents-md-git-workflow-in-famigo-9dd3cc8a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/4ebe50c0",
+    "doc": "home/Git/formic/core/AGENTS.md",
+    "title": "GIT Workflow"
+   },
+   "corpus": {
+    "snapshot": "famigo/9dd3cc8a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-4ebe50c0-graph-report-md-community-hubs-navigation-in-famigo-9dd3cc8a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/4ebe50c0",
+    "doc": "home/Git/formic/core/graphify-out/GRAPH_REPORT.md",
+    "title": "Community Hubs (Navigation)"
+   },
+   "corpus": {
+    "snapshot": "famigo/9dd3cc8a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-4ebe50c0-agents-md-general-ai-agent-instructions-in-formichmi-12f48cdb",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/4ebe50c0",
+    "doc": "home/Git/formic/core/AGENTS.md",
+    "title": "General AI Agent instructions"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/12f48cdb"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-4ebe50c0-agents-md-git-workflow-in-formichmi-12f48cdb",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/4ebe50c0",
+    "doc": "home/Git/formic/core/AGENTS.md",
+    "title": "GIT Workflow"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/12f48cdb"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-4ebe50c0-graph-report-md-community-hubs-navigation-in-formichmi-12f48cdb",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/4ebe50c0",
+    "doc": "home/Git/formic/core/graphify-out/GRAPH_REPORT.md",
+    "title": "Community Hubs (Navigation)"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/12f48cdb"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-4ebe50c0-agents-md-general-ai-agent-instructions-in-formichmi-8fd8526c",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/4ebe50c0",
+    "doc": "home/Git/formic/core/AGENTS.md",
+    "title": "General AI Agent instructions"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/8fd8526c"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-4ebe50c0-agents-md-git-workflow-in-formichmi-8fd8526c",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/4ebe50c0",
+    "doc": "home/Git/formic/core/AGENTS.md",
+    "title": "GIT Workflow"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/8fd8526c"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-4ebe50c0-graph-report-md-community-hubs-navigation-in-formichmi-8fd8526c",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/4ebe50c0",
+    "doc": "home/Git/formic/core/graphify-out/GRAPH_REPORT.md",
+    "title": "Community Hubs (Navigation)"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/8fd8526c"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-4ebe50c0-agents-md-general-ai-agent-instructions-in-reband-22c58939",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/4ebe50c0",
+    "doc": "home/Git/formic/core/AGENTS.md",
+    "title": "General AI Agent instructions"
+   },
+   "corpus": {
+    "snapshot": "reband/22c58939"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-4ebe50c0-agents-md-git-workflow-in-reband-22c58939",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/4ebe50c0",
+    "doc": "home/Git/formic/core/AGENTS.md",
+    "title": "GIT Workflow"
+   },
+   "corpus": {
+    "snapshot": "reband/22c58939"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formic-core-4ebe50c0-graph-report-md-community-hubs-navigation-in-reband-22c58939",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formic-core/4ebe50c0",
+    "doc": "home/Git/formic/core/graphify-out/GRAPH_REPORT.md",
+    "title": "Community Hubs (Navigation)"
+   },
+   "corpus": {
+    "snapshot": "reband/22c58939"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-12f48cdb-agents-md-general-ai-agent-instructions-in-agent-context-ide-d5c3cc1a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/12f48cdb",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "General AI Agent instructions"
+   },
+   "corpus": {
+    "snapshot": "agent-context-ide/d5c3cc1a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-12f48cdb-agents-md-core-ai-agent-workflow-in-agent-context-ide-d5c3cc1a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/12f48cdb",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "Core AI agent workflow"
+   },
+   "corpus": {
+    "snapshot": "agent-context-ide/d5c3cc1a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-12f48cdb-agents-md-git-workflow-in-agent-context-ide-d5c3cc1a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/12f48cdb",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "GIT Workflow"
+   },
+   "corpus": {
+    "snapshot": "agent-context-ide/d5c3cc1a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-12f48cdb-agents-md-general-ai-agent-instructions-in-famigo-5448a718",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/12f48cdb",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "General AI Agent instructions"
+   },
+   "corpus": {
+    "snapshot": "famigo/5448a718"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-12f48cdb-agents-md-core-ai-agent-workflow-in-famigo-5448a718",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/12f48cdb",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "Core AI agent workflow"
+   },
+   "corpus": {
+    "snapshot": "famigo/5448a718"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-12f48cdb-agents-md-git-workflow-in-famigo-5448a718",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/12f48cdb",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "GIT Workflow"
+   },
+   "corpus": {
+    "snapshot": "famigo/5448a718"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-12f48cdb-agents-md-general-ai-agent-instructions-in-famigo-9dd3cc8a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/12f48cdb",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "General AI Agent instructions"
+   },
+   "corpus": {
+    "snapshot": "famigo/9dd3cc8a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-12f48cdb-agents-md-core-ai-agent-workflow-in-famigo-9dd3cc8a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/12f48cdb",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "Core AI agent workflow"
+   },
+   "corpus": {
+    "snapshot": "famigo/9dd3cc8a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-12f48cdb-agents-md-git-workflow-in-famigo-9dd3cc8a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/12f48cdb",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "GIT Workflow"
+   },
+   "corpus": {
+    "snapshot": "famigo/9dd3cc8a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-12f48cdb-agents-md-general-ai-agent-instructions-in-formic-core-39b9e09e",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/12f48cdb",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "General AI Agent instructions"
+   },
+   "corpus": {
+    "snapshot": "formic-core/39b9e09e"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-12f48cdb-agents-md-core-ai-agent-workflow-in-formic-core-39b9e09e",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/12f48cdb",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "Core AI agent workflow"
+   },
+   "corpus": {
+    "snapshot": "formic-core/39b9e09e"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-12f48cdb-agents-md-git-workflow-in-formic-core-39b9e09e",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/12f48cdb",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "GIT Workflow"
+   },
+   "corpus": {
+    "snapshot": "formic-core/39b9e09e"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-12f48cdb-agents-md-general-ai-agent-instructions-in-formic-core-4ebe50c0",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/12f48cdb",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "General AI Agent instructions"
+   },
+   "corpus": {
+    "snapshot": "formic-core/4ebe50c0"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-12f48cdb-agents-md-core-ai-agent-workflow-in-formic-core-4ebe50c0",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/12f48cdb",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "Core AI agent workflow"
+   },
+   "corpus": {
+    "snapshot": "formic-core/4ebe50c0"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-12f48cdb-agents-md-git-workflow-in-formic-core-4ebe50c0",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/12f48cdb",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "GIT Workflow"
+   },
+   "corpus": {
+    "snapshot": "formic-core/4ebe50c0"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-12f48cdb-agents-md-general-ai-agent-instructions-in-reband-22c58939",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/12f48cdb",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "General AI Agent instructions"
+   },
+   "corpus": {
+    "snapshot": "reband/22c58939"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-12f48cdb-agents-md-core-ai-agent-workflow-in-reband-22c58939",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/12f48cdb",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "Core AI agent workflow"
+   },
+   "corpus": {
+    "snapshot": "reband/22c58939"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-12f48cdb-agents-md-git-workflow-in-reband-22c58939",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/12f48cdb",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "GIT Workflow"
+   },
+   "corpus": {
+    "snapshot": "reband/22c58939"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-8fd8526c-agents-md-general-ai-agent-instructions-in-agent-context-ide-d5c3cc1a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/8fd8526c",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "General AI Agent instructions"
+   },
+   "corpus": {
+    "snapshot": "agent-context-ide/d5c3cc1a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-8fd8526c-agents-md-core-ai-agent-workflow-in-agent-context-ide-d5c3cc1a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/8fd8526c",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "Core AI agent workflow"
+   },
+   "corpus": {
+    "snapshot": "agent-context-ide/d5c3cc1a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-8fd8526c-agents-md-git-workflow-in-agent-context-ide-d5c3cc1a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/8fd8526c",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "GIT Workflow"
+   },
+   "corpus": {
+    "snapshot": "agent-context-ide/d5c3cc1a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-8fd8526c-agents-md-general-ai-agent-instructions-in-famigo-5448a718",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/8fd8526c",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "General AI Agent instructions"
+   },
+   "corpus": {
+    "snapshot": "famigo/5448a718"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-8fd8526c-agents-md-core-ai-agent-workflow-in-famigo-5448a718",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/8fd8526c",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "Core AI agent workflow"
+   },
+   "corpus": {
+    "snapshot": "famigo/5448a718"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-8fd8526c-agents-md-git-workflow-in-famigo-5448a718",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/8fd8526c",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "GIT Workflow"
+   },
+   "corpus": {
+    "snapshot": "famigo/5448a718"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-8fd8526c-agents-md-general-ai-agent-instructions-in-famigo-9dd3cc8a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/8fd8526c",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "General AI Agent instructions"
+   },
+   "corpus": {
+    "snapshot": "famigo/9dd3cc8a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-8fd8526c-agents-md-core-ai-agent-workflow-in-famigo-9dd3cc8a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/8fd8526c",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "Core AI agent workflow"
+   },
+   "corpus": {
+    "snapshot": "famigo/9dd3cc8a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-8fd8526c-agents-md-git-workflow-in-famigo-9dd3cc8a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/8fd8526c",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "GIT Workflow"
+   },
+   "corpus": {
+    "snapshot": "famigo/9dd3cc8a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-8fd8526c-agents-md-general-ai-agent-instructions-in-formic-core-39b9e09e",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/8fd8526c",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "General AI Agent instructions"
+   },
+   "corpus": {
+    "snapshot": "formic-core/39b9e09e"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-8fd8526c-agents-md-core-ai-agent-workflow-in-formic-core-39b9e09e",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/8fd8526c",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "Core AI agent workflow"
+   },
+   "corpus": {
+    "snapshot": "formic-core/39b9e09e"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-8fd8526c-agents-md-git-workflow-in-formic-core-39b9e09e",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/8fd8526c",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "GIT Workflow"
+   },
+   "corpus": {
+    "snapshot": "formic-core/39b9e09e"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-8fd8526c-agents-md-general-ai-agent-instructions-in-formic-core-4ebe50c0",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/8fd8526c",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "General AI Agent instructions"
+   },
+   "corpus": {
+    "snapshot": "formic-core/4ebe50c0"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-8fd8526c-agents-md-core-ai-agent-workflow-in-formic-core-4ebe50c0",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/8fd8526c",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "Core AI agent workflow"
+   },
+   "corpus": {
+    "snapshot": "formic-core/4ebe50c0"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-8fd8526c-agents-md-git-workflow-in-formic-core-4ebe50c0",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/8fd8526c",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "GIT Workflow"
+   },
+   "corpus": {
+    "snapshot": "formic-core/4ebe50c0"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-8fd8526c-agents-md-general-ai-agent-instructions-in-reband-22c58939",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/8fd8526c",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "General AI Agent instructions"
+   },
+   "corpus": {
+    "snapshot": "reband/22c58939"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-8fd8526c-agents-md-core-ai-agent-workflow-in-reband-22c58939",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/8fd8526c",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "Core AI agent workflow"
+   },
+   "corpus": {
+    "snapshot": "reband/22c58939"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-formichmi-8fd8526c-agents-md-git-workflow-in-reband-22c58939",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "formicHMI/8fd8526c",
+    "doc": "home/Git/formic/formicHMI/AGENTS.md",
+    "title": "GIT Workflow"
+   },
+   "corpus": {
+    "snapshot": "reband/22c58939"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-reband-22c58939-agents-md-what-this-is-in-agent-context-ide-d5c3cc1a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "reband/22c58939",
+    "doc": "home/reband/AGENTS.md",
+    "title": "What this is"
+   },
+   "corpus": {
+    "snapshot": "agent-context-ide/d5c3cc1a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-reband-22c58939-agents-md-gotchas-learned-the-hard-way-see-also-claude-pro-in-agent-context-ide-d5c3cc1a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "reband/22c58939",
+    "doc": "home/reband/AGENTS.md",
+    "title": "Gotchas (learned the hard way — see also `~/.claude/projects/.../memory/ERRORS.md`)"
+   },
+   "corpus": {
+    "snapshot": "agent-context-ide/d5c3cc1a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-reband-22c58939-readme-md-architecture-in-agent-context-ide-d5c3cc1a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "reband/22c58939",
+    "doc": "home/reband/README.md",
+    "title": "Architecture"
+   },
+   "corpus": {
+    "snapshot": "agent-context-ide/d5c3cc1a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-reband-22c58939-agents-md-what-this-is-in-famigo-5448a718",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "reband/22c58939",
+    "doc": "home/reband/AGENTS.md",
+    "title": "What this is"
+   },
+   "corpus": {
+    "snapshot": "famigo/5448a718"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-reband-22c58939-agents-md-gotchas-learned-the-hard-way-see-also-claude-pro-in-famigo-5448a718",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "reband/22c58939",
+    "doc": "home/reband/AGENTS.md",
+    "title": "Gotchas (learned the hard way — see also `~/.claude/projects/.../memory/ERRORS.md`)"
+   },
+   "corpus": {
+    "snapshot": "famigo/5448a718"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-reband-22c58939-readme-md-architecture-in-famigo-5448a718",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "reband/22c58939",
+    "doc": "home/reband/README.md",
+    "title": "Architecture"
+   },
+   "corpus": {
+    "snapshot": "famigo/5448a718"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-reband-22c58939-agents-md-what-this-is-in-famigo-9dd3cc8a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "reband/22c58939",
+    "doc": "home/reband/AGENTS.md",
+    "title": "What this is"
+   },
+   "corpus": {
+    "snapshot": "famigo/9dd3cc8a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-reband-22c58939-agents-md-gotchas-learned-the-hard-way-see-also-claude-pro-in-famigo-9dd3cc8a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "reband/22c58939",
+    "doc": "home/reband/AGENTS.md",
+    "title": "Gotchas (learned the hard way — see also `~/.claude/projects/.../memory/ERRORS.md`)"
+   },
+   "corpus": {
+    "snapshot": "famigo/9dd3cc8a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-reband-22c58939-readme-md-architecture-in-famigo-9dd3cc8a",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "reband/22c58939",
+    "doc": "home/reband/README.md",
+    "title": "Architecture"
+   },
+   "corpus": {
+    "snapshot": "famigo/9dd3cc8a"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-reband-22c58939-agents-md-what-this-is-in-formic-core-39b9e09e",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "reband/22c58939",
+    "doc": "home/reband/AGENTS.md",
+    "title": "What this is"
+   },
+   "corpus": {
+    "snapshot": "formic-core/39b9e09e"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-reband-22c58939-agents-md-gotchas-learned-the-hard-way-see-also-claude-pro-in-formic-core-39b9e09e",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "reband/22c58939",
+    "doc": "home/reband/AGENTS.md",
+    "title": "Gotchas (learned the hard way — see also `~/.claude/projects/.../memory/ERRORS.md`)"
+   },
+   "corpus": {
+    "snapshot": "formic-core/39b9e09e"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-reband-22c58939-readme-md-architecture-in-formic-core-39b9e09e",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "reband/22c58939",
+    "doc": "home/reband/README.md",
+    "title": "Architecture"
+   },
+   "corpus": {
+    "snapshot": "formic-core/39b9e09e"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-reband-22c58939-agents-md-what-this-is-in-formic-core-4ebe50c0",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "reband/22c58939",
+    "doc": "home/reband/AGENTS.md",
+    "title": "What this is"
+   },
+   "corpus": {
+    "snapshot": "formic-core/4ebe50c0"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-reband-22c58939-agents-md-gotchas-learned-the-hard-way-see-also-claude-pro-in-formic-core-4ebe50c0",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "reband/22c58939",
+    "doc": "home/reband/AGENTS.md",
+    "title": "Gotchas (learned the hard way — see also `~/.claude/projects/.../memory/ERRORS.md`)"
+   },
+   "corpus": {
+    "snapshot": "formic-core/4ebe50c0"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-reband-22c58939-readme-md-architecture-in-formic-core-4ebe50c0",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "reband/22c58939",
+    "doc": "home/reband/README.md",
+    "title": "Architecture"
+   },
+   "corpus": {
+    "snapshot": "formic-core/4ebe50c0"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-reband-22c58939-agents-md-what-this-is-in-formichmi-12f48cdb",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "reband/22c58939",
+    "doc": "home/reband/AGENTS.md",
+    "title": "What this is"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/12f48cdb"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-reband-22c58939-agents-md-gotchas-learned-the-hard-way-see-also-claude-pro-in-formichmi-12f48cdb",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "reband/22c58939",
+    "doc": "home/reband/AGENTS.md",
+    "title": "Gotchas (learned the hard way — see also `~/.claude/projects/.../memory/ERRORS.md`)"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/12f48cdb"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-reband-22c58939-readme-md-architecture-in-formichmi-12f48cdb",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "reband/22c58939",
+    "doc": "home/reband/README.md",
+    "title": "Architecture"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/12f48cdb"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-reband-22c58939-agents-md-what-this-is-in-formichmi-8fd8526c",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "reband/22c58939",
+    "doc": "home/reband/AGENTS.md",
+    "title": "What this is"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/8fd8526c"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-reband-22c58939-agents-md-gotchas-learned-the-hard-way-see-also-claude-pro-in-formichmi-8fd8526c",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "reband/22c58939",
+    "doc": "home/reband/AGENTS.md",
+    "title": "Gotchas (learned the hard way — see also `~/.claude/projects/.../memory/ERRORS.md`)"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/8fd8526c"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "shuffled-reband-22c58939-readme-md-architecture-in-formichmi-8fd8526c",
+   "label": "coincidental",
+   "provenance": "shuffled",
+   "block": {
+    "snapshot": "reband/22c58939",
+    "doc": "home/reband/README.md",
+    "title": "Architecture"
+   },
+   "corpus": {
+    "snapshot": "formicHMI/8fd8526c"
+   },
+   "note": "The target session never loaded this document, so its run cannot have drawn on it."
+  },
+  {
+   "id": "synthetic-webshop-checkout-00",
+   "label": "quoted",
+   "provenance": "synthetic",
+   "block": {
+    "content": "Every checkout mutation carries an idempotency key derived from the cart revision. Replaying a request with the same key returns the stored receipt rather than charging again. The key is namespaced per storefront, so a cart moved between storefronts cannot collide with its own earlier receipt."
+   },
+   "corpus": {
+    "inline": "webshop-checkout"
+   },
+   "note": "The reply reproduces the block's own sentence about replaying a request with the same key."
+  },
+  {
+   "id": "synthetic-webshop-checkout-02",
+   "label": "topically-drawn-on",
+   "provenance": "synthetic",
+   "block": {
+    "content": "A refund writes a compensating entry to the refund ledger. Nothing is ever deleted from the ledger, so a reconciliation run can replay it end to end. The ledger is append-only and idempotent per refund reference."
+   },
+   "corpus": {
+    "inline": "webshop-checkout"
+   },
+   "note": "The reply describes writing the compensating entry and replaying the ledger, which is what the block prescribes, without quoting it."
+  },
+  {
+   "id": "synthetic-webshop-checkout-01",
+   "label": "coincidental",
+   "provenance": "synthetic",
+   "block": {
+    "content": "Money is a minor-unit integer everywhere. Rounding happens once, at the tax boundary, using banker's rounding; never round inside a line-item loop."
+   },
+   "corpus": {
+    "inline": "webshop-checkout"
+   },
+   "note": "Rounding is mentioned nowhere in the reply; only the word 'money' is shared, and in passing."
+  },
+  {
+   "id": "synthetic-webshop-checkout-10",
+   "label": "coincidental",
+   "provenance": "synthetic",
+   "block": {
+    "content": "Order state transitions are append-only. The current state is a fold over the transition log, so a bad transition can be corrected by appending, never by editing."
+   },
+   "corpus": {
+    "inline": "webshop-checkout"
+   },
+   "note": "A near miss on purpose: the block and the reply both talk about replaying a log, but the block is about order state and the reply about the refund ledger."
+  },
+  {
+   "id": "synthetic-webshop-checkout-19",
+   "label": "coincidental",
+   "provenance": "synthetic",
+   "block": {
+    "content": "Customer exports are generated offline and delivered by signed link. The link expires in an hour and is single use."
+   },
+   "corpus": {
+    "inline": "webshop-checkout"
+   },
+   "note": "Customer exports are untouched by this session."
+  },
+  {
+   "id": "synthetic-firmware-can-00",
+   "label": "quoted",
+   "provenance": "synthetic",
+   "block": {
+    "content": "The watchdog is kicked from the supervisor task only. A worker that kicks the watchdog hides its own deadlock, which is the failure the watchdog exists to catch. The supervisor reads every worker's liveness flag before it kicks."
+   },
+   "corpus": {
+    "inline": "firmware-can"
+   },
+   "note": "The reply reproduces the block's point about a worker hiding its own deadlock behind its own kick. Expected to miss: after weighting, the block has only two terms of its own ('watchdog', 'deadlock' - 'liveness' is damped because the session says it too), and the |K| >= 3 gate declines to score a block that thin before the quote detector is reached."
+  },
+  {
+   "id": "synthetic-firmware-can-04",
+   "label": "topically-drawn-on",
+   "provenance": "synthetic",
+   "block": {
+    "content": "The scheduler is cooperative. A task that runs longer than its budget is logged with its worst-case duration at the next tick, since there is no preemption to fall back on."
+   },
+   "corpus": {
+    "inline": "firmware-can"
+   },
+   "note": "The reply measures the supervisor's worst-case duration against its budget, which is the block's rule. Expected to miss: coverage is high but each term occurs once in the prose, and one occurrence of a rare word does not clear the >= 2 observation guard."
+  },
+  {
+   "id": "synthetic-firmware-can-08",
+   "label": "topically-drawn-on",
+   "provenance": "synthetic",
+   "block": {
+    "content": "Time comes from the monotonic tick, never from the RTC. The RTC is for timestamps in logs and nothing else, because it can step backwards after a resynchronisation."
+   },
+   "corpus": {
+    "inline": "firmware-can"
+   },
+   "note": "The reply says the tick source was left as the monotonic tick with the RTC only for log timestamps - the block's rule, restated. Expected to miss for the same reason as the pair above: single occurrences cannot clear the observation guard."
+  },
+  {
+   "id": "synthetic-firmware-can-01",
+   "label": "coincidental",
+   "provenance": "synthetic",
+   "block": {
+    "content": "CAN frames are little-endian with a two-byte sequence counter. A gap in the counter is a dropped frame and must be reported, never interpolated."
+   },
+   "corpus": {
+    "inline": "firmware-can"
+   },
+   "note": "The CAN sequence counter never comes up; the shared vocabulary is 'frame' and 'bus'."
+  },
+  {
+   "id": "synthetic-firmware-can-02",
+   "label": "coincidental",
+   "provenance": "synthetic",
+   "block": {
+    "content": "The bootloader validates the image signature before erasing the application slot, so a bad image leaves the running firmware intact."
+   },
+   "corpus": {
+    "inline": "firmware-can"
+   },
+   "note": "The reply explicitly says the bootloader was not changed."
+  },
+  {
+   "id": "synthetic-firmware-can-16",
+   "label": "coincidental",
+   "provenance": "synthetic",
+   "block": {
+    "content": "Temperature derating starts at eighty degrees and is linear to the cutout. The curve is a table, not a formula, so it can be changed without a code review."
+   },
+   "corpus": {
+    "inline": "firmware-can"
+   },
+   "note": "Temperature derating is unrelated to the watchdog work."
+  },
+  {
+   "id": "synthetic-polish-rules-00",
+   "label": "quoted",
+   "provenance": "synthetic",
+   "block": {
+    "content": "Nigdy nie przekazuj `echo` do `pbcopy`. Uzyj `printf`, zeby usunac znak nowej linii doklejany przez terminal."
+   },
+   "corpus": {
+    "inline": "polish-rules"
+   },
+   "note": "Polish: the reply reuses the rule's own wording about the newline the terminal appends."
+  },
+  {
+   "id": "synthetic-polish-rules-04",
+   "label": "coincidental",
+   "provenance": "synthetic",
+   "block": {
+    "content": "Testy jednostkowe nie moga siegac do sieci. Zamiast tego uzywamy atrapy klienta protokolu."
+   },
+   "corpus": {
+    "inline": "polish-rules"
+   },
+   "note": "Polish: the reply mentions tests, but nothing about the protocol client stub."
+  },
+  {
+   "id": "synthetic-polish-rules-01",
+   "label": "coincidental",
+   "provenance": "synthetic",
+   "block": {
+    "content": "Kazda migracja bazy musi byc odwracalna. Migracja bez skryptu wycofania nie przechodzi przegladu kodu."
+   },
+   "corpus": {
+    "inline": "polish-rules"
+   },
+   "note": "Polish: the reply says migrations were deliberately left alone."
+  },
+  {
+   "id": "synthetic-firmware-can-00-in-polish-rules",
+   "label": "coincidental",
+   "provenance": "synthetic",
+   "block": {
+    "content": "The watchdog is kicked from the supervisor task only. A worker that kicks the watchdog hides its own deadlock, which is the failure the watchdog exists to catch. The supervisor reads every worker's liveness flag before it kicks."
+   },
+   "corpus": {
+    "inline": "polish-rules"
+   },
+   "note": "A firmware-can rule scored against the polish-rules session, which is about something else."
+  },
+  {
+   "id": "synthetic-firmware-can-07-in-polish-rules",
+   "label": "coincidental",
+   "provenance": "synthetic",
+   "block": {
+    "content": "The bus is terminated at both physical ends only. A stub longer than thirty centimetres is out of spec and shows up as intermittent CRC errors."
+   },
+   "corpus": {
+    "inline": "polish-rules"
+   },
+   "note": "A firmware-can rule scored against the polish-rules session, which is about something else."
+  },
+  {
+   "id": "synthetic-firmware-can-14-in-polish-rules",
+   "label": "coincidental",
+   "provenance": "synthetic",
+   "block": {
+    "content": "The debug UART is receive-only in the field. A writable console on shipped hardware is a way in, and there is no authentication on it."
+   },
+   "corpus": {
+    "inline": "polish-rules"
+   },
+   "note": "A firmware-can rule scored against the polish-rules session, which is about something else."
+  },
+  {
+   "id": "synthetic-firmware-can-00-in-webshop-checkout",
+   "label": "coincidental",
+   "provenance": "synthetic",
+   "block": {
+    "content": "The watchdog is kicked from the supervisor task only. A worker that kicks the watchdog hides its own deadlock, which is the failure the watchdog exists to catch. The supervisor reads every worker's liveness flag before it kicks."
+   },
+   "corpus": {
+    "inline": "webshop-checkout"
+   },
+   "note": "A firmware-can rule scored against the webshop-checkout session, which is about something else."
+  },
+  {
+   "id": "synthetic-firmware-can-07-in-webshop-checkout",
+   "label": "coincidental",
+   "provenance": "synthetic",
+   "block": {
+    "content": "The bus is terminated at both physical ends only. A stub longer than thirty centimetres is out of spec and shows up as intermittent CRC errors."
+   },
+   "corpus": {
+    "inline": "webshop-checkout"
+   },
+   "note": "A firmware-can rule scored against the webshop-checkout session, which is about something else."
+  },
+  {
+   "id": "synthetic-firmware-can-14-in-webshop-checkout",
+   "label": "coincidental",
+   "provenance": "synthetic",
+   "block": {
+    "content": "The debug UART is receive-only in the field. A writable console on shipped hardware is a way in, and there is no authentication on it."
+   },
+   "corpus": {
+    "inline": "webshop-checkout"
+   },
+   "note": "A firmware-can rule scored against the webshop-checkout session, which is about something else."
+  },
+  {
+   "id": "synthetic-polish-rules-00-in-firmware-can",
+   "label": "coincidental",
+   "provenance": "synthetic",
+   "block": {
+    "content": "Nigdy nie przekazuj `echo` do `pbcopy`. Uzyj `printf`, zeby usunac znak nowej linii doklejany przez terminal."
+   },
+   "corpus": {
+    "inline": "firmware-can"
+   },
+   "note": "A polish-rules rule scored against the firmware-can session, which is about something else."
+  },
+  {
+   "id": "synthetic-polish-rules-07-in-firmware-can",
+   "label": "coincidental",
+   "provenance": "synthetic",
+   "block": {
+    "content": "Nazwy tabel sa w liczbie mnogiej, nazwy kolumn w pojedynczej. Skrot w nazwie kolumny wymaga komentarza w schemacie."
+   },
+   "corpus": {
+    "inline": "firmware-can"
+   },
+   "note": "A polish-rules rule scored against the firmware-can session, which is about something else."
+  },
+  {
+   "id": "synthetic-polish-rules-14-in-firmware-can",
+   "label": "coincidental",
+   "provenance": "synthetic",
+   "block": {
+    "content": "Wdrozenie odbywa sie za flaga funkcji. Wlaczenie flagi jest osobna decyzja, odwracalna bez wdrozenia."
+   },
+   "corpus": {
+    "inline": "firmware-can"
+   },
+   "note": "A polish-rules rule scored against the firmware-can session, which is about something else."
+  },
+  {
+   "id": "synthetic-polish-rules-00-in-webshop-checkout",
+   "label": "coincidental",
+   "provenance": "synthetic",
+   "block": {
+    "content": "Nigdy nie przekazuj `echo` do `pbcopy`. Uzyj `printf`, zeby usunac znak nowej linii doklejany przez terminal."
+   },
+   "corpus": {
+    "inline": "webshop-checkout"
+   },
+   "note": "A polish-rules rule scored against the webshop-checkout session, which is about something else."
+  },
+  {
+   "id": "synthetic-polish-rules-07-in-webshop-checkout",
+   "label": "coincidental",
+   "provenance": "synthetic",
+   "block": {
+    "content": "Nazwy tabel sa w liczbie mnogiej, nazwy kolumn w pojedynczej. Skrot w nazwie kolumny wymaga komentarza w schemacie."
+   },
+   "corpus": {
+    "inline": "webshop-checkout"
+   },
+   "note": "A polish-rules rule scored against the webshop-checkout session, which is about something else."
+  },
+  {
+   "id": "synthetic-polish-rules-14-in-webshop-checkout",
+   "label": "coincidental",
+   "provenance": "synthetic",
+   "block": {
+    "content": "Wdrozenie odbywa sie za flaga funkcji. Wlaczenie flagi jest osobna decyzja, odwracalna bez wdrozenia."
+   },
+   "corpus": {
+    "inline": "webshop-checkout"
+   },
+   "note": "A polish-rules rule scored against the webshop-checkout session, which is about something else."
+  },
+  {
+   "id": "synthetic-webshop-checkout-00-in-firmware-can",
+   "label": "coincidental",
+   "provenance": "synthetic",
+   "block": {
+    "content": "Every checkout mutation carries an idempotency key derived from the cart revision. Replaying a request with the same key returns the stored receipt rather than charging again. The key is namespaced per storefront, so a cart moved between storefronts cannot collide with its own earlier receipt."
+   },
+   "corpus": {
+    "inline": "firmware-can"
+   },
+   "note": "A webshop-checkout rule scored against the firmware-can session, which is about something else."
+  },
+  {
+   "id": "synthetic-webshop-checkout-07-in-firmware-can",
+   "label": "coincidental",
+   "provenance": "synthetic",
+   "block": {
+    "content": "Gift cards settle before card payments. A partial gift-card settlement leaves the remainder on the card authorisation."
+   },
+   "corpus": {
+    "inline": "firmware-can"
+   },
+   "note": "A webshop-checkout rule scored against the firmware-can session, which is about something else."
+  },
+  {
+   "id": "synthetic-webshop-checkout-14-in-firmware-can",
+   "label": "coincidental",
+   "provenance": "synthetic",
+   "block": {
+    "content": "Fraud scoring runs asynchronously. A high score holds fulfilment but never blocks the payment, so the shopper sees a normal confirmation."
+   },
+   "corpus": {
+    "inline": "firmware-can"
+   },
+   "note": "A webshop-checkout rule scored against the firmware-can session, which is about something else."
+  },
+  {
+   "id": "synthetic-webshop-checkout-00-in-polish-rules",
+   "label": "coincidental",
+   "provenance": "synthetic",
+   "block": {
+    "content": "Every checkout mutation carries an idempotency key derived from the cart revision. Replaying a request with the same key returns the stored receipt rather than charging again. The key is namespaced per storefront, so a cart moved between storefronts cannot collide with its own earlier receipt."
+   },
+   "corpus": {
+    "inline": "polish-rules"
+   },
+   "note": "A webshop-checkout rule scored against the polish-rules session, which is about something else."
+  },
+  {
+   "id": "synthetic-webshop-checkout-07-in-polish-rules",
+   "label": "coincidental",
+   "provenance": "synthetic",
+   "block": {
+    "content": "Gift cards settle before card payments. A partial gift-card settlement leaves the remainder on the card authorisation."
+   },
+   "corpus": {
+    "inline": "polish-rules"
+   },
+   "note": "A webshop-checkout rule scored against the polish-rules session, which is about something else."
+  },
+  {
+   "id": "synthetic-webshop-checkout-14-in-polish-rules",
+   "label": "coincidental",
+   "provenance": "synthetic",
+   "block": {
+    "content": "Fraud scoring runs asynchronously. A high score holds fulfilment but never blocks the payment, so the shopper sees a normal confirmation."
+   },
+   "corpus": {
+    "inline": "polish-rules"
+   },
+   "note": "A webshop-checkout rule scored against the polish-rules session, which is about something else."
+  }
+ ]
+}

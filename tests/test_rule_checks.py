@@ -47,8 +47,9 @@ def check(**over):
         "applies_to": ["**/*.tsx"],
         "confidence": "high",
         "message": "reaction() is forbidden in components.",
-        # A should_not_match case puts the identifier inside a string literal,
-        # which is the check declaring that strings are not code for it.
+        # A v1 field this tool no longer reads. It stays in the fixture on
+        # purpose: string stripping is central and unconditional now, and a
+        # checks file written against the old format must still load.
         "ignore_strings": True,
         "self_test": {
             "should_match": ["    reaction(() => store.value, run);"],
@@ -87,39 +88,48 @@ def test_hash_comments_respect_the_language():
     assert "#fff" in rc.strip_comments_and_strings("const c = 0; const d = 1; /* */ #fff\n", "a.tsx")
 
 
-def test_string_contents_survive_by_default():
-    """Stripping strings blinds the checker to the most common rule shape there
-    is: in JS and TS a module path is a string literal, so `never import from X`
-    could never match. Comments were the pilot's actual false-positive source."""
+def test_string_contents_are_stripped_on_the_source_path():
+    """Strings are blanked unconditionally now: leaving them standing was an
+    opt-in nobody set, and a rule's own identifier quoted inside a string
+    literal was reported as a violation of that rule, in red. The cost is
+    stated in `strip_comments_and_strings`: a rule about what is *in* a string
+    (an import path, a `className`) needs the syntax tree, not characters."""
     src = "import { rootStore } from '../stores/rootStore';"
-    assert "rootStore'" in rc.strip_comments_and_strings(src, "Panel.tsx")
-    assert 'bg-[#f8f9f9]' in rc.strip_comments_and_strings(
+    out = rc.strip_comments_and_strings(src, "Panel.tsx")
+    assert "rootStore'" not in out
+    assert out.startswith("import { rootStore } from ")
+    assert len(out) == len(src)
+    assert 'bg-[#f8f9f9]' not in rc.strip_comments_and_strings(
         '<div className="bg-[#f8f9f9]">', "Panel.tsx")
 
 
-def test_strings_are_stripped_only_when_a_check_opts_in():
+def test_only_the_comment_span_caller_keeps_string_contents():
+    """`strip_strings=False` exists for `_comment_candidates` alone: it reads
+    back what the stripper blanked, so blanking string contents with the same
+    sentinel would report every string literal as a comment."""
     src = 'const s = "reaction(() => x, y)";'
-    assert "reaction(" in rc.strip_comments_and_strings(src, "a.tsx")
-    assert "reaction(" not in rc.strip_comments_and_strings(src, "a.tsx", strip_strings=True)
+    assert "reaction(" not in rc.strip_comments_and_strings(src, "a.tsx")
+    assert "reaction(" in rc.strip_comments_and_strings(src, "a.tsx", strip_strings=False)
 
 
 def test_a_url_inside_a_string_is_not_a_line_comment():
     """`//` in a URL used to blank the rest of the line, hiding real code from
-    the checker. String boundaries are tracked even when contents are kept."""
+    the checker. Boundaries are tracked, so blanking a string ends where the
+    string does and the code after it survives."""
     src = "const url = 'https://api.example.com'; reaction(() => x, y);"
     assert "reaction(" in rc.strip_comments_and_strings(src, "a.ts")
 
 
 def test_template_interpolations_are_code_not_string_content():
-    """`${...}` holds executable code, so blanking it hides real matches even
-    when a check has asked for strings to be stripped."""
+    """`${...}` holds executable code, so a template literal's interpolations
+    stand while the literal text around them is blanked."""
     src = "const url = `wss://${import.meta.env.VITE_HOST}/ws`;"
-    out = rc.strip_comments_and_strings(src, "a.ts", strip_strings=True)
+    out = rc.strip_comments_and_strings(src, "a.ts")
     assert "import.meta.env.VITE_HOST" in out
     assert "wss://" not in out
 
 
-def test_opting_in_to_string_stripping_suppresses_a_match_inside_a_string():
+def test_a_v1_record_reports_a_string_hit_as_unclear_through_the_loader():
     events = [user_text("tidy up", 1),
               write_call("/repo/src/Panel.tsx", 'const s = "reaction(() => x, y)";\n', 2)]
     check = {
@@ -133,9 +143,10 @@ def test_opting_in_to_string_stripping_suppresses_a_match_inside_a_string():
     assert not loaded["rejected"]
     corpus = rc.build_corpus(brv.tool_calls(events))
     findings = rc.evaluate_checks(loaded["checks"], corpus)
-    # The strict view still sees the text inside the string, so the two views
-    # disagree and the finding stays `unclear`. What matters is that it is never
-    # `violated`: the check asked for string contents to be ignored.
+    # The whole path, loader included: the strict view still sees the text
+    # inside the string, so the two views disagree and the finding stays
+    # `unclear`. The record's retired `ignore_strings` changes nothing either
+    # way - stripping is unconditional now.
     assert [f["state"] for f in findings] == ["unclear"]
 
 
@@ -297,6 +308,53 @@ def test_acknowledged_findings_do_not_make_the_block_violated():
     assert rcheck["state"] == "acknowledged"
 
 
+# ---------- strings are stripped centrally, for every check ----------
+
+STRING_SHAPES = {
+    "template literal": "const doc = `reaction(() => x, y)`;\n",
+    "double quoted": 'const doc = "reaction(() => x, y)";\n',
+    "single quoted": "const doc = 'reaction(() => x, y)';\n",
+}
+
+
+def test_a_match_only_inside_a_string_is_never_a_violation():
+    """famigo F4: the rule's own identifier, quoted inside the very script the
+    rule prescribes, reported in red. Stripping is unconditional now, so the
+    strict and stripped views disagree and the finding is a candidate."""
+    for shape, src in STRING_SHAPES.items():
+        for record in (check(), check(ignore_strings=False)):
+            events = [user_text("go", 1), write_call("/repo/src/P.tsx", src, 2)]
+            findings = rc.evaluate_checks([record], corpus_for(events))
+            assert [f["state"] for f in findings] == ["unclear"], (shape, record)
+
+
+def test_the_same_pattern_outside_a_string_is_still_a_violation():
+    """The positive control: without it the test above would pass on a pattern
+    that matches nothing at all."""
+    events = [user_text("go", 1),
+              write_call("/repo/src/P.tsx", "reaction(() => x, y);\n", 2)]
+    assert [f["state"] for f in rc.evaluate_checks([check()], corpus_for(events))] \
+        == ["violated"]
+
+
+def test_a_v1_record_carrying_a_retired_field_still_loads():
+    """The retired fields are accepted and do nothing. Refusing one would turn
+    every checks file written against the old format into unchecked rules."""
+    loaded = rc.load_checks(doc(checks=[check(ignore_strings=True)]))
+    assert [c["id"] for c in loaded["checks"]] == ["no-reaction"]
+    assert loaded["rejected"] == []
+
+
+def test_a_strict_match_the_stripped_view_loses_is_unclear():
+    """The agreement rule, exercised directly: strict sees it, stripped does
+    not, so nothing is called a violation."""
+    src = 'const doc = "reaction(() => x, y)";\n'
+    entry = {"path": "src/P.tsx", "text": src}
+    assert "reaction(" in src
+    assert "reaction(" not in rc.strip_comments_and_strings(src, entry["path"])
+    assert rc._evaluate_source(check(), entry)["state"] == "unclear"
+
+
 # ---------- fallback for docs with no checks file ----------
 
 FALLBACK_MD = """## Store rules
@@ -340,6 +398,47 @@ def test_fallback_can_be_refused_for_documents_that_are_not_guidelines():
     events = [user_text("go", 1),
               write_call("/repo/src/P.tsx", "import { AuthStore } from './auth';\n", 2)]
     assert rc.check_block(block, None, corpus_for(events), fallback=False) is None
+
+
+def test_a_fallback_finding_is_a_candidate_never_a_violation():
+    """Nobody reviewed the pattern: it is a backticked token lifted out of the
+    rule's own prose, and the exception clause two sentences later may well
+    permit exactly what it matched. `unclear` is as far as that can go."""
+    block = brv.parse_claude_md(FALLBACK_MD)[0]
+    events = [user_text("go", 1),
+              write_call("/repo/src/P.tsx", "AuthStore.load();\n", 2)]
+    rcheck = rc.check_block(block, None, corpus_for(events))
+    assert rcheck["source"] == "fallback"
+    assert [f["state"] for f in rcheck["findings"]] == ["unclear"]
+    assert rcheck["state"] == "unclear"
+    assert "extracted mechanically" in rcheck["findings"][0]["message"]
+
+
+def test_a_fallback_finding_leaves_the_block_out_of_the_red_states(tmp_path):
+    """The badge and the rule line agree, at the baked-payload level: a
+    mechanically extracted candidate neither turns the block `ignored` nor puts
+    it in a rule-check state the page paints red."""
+    src = tmp_path / "GUIDELINES.md"
+    src.write_text(FALLBACK_MD)
+    rc.checks_for_doc.cache_clear()
+    events = [user_text("go", 1),
+              write_call("/repo/src/P.tsx", "AuthStore.load();\n", 2)]
+    v = brv.assess_block(brv.parse_claude_md(FALLBACK_MD)[0], rule_file(src),
+                         trace_for(events))
+    assert v["status"] != "ignored"
+    assert v["ruleCheck"]["state"] == "unclear"
+    assert not [f for f in v["ruleCheck"]["findings"]
+                if f["state"] in ("violated", "acknowledged")]
+
+
+def test_only_the_violated_rule_check_state_is_painted_red():
+    """A vocabulary check, not a layout one: the page keys its red off the
+    rule-check state, and `unclear` - the strongest thing a fallback finding
+    can be - must not be one of the states that gets it."""
+    red = [line.strip() for line in brv.HTML_TEMPLATE.splitlines()
+           if ".rc-" in line and "var(--red)" in line]
+    assert red, "no rule-check state is styled red; this check would pass vacuously"
+    assert all(".rc-violated" in line for line in red), red
 
 
 def test_fallback_never_treats_a_code_identifier_as_a_shell_command():
@@ -647,3 +746,378 @@ def test_a_rule_the_checks_file_does_not_cover_says_exactly_that():
     v = rc.check_block(block, loaded, corpus_for(events))
     assert v["state"] == "not-checkable"
     assert "checks file says nothing about this rule" in v["notCheckable"][0]["why"]
+
+
+# ---------- review round: heading binding, suppression lines, dialects ----------
+
+def test_a_rule_ref_binds_to_the_exact_heading_before_a_containing_one(tmp_path):
+    """"Rules" is contained in "Global Claude Code Rules", but with an exact
+    "Rules" heading in the document the record binds there alone."""
+    src = tmp_path / "RULES.md"
+    src.write_text("# Global Claude Code Rules\n\nNever call reaction().\n\n"
+                   "## Rules\n\nNever call reaction() in a component.\n")
+    (tmp_path / "RULES.md.checks.json").write_text(
+        json.dumps(doc(checks=[check(rule_ref="Rules")])))
+    rc.checks_for_doc.cache_clear()
+    loaded = rc.checks_for_doc(str(src))
+    glob_block, rules_block = brv.parse_claude_md(src.read_text())
+    corpus = corpus_for([user_text("go", 1)])
+    assert rc.check_block(rules_block, loaded, corpus)["checksApplied"] == ["no-reaction"]
+    assert rc.check_block(glob_block, loaded, corpus)["checksApplied"] == []
+
+
+def test_a_rule_ref_still_binds_by_containment_when_no_heading_is_exact(tmp_path):
+    src = tmp_path / "RULES.md"
+    src.write_text("## Reactions in components\n\nNever call reaction().\n")
+    (tmp_path / "RULES.md.checks.json").write_text(json.dumps(doc(checks=[check()])))
+    rc.checks_for_doc.cache_clear()
+    loaded = rc.checks_for_doc(str(src))
+    block = brv.parse_claude_md(src.read_text())[0]
+    out = rc.check_block(block, loaded, corpus_for([user_text("go", 1)]))
+    assert out["checksApplied"] == ["no-reaction"]
+
+
+def test_suppression_is_found_on_the_line_the_finding_cites():
+    """Line numbers count `\\n` only; a stray form feed must not shift which
+    line the marker is looked for on."""
+    text = "a\x0cb\x0cc\nd\n// ctx-allow: no-reaction\nreaction(x);\n"
+    offset = text.index("reaction(")
+    assert rc._line_of(text, offset) == 4
+    assert rc._suppressed(text, offset, "no-reaction")
+
+
+def test_a_css_url_is_not_a_line_comment():
+    src = "a { background: url(http://x/y.png); } /* gone */\n"
+    out = rc.strip_comments_and_strings(src, "a.css")
+    assert "y.png" in out and "gone" not in out
+
+
+def test_scss_keeps_its_line_comments():
+    assert "gone" not in rc.strip_comments_and_strings("a { b: c; } // gone\n", "a.scss")
+
+
+def test_shell_parameter_hashes_are_not_comments():
+    src = 'echo "$#" $# args ${#v} kept # gone\n'
+    out = rc.strip_comments_and_strings(src, "run.sh")
+    assert "args" in out and "kept" in out and "gone" not in out
+
+
+def test_code_written_by_a_heredoc_is_in_the_corpus_a_source_check_reads():
+    """The structural joins credit a heredoc write; a source check has to be
+    able to see the same code or it can never flag it."""
+    events = [bash("cat > src/app.py <<'EOF'\nprint('debug')\nEOF", 1)]
+    calls = brv.tool_calls(events)
+    t = brv.build_trace(events, calls, brv.assistant_text_segments(events), "q")
+    corpus = t["rule_corpus"]
+    assert [e["path"] for e in corpus["code"]] == ["src/app.py"]
+    assert "print('debug')" in corpus["final_code"][0]["text"]
+
+
+# ---------- the governing prompt behind a cited call ----------
+#
+# `ctx-allow` lets written code carry a deliberate exception at the violation
+# site. A transcript has no such marker, so the strongest rationale there is -
+# the user typed the action in the prompt that caused the call - was invisible
+# to the checker, and a reviewed, high-confidence rule red-badged an agent for
+# doing what it was told. The join is positional: turns already run
+# prompt-to-prompt and a tool finding already cites a call, so the prompt is
+# the one of the turn the call falls in. Nothing here reads the prompt's words.
+
+PUSH_RULE = "## Hard rules\n\n`master` takes code only through a PR with green CI.\n"
+
+
+def push_check(**over):
+    """The shape of the real `no-push-to-master` record this mechanism exists for."""
+    base = {
+        "id": "no-push-to-master",
+        "rule_ref": "Hard rules",
+        "rule_text": "`master` takes code only through a PR with green CI.",
+        "domain": "tool",
+        "kind": "tool_forbidden",
+        "pattern": r"\bgit\s+push\b[^\n]*\bmaster\b",
+        "applies_to": [],
+        "confidence": "high",
+        "message": "master is protected: land code through a PR, never a direct push.",
+        "self_test": {
+            "should_match": ["Bash git push origin master"],
+            "should_not_match": ["Bash git push -u origin feat/posts"],
+        },
+    }
+    base.update(over)
+    return base
+
+
+def push_block(tmp_path, checks=None):
+    src = tmp_path / "GUIDELINES.md"
+    src.write_text(PUSH_RULE)
+    (tmp_path / "GUIDELINES.md.checks.json").write_text(
+        json.dumps(doc(checks=checks or [push_check()])))
+    rc.checks_for_doc.cache_clear()
+    return src, brv.parse_claude_md(src.read_text())[0]
+
+
+def test_a_finding_names_the_prompt_of_the_turn_its_call_falls_in(tmp_path):
+    """Turn containment, not the nearest earlier prompt by event index.
+
+    The first push here runs *before* any prompt was typed, which is the shape
+    the two readings disagree about: the nearest earlier prompt is none at all,
+    while the turn the call falls in is the first one, because a turn absorbs
+    everything before its own prompt.
+    """
+    src, block = push_block(tmp_path)
+    events = [bash("git push origin master", 0, tool_id="b0"),
+              user_text("/commit and push to master", 1),
+              bash("git push origin master", 2, tool_id="b1"),
+              user_text("teraz wypchnij poprawke", 3),
+              bash("git push --force origin master", 4, tool_id="b2")]
+    v = brv.assess_block(block, rule_file(src), trace_for(events))
+    findings = v["ruleCheck"]["findings"]
+    assert [f["governingPrompt"]["text"] for f in findings] == [
+        "/commit and push to master", "/commit and push to master",
+        "teraz wypchnij poprawke"]
+    assert [f["governingPrompt"]["turnIndex"] for f in findings] == [0, 0, 1]
+    assert [f["governingPrompt"]["callIndex"] for f in findings] == [0, 1, 2]
+    # Offline the finding is unchanged: the reader is shown the prompt and
+    # settles it, and nothing downgrades itself without being asked.
+    assert [f["state"] for f in findings] == ["violated"] * 3
+    assert v["status"] == "ignored"
+
+
+def test_a_call_in_a_turn_with_no_user_prompt_names_no_governing_prompt(tmp_path):
+    """Absence must not read as authorisation.
+
+    A task-notification arrives on the user channel but is the result half of a
+    spawn, so it starts no turn. A session driven entirely by one has no prompt
+    to cite, and the finding stays a violation with nothing beside it.
+    """
+    src, block = push_block(tmp_path)
+    push = bash("git push origin master", 2)
+    notified = [user_text("<task-notification><status>done</status></task-notification>", 1),
+                push]
+    # The control: the identical call under a real prompt does carry one, so
+    # the assertion below cannot pass merely because the mechanism is absent.
+    prompted = [user_text("push it", 1), push]
+    assert (brv.assess_block(block, rule_file(src), trace_for(prompted))
+            ["ruleCheck"]["findings"][0]["governingPrompt"]["text"] == "push it")
+
+    v = brv.assess_block(block, rule_file(src), trace_for(notified, prompt=""))
+    finding = v["ruleCheck"]["findings"][0]
+    assert "governingPrompt" not in finding
+    assert finding["state"] == "violated"
+    assert v["status"] == "ignored"
+
+
+def test_a_shell_finding_names_its_governing_prompt_too(tmp_path):
+    """A `forbidden_command` red is as capable of being a false red as a tool one."""
+    shell = push_check(id="no-push-shell", domain="shell", kind="forbidden_command",
+                       pattern=r"\bgit\s+push\b[^\n]*\bmaster\b",
+                       self_test={"should_match": ["git push origin master"],
+                                  "should_not_match": ["git push -u origin feat/posts"]})
+    src, block = push_block(tmp_path, checks=[shell])
+    events = [user_text("push to master", 1), bash("git push origin master", 2)]
+    v = brv.assess_block(block, rule_file(src), trace_for(events))
+    governing = v["ruleCheck"]["findings"][0]["governingPrompt"]
+    assert governing["text"] == "push to master"
+    assert governing["turnIndex"] == 0 and governing["callIndex"] == 0
+
+
+def test_a_forbidden_pattern_may_not_span_two_commands_in_one_call(tmp_path):
+    """The false red this corpus was frozen to measure.
+
+    The agent pushed a branch and then opened a PR against master. `&&` joins
+    two commands that each stand on their own, and the call log renders a call
+    as one line, so `git push \u2026 master` matched across the join and the run was
+    accused of the one action it did not take. A pattern is about a command, so
+    it may not span the point where one command ends and the next begins.
+    """
+    src, block = push_block(tmp_path)
+    compound = ("git push -u origin docs/admin-posts-crud-spec 2>&1 | tail -2 "
+                "&& git ls-remote --heads origin master | head -1 "
+                "&& GH_TOKEN=$(gh auth token --user me) gh pr create --base master")
+    v = brv.assess_block(block, rule_file(src),
+                         trace_for([user_text("open the PR", 1), bash(compound, 2)]))
+    assert [f["state"] for f in v["ruleCheck"]["findings"]] == ["not-exercised"]
+    assert v["status"] != "ignored"
+
+    # The control: the forbidden command on its own still reds, so the
+    # assertion above cannot pass merely because the check stopped working.
+    red = brv.assess_block(block, rule_file(src),
+                           trace_for([user_text("push it", 1),
+                                      bash("git push origin master", 2)]))
+    assert red["ruleCheck"]["findings"][0]["state"] == "violated"
+    assert red["status"] == "ignored"
+
+
+def test_a_shell_pattern_may_not_span_two_commands_either(tmp_path):
+    """The shell kinds read the same compound line and need the same bound."""
+    shell = push_check(id="no-push-shell", domain="shell", kind="forbidden_command",
+                       pattern=r"\bgit\s+push\b[^\n]*\bmaster\b",
+                       self_test={"should_match": ["git push origin master"],
+                                  "should_not_match": ["git push -u origin feat/posts"]})
+    src, block = push_block(tmp_path, checks=[shell])
+    compound = "git push -u origin feat/x && gh pr create --base master"
+    v = brv.assess_block(block, rule_file(src),
+                         trace_for([user_text("open the PR", 1), bash(compound, 2)]))
+    assert [f["state"] for f in v["ruleCheck"]["findings"]] == []
+    assert v["status"] != "ignored"
+
+    red = brv.assess_block(block, rule_file(src),
+                           trace_for([user_text("push it", 1),
+                                      bash("git push origin master", 2)]))
+    assert red["ruleCheck"]["findings"][0]["state"] == "violated"
+
+
+def test_a_real_violation_inside_a_compound_call_still_reds(tmp_path):
+    """The bound on a pattern is a bound, not an exemption for compound calls.
+
+    The join guard rejects a match that spans two commands, but a greedy run
+    produces exactly one match and it is the spanning one, so the shorter
+    match sitting wholly inside the offending command was never offered and a
+    real push to master went unreported. A missed red is the mirror of the
+    false red the guard exists to prevent: both leave the reader with a
+    verdict the trace does not support.
+    """
+    src, block = push_block(tmp_path)
+    for compound in ("git push origin master && gh pr create --base master",
+                     "git commit -m x && git push origin master "
+                     "&& gh pr create --base master"):
+        v = brv.assess_block(block, rule_file(src),
+                             trace_for([user_text("ship it", 1), bash(compound, 2)]))
+        states = [f["state"] for f in v["ruleCheck"]["findings"]]
+        assert "violated" in states, (compound, states)
+
+
+def test_a_real_shell_violation_inside_a_compound_call_still_reds(tmp_path):
+    """The shell kinds read the same compound line and need the same repair."""
+    shell = push_check(id="no-push-shell", domain="shell", kind="forbidden_command",
+                       pattern=r"\bgit\s+push\b[^\n]*\bmaster\b",
+                       self_test={"should_match": ["git push origin master"],
+                                  "should_not_match": ["git push -u origin feat/posts"]})
+    src, block = push_block(tmp_path, checks=[shell])
+    compound = "git push origin master && gh pr create --base master"
+    v = brv.assess_block(block, rule_file(src),
+                         trace_for([user_text("ship it", 1), bash(compound, 2)]))
+    assert [f["state"] for f in v["ruleCheck"]["findings"]] == ["violated"]
+
+
+# ---------- the join reads the same turns the rest of the payload does ----------
+
+class _SessionArgs:
+    claude_md = None
+    skills_dir = None
+    no_global = True
+    no_skills = True
+    no_project = False
+
+
+def _compaction_session(tmp_path, monkeypatch):
+    """A real session with a compaction between two pushes and a later prompt.
+
+    A compaction carves an extra turn boundary, so the turn a call falls in is
+    not the one a prompt-only split reports. The payload splits with the
+    compaction; a join that splits without it numbers every later turn low and
+    reports a turn number the drill-down and `--query` contradict.
+    """
+    (tmp_path / "CLAUDE.md").write_text(PUSH_RULE)
+    (tmp_path / "CLAUDE.md.checks.json").write_text(
+        json.dumps(doc(checks=[push_check()], source="CLAUDE.md")))
+    rc.checks_for_doc.cache_clear()
+    events = [user_text("/commit and push to master", 1),
+              assistant_text("on it", 2),
+              bash("git push origin master", 3, tool_id="b0"),
+              assistant_text("pushed", 5),
+              bash("git push origin master", 6, tool_id="b1"),
+              user_text("now tidy the branch", 7),
+              bash("git push --force origin master", 8, tool_id="b2")]
+    p = tmp_path / "t.jsonl"
+    p.write_text("".join(json.dumps(e) + "\n" for e in events))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(brv.ctxlog_facts, "load_facts", lambda *a, **k: {
+        "instructions": [],
+        "compactions": [{"event": "PreCompact", "ts": "2026-01-01T00:00:04+00:00",
+                         "trigger": "auto"}]})
+    return brv.process_session(p, _SessionArgs())
+
+
+def _push_findings(payload):
+    for f in payload["contextFiles"]:
+        for b in f.get("blocks") or []:
+            for finding in (b.get("ruleCheck") or {}).get("findings") or []:
+                yield finding
+
+
+def test_the_governing_turn_number_is_the_one_the_payload_splits(tmp_path, monkeypatch):
+    """The cited turn has to be the turn the drill-down shows, compaction and all."""
+    _, per_session = _compaction_session(tmp_path, monkeypatch)
+    # Four turns' worth of boundaries: two prompts plus the compaction.
+    assert [t["index"] for t in per_session["turns"]] == [0, 1, 2]
+    assert per_session["turns"][1]["afterCompaction"] is True
+    findings = list(_push_findings(per_session))
+    assert [f["governingPrompt"]["turnIndex"] for f in findings] == [0, 1, 2]
+
+
+def test_a_compaction_carved_turn_still_names_the_prompt_in_flight(tmp_path, monkeypatch):
+    """A carved turn holds no prompt of its own but is governed by one.
+
+    Reporting nothing there is the "absence must not read as authorisation"
+    case firing on a turn that *was* authorised - the prompt in flight is the
+    one the payload already shows on the turn.
+    """
+    _, per_session = _compaction_session(tmp_path, monkeypatch)
+    carved = per_session["turns"][1]
+    assert carved["userPrompt"] == "/commit and push to master"
+    findings = list(_push_findings(carved))
+    assert len(findings) == 1
+    assert findings[0]["governingPrompt"] == {
+        "text": "/commit and push to master", "turnIndex": 1, "callIndex": 0}
+
+
+# ---------- the document's own compile state ----------
+
+JUDGED_ONLY_DOC = "## How to talk to me\n\nAlways answer first, with zero fluff.\n"
+
+
+def judged_record(**over):
+    """A record the compiler parked for the judge, as the flow emits one."""
+    base = {
+        "id": "be-direct", "rule_ref": "How to talk to me",
+        "rule_text": "Answer first, zero fluff.",
+        "bucket": "judged",
+        "scope": "communication",
+        "evidence": "transcript",
+        "statement": "Does the reply open with a one-sentence answer?",
+        "examples_positive": ["Yes - the cache was never invalidated."],
+        "examples_negative": ["Great question! Let me walk you through the layers."],
+    }
+    base.update(over)
+    return base
+
+
+def test_a_document_compiled_entirely_into_judged_reports_refused(tmp_path):
+    """"Compiled" must not be read as "decidable".
+
+    A checks file whose every record is parked for the judge produces no
+    offline answer about any rule in the document, so the document's state is
+    the answer the compiler actually gave: refused.
+    """
+    blocks = brv.parse_claude_md(JUDGED_ONLY_DOC)
+    loaded = rc.load_checks(doc(checks=[judged_record()]))
+    status = rc.compile_status(blocks, loaded)
+    assert status["state"] == "refused"
+    assert status["compiled"] == 0 and status["deterministic"] == 0
+    assert status["judged"] == 1 and status["notCheckable"] == 0
+
+
+def test_a_document_with_one_deterministic_record_reports_compiled(tmp_path):
+    blocks = brv.parse_claude_md(
+        "## Reactions\n\nNever call `reaction()` in a component.\n")
+    loaded = rc.load_checks(doc(checks=[check()]))
+    status = rc.compile_status(blocks, loaded)
+    assert status["state"] == "compiled" and status["deterministic"] == 1
+
+
+def test_a_document_nobody_compiled_reports_uncompiled():
+    blocks = brv.parse_claude_md(JUDGED_ONLY_DOC)
+    status = rc.compile_status(blocks, None)
+    assert status["state"] == "uncompiled"
+    assert status["deterministic"] == 0 and status["judged"] == 0

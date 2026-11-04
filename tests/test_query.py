@@ -401,7 +401,19 @@ def test_verdictless_moment_prints_a_dash_not_none():
     data = _data((_summary(SID), _session(SID, files=[_file("~/.claude/CLAUDE.md", [blk])])))
     text = _joined(brv.run_query(data, [SID, "claude-md-0-talk"]))
     assert "[None]" not in text
-    assert "[-] Agent reasoning" in text
+    assert "[-] non-event: Agent reasoning" in text
+
+
+def test_a_moment_line_names_its_kind():
+    """The kind is the epistemic label after the moment rework, and the page
+    shows it as a chip - a CLI that drops it cannot tell a co-occurrence card
+    apart from an action card."""
+    blk = _blk("claude-md-0-talk", "Talk",
+               moments=[{"t": None, "kind": "co-occurrence", "verdict": None,
+                         "label": "`printf` ran 2× this run", "text": "note"}])
+    data = _data((_summary(SID), _session(SID, files=[_file("~/.claude/CLAUDE.md", [blk])])))
+    text = _joined(brv.run_query(data, [SID, "claude-md-0-talk"]))
+    assert "co-occurrence: `printf` ran 2× this run" in text
 
 
 def test_field_on_a_listing_raises():
@@ -469,13 +481,15 @@ def _fixture_transcript(tmp_path):
 
 
 class _QueryArgs(_Args):
-    def __init__(self, transcript, out, query, field=None, all=False, claude_md=None):
+    def __init__(self, transcript, out, query, field=None, all=False, claude_md=None,
+                 compile_status=False):
         self.claude_md = claude_md
         self.transcript = transcript
         self.out = out
         self.query = query
         self.field = field
         self.all = all
+        self.compile_status = compile_status
         self.session = None
         self.all_sessions = False
         self.max_sessions = 0
@@ -682,3 +696,64 @@ def test_unknown_agent_id_fails_the_command_naming_the_listing(tmp_path, monkeyp
     with pytest.raises(brv.QueryError) as e:
         brv.cmd_query(_QueryArgs(path, out, ["cafe1234", "agent-nope"]))
     assert "agents" in str(e.value)
+
+
+# ---------- argv handling: an address token may look like an option ----------
+
+def _query_of(argv, monkeypatch):
+    monkeypatch.setattr("sys.argv", ["build_real_view.py"] + argv)
+    return brv.parse_args().query
+
+
+def test_leading_hyphen_address_tokens_reach_the_query(monkeypatch):
+    """`file_slug` can produce a leading hyphen, so argparse must not eat it."""
+    assert _query_of(["--query", "abc12345", "-x-md-0-steps"], monkeypatch) == [
+        "abc12345", "-x-md-0-steps"]
+
+
+def test_flags_after_the_query_address_still_parse(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["build_real_view.py", "--query", "abc12345",
+                                     "-x-md-0-steps", "--field", "content", "--all"])
+    args = brv.parse_args()
+    assert args.query == ["abc12345", "-x-md-0-steps"]
+    assert (args.field, args.all) == ("content", True)
+
+
+def test_equals_form_of_the_query_flag(monkeypatch):
+    assert _query_of(["--query=sessions"], monkeypatch) == ["sessions"]
+
+
+def test_flags_before_the_query_address_still_parse(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["build_real_view.py", "--max-sessions", "3",
+                                     "--query", "abc12345", "blocks"])
+    args = brv.parse_args()
+    assert args.max_sessions == 3
+    assert args.query == ["abc12345", "blocks"]
+
+
+def test_query_with_no_address_is_still_an_error(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["build_real_view.py", "--query"])
+    with pytest.raises(SystemExit):
+        brv.parse_args()
+
+
+def test_a_rule_finding_names_its_conditional_stage():
+    """The stage is what separates "the rule never came up" from "the rule was
+    broken", and the page prints it as its own line - a CLI that drops it
+    describes the same record with less information than the page does."""
+    blk = _blk("claude-md-0-gh", "GitHub account per project")
+    blk["ruleCheck"] = {
+        "state": "not-exercised", "source": "checks-file", "confidence": "high",
+        "findings": [{"checkId": "gh-auth-before-gh", "state": "not-exercised",
+                      "stage": "antecedent-not-fired", "confidence": "high",
+                      "path": "(tools)", "line": 0, "match": "",
+                      "message": "never triggered", "kind": "tool_never_without_prior"}],
+        "notCheckable": [], "rejected": [], "stale": [],
+        "checksApplied": ["gh-auth-before-gh"],
+    }
+    data = _data((_summary(SID), _session(SID, files=[_file("~/.claude/CLAUDE.md", [blk])])))
+    text = _joined(brv.run_query(data, [SID, "claude-md-0-gh"]))
+    assert "antecedent-not-fired" in text
+    # Nothing was cited, so no span is printed: an empty one reads as a
+    # citation the reader can go and check.
+    assert "(tools):0" not in text

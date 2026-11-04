@@ -257,7 +257,8 @@ def test_turn_rows_cover_an_unpaired_trailing_turn():
 def test_build_data_omits_compare_unless_requested():
     data = brv.build_data("/tmp/proj", [], {}, None)
     assert "compare" not in data
-    assert set(data) == {"project", "sessions", "activeSessionId", "perSession"}
+    assert set(data) == {"project", "sessions", "activeSessionId", "perSession",
+                         "judgeMode"}
 
 
 def test_build_data_includes_compare_when_given():

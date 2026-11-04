@@ -5,15 +5,19 @@ and emit a self-contained HTML view with the data baked in.
 """
 import argparse
 import difflib
+import functools
+import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
 import ctxlog_facts
+import lexical
 import rule_checks
 
 DEFAULT_CLAUDE_MD = Path.home() / ".claude" / "CLAUDE.md"
@@ -57,7 +61,7 @@ def discover_transcript(cwd, projects_dir=DEFAULT_PROJECTS_DIR):
 
 
 def summarize_transcript(path):
-    """Lightweight metadata pass — used for the session picker list."""
+    """Lightweight metadata pass - used for the session picker list."""
     events = load_transcript(path)
     if not events:
         return None
@@ -196,7 +200,7 @@ def assistant_text_segments(events):
 
 def tool_calls(events):
     out = []
-    for e in events:
+    for idx, e in enumerate(events):
         if e.get("type") != "assistant":
             continue
         msg = e.get("message", {})
@@ -210,6 +214,10 @@ def tool_calls(events):
                     "name": c.get("name"),
                     "input": c.get("input", {}),
                     "id": c.get("id"),
+                    # Where this call sits in the list it was derived from, so
+                    # the turn it belongs to can be decided by containment
+                    # rather than by hunting for the nearest earlier prompt.
+                    "eventIdx": idx,
                 })
     return out
 
@@ -502,12 +510,19 @@ def combine_verdicts(statuses):
       USED family    : 'used', 'used-partial', 'ignored', 'possibly-referenced'
       NOT-USED family: 'undelivered', 'unused', 'dormant', 'not-loaded'
 
-    'ignored' takes precedence over 'used' because an ignored verdict is a
-    rule violation — silently aggregating it into 'used' would hide signal
-    the investigator came for. 'used' beats 'used-partial', which beats
-    'possibly-referenced': the weak-evidence status is the least the block
-    could have done, so any turn with real evidence outranks it. Within the
-    NOT-USED family we prefer the most informative label that appears.
+    'ignored' no longer outranks compliance outright: mixed turns combine to
+    'used-partial'. One mis-scored turn used to repaint a session over a dozen
+    provably compliant ones, and 'ignored' at session scope has to mean what
+    it says - the rule applied and was satisfied nowhere. The violation is not
+    hidden by the downgrade: 'used-partial' is not green, its reason counts
+    the turns, and the violating turn stays red at turn scope. Every 'ignored'
+    reaching this point was exercised, because `assess_block` scores an
+    applicable-but-unexercised rule 'dormant' (see `_is_exercised`).
+
+    'used' beats 'used-partial', which beats 'possibly-referenced': the
+    weak-evidence status is the least the block could have done, so any turn
+    with real evidence outranks it. Within the NOT-USED family we prefer the
+    most informative label that appears.
 
     Single-turn input passes through unchanged so single-turn sessions
     remain byte-identical to the pre-turn-aware build.
@@ -517,6 +532,8 @@ def combine_verdicts(statuses):
     if len(statuses) == 1:
         return statuses[0]
     if "ignored" in statuses:
+        if "used" in statuses or "used-partial" in statuses:
+            return "used-partial"
         return "ignored"
     if "used" in statuses:
         return "used"
@@ -530,6 +547,50 @@ def combine_verdicts(statuses):
     return statuses[0]
 
 
+COMBINED_MEANINGS = {
+    "used": "the rule applied and was satisfied wherever it was exercised.",
+    "used-partial": "satisfied in some turns and unsatisfied in others.",
+    "ignored": "the rule applied and was satisfied in no turn.",
+    "possibly-referenced": "weak co-occurrence evidence only, in every turn that had any.",
+    "undelivered": "the block never reached the model.",
+    "unused": "no predicate fired and no keyword overlap, in any turn.",
+    "dormant": "the rule's preconditions were never met.",
+    "not-loaded": "the file was not in context in any turn.",
+}
+
+# Not the template's STATUS_ORDER, which ranks the chips by severity: this one
+# only fixes the order of the tally inside a combined reason.
+COMBINED_TALLY_ORDER = ("used", "used-partial", "ignored", "possibly-referenced",
+                        "undelivered", "unused", "dormant", "not-loaded")
+
+
+def combined_reason(status, statuses):
+    """Reason text for an aggregate block, written from the combined status.
+
+    The aggregate keeps its own session-wide moments and evidence, but its
+    reason was recomputed independently of the combine rule, so one real
+    record read "status ignored" above "1 predicate(s) applied and were
+    satisfied" - three realities in one row. Deriving the sentence from the
+    same statuses the status came from is the only way the two cannot drift.
+    """
+    counts = {s: statuses.count(s) for s in COMBINED_TALLY_ORDER if s in statuses}
+    tally = ", ".join(f"{n} {s}" for s, n in counts.items())
+    return (f"Combined from {len(statuses)} turns ({tally}) - "
+            + COMBINED_MEANINGS.get(status, "see the per-turn verdicts."))
+
+
+def _rebased_turn(turn):
+    """One turn's descriptor in its own slice's event coordinates.
+
+    `turn_slice` re-derives calls from the sliced event list, so their event
+    indices start at 0. The turn keeps its real `index` and its prompt - a
+    compaction-carved turn's prompt is the one that was in flight - so a
+    turn-scoped finding cites the same turn number the session scope does.
+    """
+    return dict(turn, startEventIdx=0,
+                endEventIdx=turn["endEventIdx"] - turn["startEventIdx"])
+
+
 def turn_slice(events, calls, asst_segs, turn):
     """Return the (events, calls, asst_segs) bundle restricted to one turn.
 
@@ -537,7 +598,7 @@ def turn_slice(events, calls, asst_segs, turn):
     every existing assessor can consume it unchanged.
 
     `calls` and `asst_segs` are re-derived from the sliced events list rather
-    than filtered by event index — both functions are pure and cheap, and this
+    than filtered by event index - both functions are pure and cheap, and this
     avoids needing to plumb event indices through their outputs.
     """
     start, end = turn["startEventIdx"], turn["endEventIdx"]
@@ -1155,7 +1216,7 @@ def _merge_intervals(intervals):
     return out
 
 
-def _delivery_range(abs_path, content, kind, source, read_ranges=None):
+def _delivery_range(abs_path, content, kind, source, read_ranges=None, base_text=None):
     """How much of a context file actually reached the model.
 
     Returns total_lines / delivered_from / delivered_to / delivered_ranges /
@@ -1168,13 +1229,21 @@ def _delivery_range(abs_path, content, kind, source, read_ranges=None):
     1900-2000) span everything in between without having delivered any of it,
     so collapsing them to a single min-to-max span scored the unread middle as
     though the model had seen it.
+
+    `base_text` is the file as the transcript delivered it, and it is what the
+    ranges are measured against when we have one: measuring a recovered text's
+    ranges against today's disk file would put the line numbers of one document
+    against the contents of another.
     """
     unknown = {"total_lines": None, "delivered_from": 1, "delivered_to": None,
                "delivered_ranges": [], "delivery": "unknown"}
-    try:
-        total_lines = len(Path(abs_path).read_text(errors="replace").splitlines())
-    except Exception:
-        return unknown
+    if base_text is not None:
+        total_lines = len(base_text.splitlines())
+    else:
+        try:
+            total_lines = len(Path(abs_path).read_text(errors="replace").splitlines())
+        except Exception:
+            return unknown
     full = {"total_lines": total_lines, "delivered_from": 1,
             "delivered_to": total_lines, "delivered_ranges": [(1, total_lines)],
             "delivery": "full"}
@@ -1294,6 +1363,221 @@ def extract_attachments(events):
     return out
 
 
+def _stale_against_hook(abs_path, hook):
+    """Did the harness record this file as something other than what is on disk?
+
+    The ctxlog hook writes the line count, the byte size and a truncated
+    sha256 of every instruction file at the moment it was loaded. Where those
+    disagree with the file today, the disk text is *provably* not the text the
+    model was given - a stronger fact than "we could not recover it", and the
+    one case where deriving a rule from the disk wording would be deriving it
+    from a document nobody read.
+    """
+    stats = (hook or {}).get("stats") or {}
+    want_sha, want_size = stats.get("sha256"), stats.get("size_bytes")
+    if not want_sha and not want_size:
+        return False
+    try:
+        data = Path(abs_path).read_bytes()
+    except Exception:
+        return False
+    if want_sha:
+        # The log stores a prefix of the digest, not the whole of it.
+        return not hashlib.sha256(data).hexdigest().startswith(want_sha)
+    return len(data) != want_size
+
+
+def _read_result_delivery(res):
+    """The whole file a `Read` tool result delivered: (path, text), or None.
+
+    Only a read that covers the file end to end counts. A slice is delivered
+    text too, but placing it back inside the rest of the file needs the rest,
+    and the only copy of that is the disk file this exists to stop trusting.
+    """
+    f = res.get("file")
+    if not isinstance(f, dict):
+        return None
+    path, text = f.get("filePath"), f.get("content")
+    if not path or not isinstance(text, str):
+        return None
+
+    def _int(v):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+
+    # A `startLine` that will not parse is not a `startLine` of 1: both come
+    # back as None from `_int`, so presence is checked separately.
+    raw_start = f.get("startLine")
+    if raw_start is not None and _int(raw_start) != 1:
+        return None
+    # Fails closed: a record that does not say how much of the file it carried
+    # cannot be shown to carry all of it, and the cost of refusing is the disk
+    # text with its marker, while the cost of guessing is a verdict about a
+    # document nobody read.
+    got, total = _int(f.get("numLines")), _int(f.get("totalLines"))
+    if got is None or total is None or got < total:
+        return None
+    return (path, text)
+
+
+def _write_result_deliveries(res):
+    """(path, [(text, origin), ...]) a write's own result record proves.
+
+    An `Edit` result carries the whole pre-edit file, which is the only record
+    of what a document said before the session rewrote it - and a session that
+    rewrites its own CLAUDE.md is exactly the one whose earlier turns must not
+    be judged against the new wording.
+    """
+    path = res.get("filePath")
+    if not path:
+        return None
+    versions = []
+    before = res.get("originalFile")
+    if isinstance(before, str):
+        versions.append((before, "pre-write"))
+    after = res.get("content")
+    if isinstance(after, str):
+        versions.append((after, "write"))
+    elif isinstance(before, str):
+        old, new = res.get("oldString"), res.get("newString")
+        # An `old_string` the recorded pre-edit text does not hold means the two
+        # halves of the record disagree; appending the hunk anyway would invent
+        # a file the model never saw.
+        if isinstance(old, str) and isinstance(new, str) and old and old in before:
+            versions.append(
+                (before.replace(old, new) if res.get("replaceAll")
+                 else before.replace(old, new, 1), "edit"))
+    if not versions:
+        return None
+    return (path, versions)
+
+
+def delivered_versions(events):
+    """Per resolved path, the file text the transcript shows the model holding.
+
+    Entries are (effective_from_event_idx, text, origin), oldest first. A
+    verdict about a rule has to be about the rule as the model received it:
+    this repo's own CLAUDE.md gained sentences hours after one audited session
+    ended, and judging that session against today's file credited the agent
+    with following text nobody had written yet.
+
+    The first version recorded for a path is effective from index 0. A file the
+    session read at turn 7 and never edited was the same file at turn 1, and
+    that read is the only record of what the harness injected.
+    """
+    versions = {}
+    skill_names = {c["id"]: (c["input"].get("skill") or "").strip().lstrip("/")
+                   for c in tool_calls(events) if c["name"] == "Skill"}
+
+    def record(path, idx, text, origin):
+        try:
+            key = str(Path(path).resolve())
+        except Exception:
+            key = str(path)
+        versions.setdefault(key, []).append((idx, text, origin))
+
+    for idx, e in enumerate(events):
+        got = _invoked_body(e, events[idx - 1] if idx else None, skill_names)
+        if got:
+            key, body = got
+            if key.startswith(INVOKED_KEY):
+                versions.setdefault(key, []).append((idx, body, "invoked"))
+            else:
+                record(key, idx, body, "invoked")
+            continue
+        if e.get("type") == "attachment":
+            # Parsed through the one attachment reader rather than a second
+            # copy of its shape rules, which is how the two would drift.
+            a = extract_attachments([e])
+            for nm in a["nested_memories"]:
+                record(nm["path"], idx, nm["content"], "attachment")
+            for entry in a["preloaded_files"] + a["user_attached_files"]:
+                record(entry["path"], idx, entry["content"], "attachment")
+            continue
+        res = e.get("toolUseResult")
+        if not isinstance(res, dict):
+            continue
+        got = _read_result_delivery(res)
+        if got:
+            record(got[0], idx, got[1], "read")
+            continue
+        got = _write_result_deliveries(res)
+        if got:
+            for text, origin in got[1]:
+                record(got[0], idx, text, origin)
+    for entries in versions.values():
+        # A file whose earliest record is the write that created it did not
+        # exist before that write, so back-dating it would claim the model held
+        # text that had not been written yet. Every other earliest record is a
+        # state the file was already in.
+        if entries[0][2] != "write":
+            entries[0] = (0,) + entries[0][1:]
+    return versions
+
+
+# A command body arrives with no path on it, so it is keyed by the name it was
+# invoked under and the loader looks it up by that name.
+INVOKED_KEY = "invoked:"
+_SKILL_BASE_RE = re.compile(r"\ABase directory for this skill: ([^\n]+)\n\n")
+_ALREADY_LOADED_RE = re.compile(r"\ASkill /\S+ is already loaded")
+
+
+def _invoked_body(event, prev, skill_names):
+    """(path or `invoked:<name>`, text) for the body the harness injected when
+    a skill or command ran, else None.
+
+    It is the one record of the text the model was handed: a skill body is
+    expanded at invocation (shell substitutions included), so the file on disk
+    can name a different file in the very step being judged.
+    """
+    if event.get("type") != "user" or not event.get("isMeta"):
+        return None
+    c = (event.get("message") or {}).get("content")
+    text = c if isinstance(c, str) else "".join(
+        x.get("text", "") for x in (c or []) if isinstance(x, dict))
+    if not text.strip() or text.lstrip().startswith("<") or _ALREADY_LOADED_RE.match(text):
+        return None
+    # The harness appends what the user typed after the name; it is not the document.
+    body = text.rsplit("\n\nARGUMENTS: ", 1)[0]
+    m = _SKILL_BASE_RE.match(body)
+    if m:
+        return str(Path(m.group(1).strip()) / "SKILL.md"), body[m.end():]
+    name = _invoking_name(prev, skill_names)
+    return (INVOKED_KEY + name.lower(), body) if name else None
+
+
+def _invoking_name(prev, skill_names):
+    """The skill or command the event before a body invoked, if it invoked one."""
+    if not prev or prev.get("type") != "user":
+        return None
+    c = (prev.get("message") or {}).get("content")
+    if isinstance(c, str):
+        m = COMMAND_NAME_RE.search(c)
+        return m.group(1).strip().lstrip("/") if m else None
+    for item in c or ():
+        if isinstance(item, dict) and item.get("type") == "tool_result":
+            name = skill_names.get(item.get("tool_use_id"))
+            if name:
+                return name
+    return None
+
+
+def delivered_at(versions, event_idx):
+    """path -> {"text", "origin"} for the version in effect at `event_idx`."""
+    out = {}
+    for path, entries in versions.items():
+        chosen = None
+        for eff, text, origin in entries:
+            if eff > event_idx:
+                break
+            chosen = (text, origin)
+        if chosen:
+            out[path] = {"text": chosen[0], "origin": chosen[1]}
+    return out
+
+
 def hook_directive_paths(hook_directives, project_dir):
     """Extract candidate .md filenames from SessionStart hook directives.
     Resolve relative to project_dir; return absolute Paths that exist on disk."""
@@ -1384,6 +1668,47 @@ def _is_triggered(name, user_prompt):
         return False
     pattern = r"(?<![\w./:-])/" + re.escape(name) + r"(?![\w:-])"
     return re.search(pattern, user_prompt, re.I) is not None
+
+
+def _trigger_evidence(cmd, trace):
+    """The record showing `/cmd` was invoked this scope, strongest first.
+
+    Returns ("skill", call) / ("wrapper", segment) / ("prompt", None), or
+    (None, None). The trigger predicate and the skill/command moments builder
+    must ask this one question: the predicate used to run a bare substring
+    test of its own, so a prompt reading `/implement-plan-workflow` scored the
+    `/implement-plan` pointer green while the moment card beside it said,
+    correctly, that the command was never invoked. Two matchers for one
+    question is what let the badge and the card contradict each other.
+    """
+    name = (cmd or "").strip().lstrip("/").lower()
+    if not name:
+        return (None, None)
+    for c in trace.get("calls") or ():
+        if c["name"] != "Skill":
+            continue
+        if (c["input"].get("skill") or "").strip().lstrip("/").lower() == name:
+            return ("skill", c)
+    for w in trace.get("cmd_wrappers") or ():
+        if (w.get("name") or "").lower() == name:
+            return ("wrapper", w)
+    if _is_triggered(name, trace.get("user_prompt") or ""):
+        return ("prompt", None)
+    return (None, None)
+
+
+def _describe_trigger(cmd, trace):
+    """Evidence line for a trigger predicate: which record shows the call."""
+    source, rec = _trigger_evidence(cmd, trace)
+    if source == "skill":
+        return f"`Skill` tool invoked `{cmd}`"
+    if source == "wrapper":
+        return f"User typed `{cmd}` as a slash command"
+    if source == "prompt":
+        return (f"User prompt mentioned `{cmd}`, but nothing shows it running - "
+                f"`{(trace.get('user_prompt') or '')[:100]}`")
+    return (f"`{cmd}` was not invoked this run - prompt: "
+            f"`{(trace.get('user_prompt') or '')[:100]}`")
 
 
 def _skill_tool_names(calls):
@@ -1479,14 +1804,39 @@ def _resolve_at_refs(blocks, search_roots):
     return resolved
 
 
-def load_context_files(events, calls, project_dir, args, user_prompt, hook_facts=None):
+def load_context_files(events, calls, project_dir, args, user_prompt, hook_facts=None,
+                       skill_listing=None, delivered=None, carried_names=()):
     """Transcript-first loader. Use harness-recorded attachments where present;
     fall back to filesystem path conventions otherwise.
+
+    `skill_listing` overrides the listing found in `events` with the session's
+    own `{"present", "entries"}`. The harness injects that listing once, so a
+    later turn's event slice does not contain it - and a skill with no SKILL.md
+    on disk exists *only* in the listing, so without the override it appears in
+    the payload of the turn that carries the attachment and nowhere else. That
+    turn is normally the first, before the skill was invoked, which is how two
+    skills that drove fifteen turns of a real session were reported as never
+    loaded. Skills that do resolve on disk are unaffected: the path-convention
+    fallback finds them in every turn.
 
     `hook_facts` is the ctxlog log for this session (None when the session
     predates the hooks). Where it names a file, it is ground truth and beats
     the path convention; where it is silent, the convention stands - except for
     .claude/rules/*.md, the one source whose whole point is conditional loading.
+
+    `carried_names` are the skills and commands an earlier turn invoked (see
+    `carried_invocations`). The harness keeps an invoked body in context until
+    a compaction evicts it, so a turn's own slice is not the whole answer: one
+    invoked in turn 0 is loaded in turn 1 too. Eviction is not decided here -
+    `_compute_payload` drops whatever `nonresident_paths` names, the same set
+    `resident_turns` subtracts, so loading and cost cannot disagree.
+
+    `delivered` is `delivered_at`'s answer for this scope: the text the
+    transcript shows the model holding, keyed by absolute path. Where it names
+    a file, that text is what the blocks are parsed from and the record says
+    `text_source: "transcript"`; where it is silent the disk file stands in and
+    the record says `disk`, which is a caveat the verdict has to carry rather
+    than a detail - the wording on disk today may postdate the session.
 
     Sources merged here (deduped by absolute path):
       - global ~/.claude/CLAUDE.md, ~/.claude/AGENTS.md
@@ -1524,6 +1874,30 @@ def load_context_files(events, calls, project_dir, args, user_prompt, hook_facts
     files = []
     seen_paths = set()  # by abs_path string
 
+    def _resolved(p):
+        p = Path(os.path.expanduser(str(p)))
+        if not p.is_absolute() and proj:
+            p = proj / p
+        try:
+            return str(p.resolve())
+        except Exception:
+            return str(p)
+
+    read_tool = {_resolved((c.get("input") or {}).get("file_path"))
+                 for c in calls if c.get("name") == "Read"
+                 and (c.get("input") or {}).get("file_path")}
+    read_by_cat = {_resolved(p) for c in calls if c.get("name") == "Bash"
+                   for p in _shell_full_reads((c.get("input") or {}).get("command", ""))}
+
+    def add_unless_read(p, **kw):
+        """A file the harness does not inject on its own: loaded only on a
+        record that it was, or a read. A `Read` call is left to the reads
+        section below, which knows the line ranges it delivered."""
+        ap = _resolved(p)
+        if ap in read_tool:
+            return
+        add_file(abs_path=ap, loaded=bool(kw.pop("hook_loaded", False)) or ap in read_by_cat, **kw)
+
     def add_file(*, path=None, abs_path=None, kind, loaded, content=None,
                  source="disk", drift=False, read_ranges=None, hook=None, **extra):
         """Append a context file record. If content is provided, use it as-is
@@ -1538,14 +1912,27 @@ def load_context_files(events, calls, project_dir, args, user_prompt, hook_facts
             return
         if abs_path in seen_paths:
             return
+        # An attachment's content already *is* the delivered text; every other
+        # record has to be offered the transcript's copy before it falls back
+        # to disk.
+        text_source = "transcript" if source == "transcript" else "disk"
+        text_note = None
+        recovered = None
         if content is None:
-            p = Path(abs_path)
-            if not p.exists():
-                return
-            try:
-                content = p.read_text(errors="replace")
-            except Exception:
-                return
+            recovered = (delivered or {}).get(abs_path)
+            if recovered is None and kind in ("skill", "command") and extra.get("name"):
+                recovered = (delivered or {}).get(INVOKED_KEY + extra["name"].lower())
+            if recovered is not None:
+                content = recovered["text"]
+                text_source = "transcript"
+            else:
+                p = Path(abs_path)
+                if not p.exists():
+                    return
+                try:
+                    content = p.read_text(errors="replace")
+                except Exception:
+                    return
         # If content is provided but disk also exists and differs, mark drift
         actual_drift = drift
         if content is not None and source == "transcript":
@@ -1555,7 +1942,16 @@ def load_context_files(events, calls, project_dir, args, user_prompt, hook_facts
                     actual_drift = True
             except Exception:
                 pass
-        delivery = _delivery_range(abs_path, content, kind, source, read_ranges)
+        if text_source == "disk" and _stale_against_hook(abs_path, hook):
+            text_source = "stale"
+            st = (hook or {}).get("stats") or {}
+            text_note = (
+                f"The harness recorded this file as {st.get('lines')} lines / "
+                f"{st.get('size_bytes')} bytes when it loaded it, and the file on disk "
+                f"no longer matches - the wording shown here is not the wording the "
+                f"model was given, so nothing in it was read as a rule.")
+        delivery = _delivery_range(abs_path, content, kind, source, read_ranges,
+                                   base_text=content if recovered else None)
         blocks_text = content
         if delivery["delivery"] == "truncated" and source == "transcript":
             # The attachment is a prefix of the file. Parse the on-disk text instead
@@ -1580,18 +1976,27 @@ def load_context_files(events, calls, project_dir, args, user_prompt, hook_facts
             "blocks": parse_claude_md(blocks_text),
             **delivery,
             **extra,
+            "text_source": text_source,
+            # Same rule as `delivery` and `hook`: the key appears only when
+            # there is something to report.
+            **({"text_note": text_note} if text_note else {}),
             # Key omitted entirely when there is no fact, so hookless sessions
             # serialise exactly as they did before.
             **({"hook": hook} if hook else {}),
         })
 
     # ===== Global instructions =====
-    for fn in ("CLAUDE.md", "AGENTS.md"):
-        p = home / ".claude" / fn
-        add_file(path=p, kind="global", loaded=True, source="disk", hook=hook_fact(p))
+    # Only CLAUDE.md is injected by the harness. Across 1,435 hook logs on the
+    # author's machine it never once reported loading an AGENTS.md, so treating
+    # one as loaded because it exists billed files the model never saw.
+    p = home / ".claude" / "CLAUDE.md"
+    add_file(path=p, kind="global", loaded=True, source="disk", hook=hook_fact(p))
+    p = home / ".claude" / "AGENTS.md"
+    add_unless_read(p, kind="global", source="disk", hook=hook_fact(p),
+                    hook_loaded=hook_fact(p) is not None)
 
     # ===== Project instructions =====
-    # 1. nested_memory attachments — authoritative content
+    # 1. nested_memory attachments - authoritative content
     for nm in attach["nested_memories"]:
         # Only count as "project" kind if path lives under project_dir
         is_project = bool(proj) and str(nm["path"]).startswith(str(proj))
@@ -1614,15 +2019,19 @@ def load_context_files(events, calls, project_dir, args, user_prompt, hook_facts
 
     # 2. ./CLAUDE.md, ./AGENTS.md, ./AGENTS.override.md (path-convention)
     if proj:
-        for fn in ("CLAUDE.md", "AGENTS.md", "AGENTS.override.md"):
+        p = proj / "CLAUDE.md"
+        add_file(path=p, kind="project", loaded=True, source="disk", hook=hook_fact(p))
+        for fn in ("AGENTS.md", "AGENTS.override.md"):
             p = proj / fn
-            add_file(path=p, kind="project", loaded=True, source="disk", hook=hook_fact(p))
+            add_unless_read(p, kind="project", source="disk", hook=hook_fact(p),
+                            hook_loaded=hook_fact(p) is not None)
 
-    # 3. Hook-directive paths (e.g., "Read AGENTS.md ...")
+    # 3. Hook-directive paths (e.g., "Read AGENTS.md ..."). A hook telling the
+    # agent to read a file is a suggestion, not a delivery: one 481 KB report
+    # was billed 1.1M tokens in a session that never opened it.
     for hp in hook_directive_paths(attach["hook_directives"], project_dir):
         is_project = bool(proj) and str(hp).startswith(str(proj))
-        add_file(abs_path=str(hp), kind="project" if is_project else "global",
-                 loaded=True, source="hook")
+        add_unless_read(hp, kind="project" if is_project else "global", source="hook")
 
     # ===== Project rules =====
     if proj_claude_dir and (proj_claude_dir / "rules").is_dir():
@@ -1635,10 +2044,14 @@ def load_context_files(events, calls, project_dir, args, user_prompt, hook_facts
 
     # ===== Skills =====
     skill_call_names = _skill_tool_names(calls)
-    wrapper_names = _command_wrapper_names(events)
-    if attach["skill_listing_present"]:
+    wrapper_names = _command_wrapper_names(events) | set(carried_names)
+    listing_present = (skill_listing["present"] if skill_listing is not None
+                       else attach["skill_listing_present"])
+    listing_entries = (skill_listing["entries"] if skill_listing is not None
+                       else attach["skill_listing"])
+    if listing_present:
         # Authoritative: only show skills the harness listed.
-        for entry in attach["skill_listing"]:
+        for entry in listing_entries:
             name = entry["name"]
             md_path = None
             for cand in (
@@ -1653,12 +2066,13 @@ def load_context_files(events, calls, project_dir, args, user_prompt, hook_facts
             if md_path is None:
                 md_path = _resolve_plugin_skill(name)
             scope = "global" if (md_path and str(md_path).startswith(str(home))) else "project"
-            triggered = _is_loaded(name, user_prompt, skill_call_names, wrapper_names)
+            triggered = (_is_loaded(name, user_prompt, skill_call_names, wrapper_names)
+                         or (md_path is not None and _resolved(md_path) in read_by_cat))
             if md_path:
                 add_file(path=md_path, kind="skill", loaded=triggered,
                          name=name, scope=scope, source="listing")
             else:
-                # Listing-only phantom (file moved or unresolved) — show description as content
+                # Listing-only phantom (file moved or unresolved) - show description as content
                 phantom = (f"# {name}\n\n{entry['description']}\n\n"
                            "_(This skill was listed by the harness but its source file could not be located on disk.)_")
                 phantom_path = f"<listing-only:{name}>"
@@ -1678,6 +2092,9 @@ def load_context_files(events, calls, project_dir, args, user_prompt, hook_facts
                         # same units as every other item, and small either way.
                         "chars": len(phantom),
                         "blocks": parse_claude_md(phantom),
+                        # Nothing here came off disk: the description is the
+                        # listing attachment's own text.
+                        "text_source": "transcript",
                     })
     else:
         # Fallback: glob filesystem
@@ -1689,7 +2106,8 @@ def load_context_files(events, calls, project_dir, args, user_prompt, hook_facts
         for scope, base in skill_bases:
             for name, md in _collect_md_units(base):
                 add_file(path=md, kind="skill",
-                         loaded=_is_loaded(name, user_prompt, skill_call_names, wrapper_names),
+                         loaded=(_is_loaded(name, user_prompt, skill_call_names, wrapper_names)
+                                 or _resolved(md) in read_by_cat),
                          name=name, scope=scope, source="disk")
 
     # ===== Commands (path-conventions) =====
@@ -1701,7 +2119,8 @@ def load_context_files(events, calls, project_dir, args, user_prompt, hook_facts
             for md in sorted(base.glob("*.md")):
                 name = md.stem
                 add_file(path=md, kind="command",
-                         loaded=_is_loaded(name, user_prompt, skill_call_names, wrapper_names),
+                         loaded=(_is_loaded(name, user_prompt, skill_call_names, wrapper_names)
+                                 or _resolved(md) in read_by_cat),
                          name=name, scope=scope, source="disk")
 
     # ===== Subagents (path-conventions) =====
@@ -1725,7 +2144,7 @@ def load_context_files(events, calls, project_dir, args, user_prompt, hook_facts
                  kind="attached", loaded=True, content=entry["content"],
                  source="transcript")
 
-    # ===== Read tool calls — dynamic mid-session reads of .md files =====
+    # ===== Read tool calls - dynamic mid-session reads of .md files =====
     read_paths = []
     read_ranges_by_path = {}
     for c in calls:
@@ -1773,21 +2192,1110 @@ def load_context_files(events, calls, project_dir, args, user_prompt, hook_facts
 # ---------- 4. predicate-based block assessment ----------
 
 CODE_EXT = re.compile(r"\.(?:ts|tsx|js|jsx|py|md|go|rs|rb|java|css|html|json|sh)\b")
-SUMMARY_KEYWORDS = ("summary", "files changed", "what changed", "in summary", "to recap")
+
+# Filename-shaped token, for deciding whether a backticked bare word names a
+# file the block is pointing at.
+_FILENAME_TOKEN = re.compile(r"[\w./~@-]+\.[A-Za-z]\w{0,4}")
+
+# A fence body is not an inline code span. The single-backtick scan reads
+# ```bash\n… as one span whose first word is `bash`, which is how a fence's
+# language tag became "the command the rule is about".
+# Only an explicitly shell-tagged fence is a source of commands. An untagged
+# fence is as often another language or plain prose, and reading `import re` as
+# a program is exactly the noise this tier is being cleaned of.
+_SHELL_FENCE_LANGS = frozenset({"bash", "sh", "shell", "zsh", "console", "shell-session"})
+
+# Words that look like commands inside backticks but are not: plain English a
+# rule backticks for emphasis, the nouns every technical document uses for a
+# field or a value, common data-format names, and shell keywords. One
+# Architecture block in this repo derived 50 "command" predicates this way,
+# each then reporting "`in` ran 12× this session".
+#
+# What is deliberately *gone* from here: the entries that were only ever this
+# tool's own vocabulary - `argparse`, `claude.md`, `skill.md`, and its verdict
+# statuses (`used`, `dormant`, `undelivered`, …). A list curated against one
+# repo's documents is the same reverse-engineering the retired strong
+# predicates were, and it grows by one entry per false positive for ever.
+# What stays is a shape filter (`_looks_like_command_word`) plus the words no
+# shape test can separate from a program name.
+#
+# The list is still English, and knowingly so: deriving stopwords from the
+# user's own corpus is the lexical tier's job, not this tier's. It is safe to
+# be wrong here in a way it is not safe to be wrong in the strong tier - a
+# command mention can only ever reach `possibly-referenced`, so a leftover
+# false positive claims the block was referenced and can never accuse it.
+NON_CMDS = frozenset({
+    "the", "a", "an", "and", "or", "if", "see", "use", "any", "all", "rule", "always",
+    "never", "must", "i", "you", "we", "it", "is", "are", "was", "were", "this",
+    "that", "these", "those", "trigger", "yaml", "json", "md", "ts", "tsx", "py",
+    "from", "into", "with", "when", "then", "else", "than", "what", "which",
+    "while", "where", "here", "there", "runs", "skips", "only", "also", "each",
+    "every", "same", "such", "some", "none", "both", "before", "after", "above",
+    "below", "first", "last", "next", "does", "done", "will", "would", "should",
+    "could", "have", "has", "been", "being", "your", "their", "them", "they",
+    "data", "type", "name", "kind", "path", "text", "label", "title", "value",
+    "index", "count", "content", "status", "reason", "scope", "group", "file",
+    "line", "role", "level", "input", "output", "field", "block", "turn",
+    # shell keywords: a fenced loop's `done` is not a program
+    "do", "fi", "esac", "elif", "eof",
+})
+
+# Below this a token is far more often prose than a program. It costs the weak
+# tier `gh`, `git` and `jq`, and that is the right trade: a command mention can
+# never reach a hard verdict anyway, so all a short false positive can do is
+# claim the block was referenced when nothing tied it to the run.
+_MIN_CMD_LEN = 4
+
+_INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
+# A quoted example may wrap across a line, so a quote span is allowed to cross
+# newlines and is length-bounded instead: pairing every `"` in a long document
+# would eventually swallow a real declaration. The cost of a wrong pairing is
+# one missing predicate - `dormant`, an honest refusal - never a false
+# accusation, which is why the bound is generous rather than tight.
+_QUOTED_RE = re.compile(r"\"[^\"]{1,200}\"", re.S)
+
+# A trigger declaration in any language: a short label, a colon, and the
+# backticked slash command standing alone to the end of the line. The English
+# cues beside it (`Trigger:`, "types `/x`") only ever named the same
+# harness-defined identifier, so keying on them alone meant a Polish or
+# Japanese skill pointer derived nothing and scored `unused` while its skill was
+# demonstrably running. The line must *end* at the command: "links to:
+# `/deployment`, `/deployment/calibrate…`" is a list of routes, and one real doc
+# on this machine turns exactly that shape into a command that does not exist.
+# The label is word characters and spaces (any script) rather than "anything
+# but a colon", so the match *starts at the label*: a permissive class lets a
+# match begin at a stray quote further left, and the position `_example_spans`
+# is asked about is then outside the quoted example it should have excluded.
+_TRIGGER_DECL = r"[\w \t-]{1,40}:[ \t]*`(/[a-z][\w-]*)`[ \t]*\.?[ \t]*(?:\n|$)"
+
+
+def _example_spans(text):
+    """Ranges holding a quoted example rather than a live instruction.
+
+    Documentation *about* the trigger syntax quotes it - `Trigger: /foo`, "when
+    the user types `/x`" - and this repo's own Architecture section therefore
+    derived live predicates that reported "`/foo` not invoked this run" about a
+    command that does not exist. A real declaration writes the phrase bare and
+    backticks the command alone, so it survives this filter.
+
+    A quote span may cross a line, because a quoted sentence wraps, but never a
+    *blank* line and never more than 200 characters. Both bounds exist to keep
+    one stray apostrophe-style quote from pairing with a much later one and
+    swallowing a real declaration whole - measured: without the blank-line
+    bound, an unbalanced quote three paragraphs above a `Trigger:` line deleted
+    its predicate, which is a worse error than the one being fixed.
+    """
+    return [m.span() for m in _INLINE_CODE_RE.finditer(text)] + _quoted_spans(text)
+
+
+def _quoted_spans(text):
+    """The quotation half of `_example_spans`, without the inline-code half.
+
+    A caller that is *reading* inline code - every path a block names is
+    backticked - cannot use the combined list, since it would delete the very
+    tokens it is looking for. What it still needs is the quotation bound: a
+    path inside a quoted sentence is an example of something to say, not a
+    file the block points at.
+    """
+    return [m.span() for m in _QUOTED_RE.finditer(text)
+            if "\n\n" not in m.group(0)]
+
+
+def _in_span(pos, spans):
+    return any(start <= pos < end for start, end in spans)
 
 
 def _extract_backtick_tokens(text):
-    """Return tokens inside backticks that look like commands or command fragments."""
+    """Fenced blocks are removed first; `_extract_fenced_commands` reads those,
+    where a line's first word is a command by position rather than by shape.
+    """
+    return [tok for tok, _pos in _extract_backtick_spans(text)]
+
+
+def _extract_backtick_spans(text):
+    """`_extract_backtick_tokens` with each token's offset in the stripped prose,
+    for the callers that need to know whether a token sits inside a quotation."""
+    prose = lexical.FENCE_RE.sub("\n", text)
     out = []
-    for m in re.finditer(r"`([^`]+)`", text):
+    for m in re.finditer(r"`([^`]+)`", prose):
         token = m.group(1).strip()
         if not token:
             continue
-        out.append(token)
+        out.append((token, m.start()))
     return out
 
 
-def derive_predicates(block):
+# A markdown table row. Its cells are data - one column of the retired
+# gh-account table held the repo names `figma` and `formic`, both harvested as
+# programs, so every bash line naming the repo looked like a hit on a rule
+# about GitHub accounts. A cell is excluded from the *command* harvest only:
+# `_named_paths` still reads tables, because a rule really can put the file it
+# governs in one.
+_TABLE_ROW_RE = re.compile(r"^[ \t]*\|.*$", re.M)
+
+
+def _strip_table_rows(text):
+    return _TABLE_ROW_RE.sub("", text)
+
+
+def _looks_like_command_word(word):
+    """Is this bare backticked word plausibly a program name?
+
+    The shape rules carry most of the weight, because a wordlist cannot keep up
+    with a dense technical document: this repo's own Architecture block put 167
+    inline spans through here, nearly all of them identifiers. A program name
+    is lower-case, separates with `-` rather than `_`, and does not end on a
+    separator - so `activeSessionId`, `abs_path` and `agent-` are prose about
+    code, while `pytest`, `yarn`, `type-check` and `python3` survive.
+    """
+    return (bool(re.fullmatch(r"[a-z][a-z0-9.-]*[a-z0-9]", word))
+            and len(word) >= _MIN_CMD_LEN
+            and word.lower() not in NON_CMDS)
+
+
+# One stage of a documented command, and a pipeline of them. Quoting is
+# admitted by neither, so a prescribed pipeline carrying a quoted argument
+# yields no candidate at all - the honest outcome, since the run's own quoted
+# arguments are masked before matching and could never be compared to it.
+_CMD_STAGE_RE = r"[a-z][\w.-]*(?:\s+[-\w./=:@,+]+)*"
+_CMD_SHAPE_RE = re.compile(rf"{_CMD_STAGE_RE}(?:\s*\|\s*{_CMD_STAGE_RE})*")
+
+
+def _normalize_pipeline(text):
+    """Collapse whitespace, and space every pipe the same way on both sides."""
+    return re.sub(r"\s*\|\s*", " | ", " ".join(text.split()))
+
+
+def _fenced_commands(text, langs):
+    """Whole commands out of fenced examples, e.g. `yarn type-check`.
+
+    Extraction used to keep a token's first word only, so the famigo quality
+    gate's real command - multi-token and fenced - was never recognised while
+    the fence's `bash` tag became a predicate about nothing: 21 actual gate runs
+    stayed invisible. The *length* filter that guards inline spans is
+    deliberately not applied to the first word here, because a shell fence's
+    first word is a command by position (`gh`, `git`, `jq`); `NON_CMDS` still
+    is, or a fenced `for f in *; do …; done` contributes `done` as a program.
+
+    `langs` restricts which fences are read; None reads every fence, which is
+    only safe for a caller that then demands the command have run verbatim.
+    """
+    out = []
+    for _marker, lang, body in lexical.FENCE_RE.findall(text):
+        if langs is not None and lang.strip().lower() not in langs:
+            continue
+        for raw in body.splitlines():
+            line = raw.strip().lstrip("$").strip()
+            # A documented command is routinely annotated in place
+            # (`just palletizer-hmi-lint    # eslint + tsc`), and keeping the
+            # comment makes the whole line fail the shape test.
+            line = re.sub(r"\s+#.*$", "", line).strip()
+            if not line or line.startswith("#"):
+                continue
+            # A pipe is deliberately not a split point. `&&`, `||` and `;`
+            # join commands that each stand on their own - a gate documented as
+            # `yarn type-check && yarn lint && yarn test` prescribes three
+            # commands, and running one of them is running one of them. A pipe
+            # composes a *single* command out of stages, so a downstream stage
+            # is not itself prescribed: splitting `printf '%s' "$c" | pbcopy`
+            # made `pbcopy` the prescribed command, and the rule's own
+            # forbidden `echo "x" | pbcopy` then scored the rule as followed.
+            # The whole pipeline is the prescription, which is why the shape
+            # test below admits one and `_command_echo_count` matches one
+            # against a pipe-preserving segment.
+            for part in re.split(r"&&|\|\||;", line):
+                cmd = _normalize_pipeline(part)
+                if not _CMD_SHAPE_RE.fullmatch(cmd):
+                    continue
+                if cmd.split()[0].lower() in NON_CMDS:
+                    continue
+                out.append(cmd)
+    return out
+
+
+def _inline_commands(text):
+    """Multi-token commands a block prescribes in inline code, e.g. `npm test`.
+
+    A reband `AGENTS.md` prescribed its whole gate inline, it ran verbatim,
+    and the block read `dormant` because echo only read fences. A single word
+    stays out: it is the weak tier's, and a bare inline word is far more often
+    an identifier than a prescription. Table cells and quoted examples are
+    excluded for the reasons `_extract_backtick_tokens`' callers exclude them.
+    """
+    prose = _strip_table_rows(text)
+    quoted = _quoted_spans(lexical.FENCE_RE.sub("\n", prose))
+    out = []
+    for tok, pos in _extract_backtick_spans(prose):
+        if _in_span(pos, quoted):
+            continue
+        for part in re.split(r"&&|\|\||;", tok):
+            cmd = _normalize_pipeline(part)
+            if (" " in cmd and _CMD_SHAPE_RE.fullmatch(cmd)
+                    and cmd.split()[0].lower() not in NON_CMDS):
+                out.append(cmd)
+    return out
+
+
+def _extract_fenced_commands(text):
+    """Commands from explicitly shell-tagged fences (the weak tier's source)."""
+    return _fenced_commands(text, _SHELL_FENCE_LANGS)
+
+
+# A python heredoc that rewrites a file in place: `p = pathlib.Path('x.md')`
+# ... `p.write_text(s)`, the same call spelled out in one expression, or
+# `open('x.md', 'w')`. The binding is tracked rather than every `Path(...)`
+# literal harvested, because a script that reads one file and writes another
+# names both.
+_PY_INVOCATION_RE = re.compile(r"\bpython[\d.]*\b")
+_PY_WRITE_SHAPE_RE = re.compile(
+    r"(?:pathlib\.)?Path\(\s*['\"](?P<lit>[^'\"]+)['\"]\s*\)\s*\.write_text\("
+    r"|(?P<bind>\w+)\s*=\s*(?:pathlib\.)?Path\(\s*['\"](?P<bound>[^'\"]+)['\"]"
+    r"|(?P<writer>\w+)\.write_text\("
+    r"|\bopen\(\s*['\"](?P<opened>[^'\"]+)['\"]\s*,\s*['\"][wa]")
+
+
+def _python_write_targets(cmd):
+    """Files a python heredoc authors from inside the script it runs.
+
+    The famigo sessions edit markdown and source through `python3 - <<'PY'`
+    rather than the Edit tool, so a rule about the file they rewrote saw a
+    session that never touched it. Only the script's own write calls count: a
+    redirect on the closing line captures the script's *output*, which is a
+    different thing and is already excluded below. Matches are walked in
+    order, because one script routinely rebinds the same name to a second
+    file, and the value at the time of the write is the file that was
+    written.
+    """
+    out = []
+    for m in _HEREDOC_RE.finditer(cmd):
+        # A heredoc body is only a program when a python invocation opened it.
+        # Documentation written with `cat > README.md <<'EOF'` routinely
+        # carries a python snippet, and reading that as a write would credit
+        # every file the example names.
+        line = cmd[cmd.rfind("\n", 0, m.start()) + 1:m.start()]
+        if not _PY_INVOCATION_RE.search(line):
+            continue
+        bound = {}
+        for w in _PY_WRITE_SHAPE_RE.finditer(m.group(2)):
+            if w.group("lit"):
+                out.append(w.group("lit"))
+            elif w.group("bind"):
+                bound[w.group("bind")] = w.group("bound")
+            elif w.group("writer"):
+                if w.group("writer") in bound:
+                    out.append(bound[w.group("writer")])
+            elif w.group("opened"):
+                out.append(w.group("opened"))
+    return out
+
+
+def _shell_write_targets(cmd):
+    """Files a bash command authors: a heredoc redirect, `tee`, or a python
+    heredoc's own write calls.
+
+    Only those forms count. A session that shipped a three-commit feature
+    through `cat > file <<'EOF'` was reported as having changed nothing at all,
+    but treating every `>` as an edit would count captured command output as
+    source, so two narrowings apply. A heredoc's redirect is read from the
+    *first line* only - it may sit on either side of the marker
+    (`cat > f <<'EOF'` and `cat <<'EOF' > f` are both real), while the redirect
+    in `python3 - <<'PY' … PY > out.json` sits on the closing line and captures
+    the script's output rather than authoring a file. And a target must look
+    like source (`CODE_EXT`), or `yarn build | tee build.log` registers as
+    authoring code - and a rule about summarising a code change then judges the
+    wording of a turn that only ran a build.
+    """
+    return _redirect_write_targets(cmd) + [
+        p for p in _python_write_targets(cmd)
+        if CODE_EXT.search(Path(p).name) and not p.startswith("/dev/")]
+
+
+# What a redirection names, shared by the write and the read harvesting so the
+# two cannot disagree about where a path ends.
+_REDIRECT_TARGET = r"['\"]?([^\s'\"|;&<>]+)"
+_INPUT_REDIRECT_RE = re.compile(r"(?<![<\d])<(?![<&(])\s*" + _REDIRECT_TARGET)
+
+
+def _redirect_write_targets(cmd):
+    """The redirect/`tee` half of `_shell_write_targets`.
+
+    `_written_chunks` pairs these with heredoc bodies, and only for these is
+    the body the text that landed in the file: a python heredoc's body is the
+    program, not the document it rewrote.
+    """
+    if not cmd:
+        return []
+    out = []
+    if "<<" in cmd:
+        out += [m.group(1) for m in
+                re.finditer(r">>?\s*" + _REDIRECT_TARGET, cmd.split("\n", 1)[0])]
+    out += [m.group(1) for m in
+            re.finditer(r"\btee\b(?:\s+-\S+)*\s+" + _REDIRECT_TARGET, cmd)]
+    return [p for p in out if CODE_EXT.search(Path(p).name) and not p.startswith("/dev/")]
+
+
+def _written_paths(trace):
+    """Every path this scope wrote, documentation included.
+
+    Cached on the trace by `build_trace`: the path-join predicates ask for it
+    once per named path per predicate call, and re-deriving it re-scans every
+    bash command in the session each time.
+    """
+    cached = trace.get("written_paths")
+    if cached is not None:
+        return cached
+    out = [c["input"].get("file_path") or "" for c in trace["edits"]]
+    for bc in trace["bash_cmds"]:
+        out += _shell_write_targets(bc)
+    return [p for p in out if p]
+
+
+# Shell programs whose non-option arguments are files being looked at. A short
+# closed list on purpose: a program not on it may be doing anything at all with
+# the path it carries, and this join has to mean "the run read this file" or
+# the evidence line claims something no record supports.
+_SHELL_READERS = frozenset({"cat", "sed", "grep", "head", "tail", "less"})
+
+# A redirection's path is not being read, and the program in front of it is
+# routinely a reader: `cat > README.md <<'EOF'` is how whole sessions author a
+# file. Redirections are removed before a segment's arguments are harvested,
+# or every heredoc write would also register as a read of its own target.
+_REDIRECT_RE = re.compile(r"\d?(?:>>|>|<)\s*&?\S+")
+
+
+def _shell_read_targets(cmd):
+    """Files a bash command reads.
+
+    Mirrors `_shell_write_targets`, over `_command_segments` for the reason
+    `_command_echo_count` uses it: the reader has to be the program a segment
+    runs, and quoted arguments are already masked there, so the pattern in
+    `grep -n "rateLimit" AGENT.md` cannot be mistaken for a path.
+    """
+    out = []
+    for seg in _command_segments(cmd):
+        parts = _REDIRECT_RE.sub(" ", seg).split()
+        if not parts or Path(parts[0]).name not in _SHELL_READERS:
+            continue
+        # `sed -i` rewrites its arguments; that is a write, not a read.
+        if parts[0] == "sed" and any(t.startswith("-i") or t == "--in-place"
+                                     for t in parts[1:]):
+            continue
+        out += [t for t in _INPUT_REDIRECT_RE.findall(seg)
+                if "\x00" not in t and _looks_like_a_file(Path(t).name)]
+        for tok in parts[1:]:
+            tok = tok.strip("'\"").rstrip(";")
+            # `\x00` is `_command_segments`'s mask for a quoted argument, so a
+            # token carrying it is content the command passed, not a path.
+            if not tok or tok.startswith("-") or "*" in tok or "\x00" in tok:
+                continue
+            if _looks_like_a_file(Path(tok).name):
+                out.append(tok)
+    return out
+
+
+def _shell_full_reads(cmd):
+    """Files a bash command printed whole: a bare `cat <file>`, nothing piped.
+
+    Narrower than `_shell_read_targets` on purpose. That one answers "did the
+    run look at this file"; this one answers "is the whole file now in
+    context", and `cat f | head -40` or `sed -n 1,5p f` delivered a slice.
+    """
+    out = []
+    for seg in _command_segments(cmd or "", keep_pipes=True):
+        if "|" in seg:
+            continue
+        parts = _REDIRECT_RE.sub(" ", seg).split()
+        if not parts or Path(parts[0]).name != "cat":
+            continue
+        out += [t.strip("'\"") for t in parts[1:]
+                if not t.startswith("-") and "*" not in t and "\x00" not in t]
+    return out
+
+
+def _timed_reads(trace):
+    """(path, ts) for every read this scope made, in call order.
+
+    Shell reads are not an edge case. Whole audited sessions inspect files with
+    `cat`, `sed -n` and `grep` and never call `Read` once, so a join that knew
+    only about the tool would report those sessions as having read nothing and
+    credit the step that says "read these files" to whatever else it could
+    reach. Stored on the trace: the path joins ask once per named path.
+    """
+    cached = trace.get("timed_reads")
+    if cached is not None:
+        return cached
+    out = []
+    for c in trace.get("calls") or ():
+        if c.get("name") == "Read":
+            out.append(((c.get("input") or {}).get("file_path") or "", c.get("ts")))
+        elif c.get("name") == "Bash":
+            out += [(p, c.get("ts")) for p in
+                    _shell_read_targets((c.get("input") or {}).get("command", ""))]
+    trace["timed_reads"] = out = [(p, ts) for p, ts in out if p]
+    return out
+
+
+def _first_read_time(path, trace):
+    return next((ts for p, ts in _timed_reads(trace) if p == path), None)
+
+
+def _read_paths(trace):
+    return [p for p, _ts in _timed_reads(trace)]
+
+
+# ----- structural evidence: what the run wrote, and where -----
+# The judging used to read the agent's prose and its bash commands and nothing
+# else, so a rule the agent demonstrably obeyed - appending to the file the
+# rule names, reproducing the template the rule spells out - scored `unused`
+# with a reason denying compliance. These helpers are the join between a
+# block's text and the run's own artifacts.
+
+# A path a rule names, out of the block's backticked tokens. Backticks only:
+# a rule that tells you which file to append to writes it in code font, while
+# harvesting bare filenames from prose would tie any block that merely
+# mentions CLAUDE.md to every session that edited it.
+_PATH_TOKEN_RE = re.compile(r"[\w.~@/-]+")
+
+
+# Extensionless names that are still a file rather than a directory. The
+# extension test below is what keeps `docs/skills/` and `mobile/services/` out,
+# and these are the names that would be wrongly caught by it.
+_KNOWN_DOTFILES = frozenset({
+    ".gitignore", ".gitattributes", ".gitmodules", ".dockerignore",
+    ".editorconfig", ".env", ".npmrc", ".nvmrc", ".prettierrc", ".eslintrc",
+    ".babelrc",
+})
+
+def _looks_like_a_file(name):
+    return bool(_FILENAME_TOKEN.fullmatch(name)) or name in _KNOWN_DOTFILES
+
+
+def _named_paths(content):
+    """Files this block names, as written.
+
+    A directory is deliberately not a named path, and neither is a slash
+    command (`/create-pr`) or a heading token - the same test rejects all
+    three, since only a file carries an extension. `docs/skills/`,
+    `mobile/services/` and `app/src/` are where work happens rather than
+    something a rule tells you to write, so joining them let any write
+    beneath them stand as evidence that the rule was followed - which is
+    where most of the audited false greens came from.
+    """
+    out = []
+    quoted = _quoted_spans(lexical.FENCE_RE.sub("\n", content))
+    for tok, pos in _extract_backtick_spans(content):
+        # A path inside a quoted sentence is an example of a question to ask,
+        # not a file this block points at: one skill step whose whole content
+        # is "ask the user whether it belongs in `backend/AGENT.md`" was
+        # credited for every session that touched that file.
+        if _in_span(pos, quoted):
+            continue
+        tok = tok.strip().rstrip("/")
+        # A placeholder or a glob names no file, so there is nothing to join;
+        # `<encoded-project-path>` would otherwise match on its literal text.
+        if not tok or "<" in tok or "*" in tok:
+            continue
+        if not _PATH_TOKEN_RE.fullmatch(tok):
+            continue
+        if not _looks_like_a_file(tok.rsplit("/", 1)[-1]):
+            continue
+        out.append(tok)
+    return out
+
+
+def _path_components(p):
+    """Known path components, dropping the ones this tool cannot resolve.
+
+    A shell-written path is routinely `$M/ERRORS.md`: the variable's value
+    lived in the same command and nothing here expands it. Dropping the
+    unknown segment and comparing what is left is the honest best effort -
+    treating `$M` as a literal directory name means the rule that names
+    ERRORS.md never meets the ERRORS.md the agent appended to.
+    """
+    return [c for c in str(p).replace("\\", "/").split("/")
+            if c not in ("", ".", "~") and "$" not in c]
+
+
+def _ends_with(long, short):
+    return bool(short) and len(short) <= len(long) and long[-len(short):] == short
+
+
+def _path_names_target(named, written):
+    """Do a path a block names and a path a tool call carried mean one file?
+
+    Both sides are resolved first, the way `_resolve_key` does for activity.
+    Resolution alone is not enough here: the block's side is often relative
+    (`docs/decisions/DECISIONS.md`), and resolving that against *this
+    process's* cwd rather than the session's would report every file as
+    untouched, which looks plausible. So a contiguous run of path components
+    is the fallback, which also lets `~/.claude/ERRORS.md` meet the absolute
+    path the harness recorded without this code knowing whose home it was.
+    The run has to sit directly above the filename: anywhere above it let
+    `src/index.ts` meet `src/components/index.ts`. It is tested in both
+    directions because either side can be the
+    partial one - a relative tool input, or a path whose unresolvable
+    segments `_path_components` dropped.
+
+    The final components have to be equal before any of that: containment
+    alone made `docs/skills/` meet every file written under it, so the run
+    that added one unrelated document proved the rule about that directory
+    had been followed.
+    """
+    if not named or not written:
+        return False
+    if _resolve_key(named) == _resolve_key(written):
+        return True
+    a, b = _path_components(named), _path_components(written)
+    if not a or not b or a[-1] != b[-1]:
+        return False
+    a, b = a[:-1], b[:-1]
+    # A bare filename on either side - the relative `cat >> DECISIONS.md`, or
+    # a rule that names nothing but the file - leaves no directory to
+    # contradict the other, and the name is all the evidence there is.
+    if not a or not b:
+        return True
+    return _ends_with(b, a) or _ends_with(a, b)
+
+
+def _named_path_writes(named_paths, trace, exclude_path=None, read_hits=None):
+    """(named path, written path) pairs where the run wrote what a block named.
+
+    `exclude_path` is the block's own document, for the reason `template-echo`
+    excludes it: editing the rule file is not evidence of obeying the rule,
+    and a CLAUDE.md that names CLAUDE.md otherwise greened itself on any
+    session that touched it.
+
+    Deduped: a file edited six times, or named twice by one block, is one
+    piece of evidence, and the evidence line otherwise repeats the same path
+    until it is unreadable.
+    """
+    written = _written_paths(trace)
+    if exclude_path:
+        written = [w for w in written if not _path_names_target(exclude_path, w)]
+    read = {n for n, _r in (read_hits or ())}
+    out = []
+    for n in named_paths:
+        # A path the run also read is cited by the read join instead. The two
+        # are one interaction with that file, and the read is the claim this
+        # tool can actually support: a step that says "read these files" was
+        # carried out by the reads, while the writes to the same files may be
+        # any other work the session happened to do - which is how one real
+        # session's documentation sweep stood in as proof that a review step
+        # had loaded its context. Nothing is lost from the verdict, since the
+        # read join credits the block either way.
+        if n in read:
+            continue
+        for w in written:
+            if _path_names_target(n, w) and (n, w) not in out:
+                out.append((n, w))
+    return out
+
+
+def _no_write_note(named_paths, file, trace):
+    """Why the write join cites nothing.
+
+    Saying "none of these was written" would be false where the run did write
+    one and the read join is citing it instead, and an evidence line has to be
+    true on its own terms.
+    """
+    if _credited_reads(named_paths, file, trace):
+        return ("the file(s) this block names were read rather than written "
+                "this run - see the read above")
+    if not _document_executed(file, trace):
+        return ("no record of this document running this run, so a write to a "
+                "file it names is not evidence either way")
+    return ("none of " + ", ".join(f"`{p}`" for p in named_paths)
+            + " was written while this document was running")
+
+
+def _memo(trace, key, compute):
+    """Per-scope memo for the joins: each is asked by `applicable`, twice by
+    `describe` and again by the moment builder, over the same trace."""
+    memo = trace.setdefault("join_memo", {})
+    if key not in memo:
+        memo[key] = compute()
+    return memo[key]
+
+
+def _writes_for(named_paths, file, trace, exclude_path):
+    """The write pairs the `writes-to-named-path` join cites for this block.
+
+    Gated on `_document_executed` for the reason the read join is: three
+    verified false greens came from a plain rule document whose named file the
+    session happened to write - a reband "Gotchas" note *warning* that
+    `app.json` does not propagate credited by an edit to `app.json`, and a
+    famigo "read `.cursor/PROJECT.md`" step credited by a commit turn that
+    edited that file and never read it.
+    """
+    if not _document_executed(file, trace):
+        return []
+    return _memo(trace, ("writes", (file or {}).get("abs_path"), tuple(named_paths), exclude_path),
+                 lambda: _named_path_writes(named_paths, trace, exclude_path=exclude_path,
+                                            read_hits=_credited_reads(named_paths, file, trace)))
+
+
+def _document_executed(file, trace):
+    """Did the harness record this block's own document running in this scope?
+
+    The gate all three noun joins share. A filename lifted out of prose carries
+    no direction: the sentence that made it a target, a warning or an example
+    is gone by the time the token is compared against a path the run touched,
+    so "the block names it and the run wrote it" is a coincidence a rule
+    document supplies no context to resolve. Inside a procedure the harness
+    recorded as *running*, the surrounding invocation supplies that context -
+    the step's own file being touched is the step being carried out. For a
+    plain rule document (a CLAUDE.md, an AGENTS.md, anything the agent merely
+    read) nothing does, so the honest answer is that the rule is uncompiled and
+    `/compile-rules` is the mechanism for it: a reviewed compiled check is the
+    only path that can credit such a rule, and the only one that can also
+    report a violation of it.
+    """
+    return _execution_start(file, trace) is not False
+
+
+def _execution_start(file, trace):
+    """When this block's document started running in this scope.
+
+    False when it never ran; None when it ran at an unrecorded time, which
+    gates nothing out rather than everything.
+    """
+    f = file or {}
+    if f.get("kind") not in ("skill", "command") or not f.get("name"):
+        return False
+    source, rec = _trigger_evidence(f["name"], trace)
+    if source == "skill":
+        return rec.get("ts")
+    if source == "wrapper":
+        return rec.get("t")
+    return False
+
+
+def _carried_window(file, trace):
+    """Where an earlier turn's invocation of this document still counts here.
+
+    None when it does not: the document is not the one `carried_invocations`
+    names as running at this turn's start. Otherwise `(start, end)`, where
+    `end` is the first invocation of a different document in this scope (None
+    when there is none), the boundary `_procedure_bash` closes its window on.
+
+    Only the template join reads this. Nothing in a transcript records when a
+    procedure finished, so "still running" is a guess that grows with every
+    later turn: in famigo `9dd3cc8a` a `/commit` from turn 20 stayed "running"
+    through a new task in turns 21-24, and a `package.json` read there greened
+    its run-tests step. A read or a generic command in a later turn is the work
+    at hand; a write reproducing the document's own template literals carries
+    its direction with it, which is the case a later turn has to credit (a
+    `/grill-prd` or `/prd-to-plan` template written after its Q&A turns).
+    """
+    f = file or {}
+    carried = trace.get("carried_running")
+    name = (f.get("name") or "").strip().lstrip("/").lower()
+    if (f.get("kind") not in ("skill", "command") or not carried
+            or carried.get("name") != name):
+        return None
+    end = next((ts for ts, n in _invocations(trace) if n != name), None)
+    return (carried.get("ts"), end)
+
+
+def _credited_reads(named_paths, file, trace):
+    """The read pairs the `reads-named-path` join credits for this block.
+
+    One helper, because the predicate, the write join's precedence and the
+    moment cards must not disagree about which reads counted. The gate is the
+    document having been executed in this scope: see `_document_executed` for
+    why a read outside a running procedure is coincidence.
+    """
+    since = _execution_start(file, trace)
+    if since is False:
+        return []
+    # A read from before the procedure started is not one of its steps.
+    own = (file or {}).get("abs_path")
+    return _memo(trace, ("reads", own, tuple(named_paths)),
+                 lambda: _named_path_reads(named_paths, trace, exclude_path=own, since=since))
+
+
+def _shared_read_paths(file, trace):
+    """Read paths that two or more blocks of this document name.
+
+    One read, several steps naming the file: nothing in a transcript says which
+    step the read served, so it cannot be tied to any one of them. Two audited
+    false greens were exactly this - a `/grill-prd` Phase 1 credited with the
+    `figma-spec.md` read Phase 0 asked for, and a `/review` Step 4 credited with
+    the grep that was Step 6's documentation check. Every block counts, the
+    identity block included, since any of them can be the step that wanted it.
+    """
+    blocks = (file or {}).get("blocks") or []
+    if len(blocks) < 2:
+        return frozenset()
+
+    def compute():
+        named = [_named_paths(b.get("content") or "") for b in blocks]
+        reads = {r for ns in named if ns
+                 for _n, r in _credited_reads(ns, file, trace)}
+        return frozenset(r for r in reads
+                         if sum(any(_path_names_target(n, r) for n in ns)
+                                for ns in named) >= 2)
+    return _memo(trace, ("shared-reads", (file or {}).get("abs_path")), compute)
+
+
+def _split_reads(named_paths, file, trace):
+    """(own, shared): the credited reads only this block can claim, and the rest."""
+    shared = _shared_read_paths(file, trace)
+    hits = _credited_reads(named_paths, file, trace)
+    return ([h for h in hits if h[1] not in shared],
+            [h for h in hits if h[1] in shared])
+
+
+def _names_a_file_another_block_names(block, file, named_paths):
+    mine = {_path_components(n)[-1] for n in named_paths if _path_components(n)}
+    for b in (file or {}).get("blocks") or []:
+        if b is block or (b.get("start_line") is not None
+                          and b.get("start_line") == block.get("start_line")):
+            continue
+        if any(_path_components(n) and _path_components(n)[-1] in mine
+               for n in _named_paths(b.get("content") or "")):
+            return True
+    return False
+
+
+def _describe_shared_read(hits, file):
+    reads = list(dict.fromkeys(f"`{r}`" for _n, r in hits))
+    one = len(reads) == 1
+    return (f"read {', '.join(reads)} while this document was running, but several "
+            f"steps of {(file or {}).get('path') or 'this document'} name "
+            + ("that file, so the read cannot" if one else
+               "those files, so the reads cannot")
+            + " be tied to this one")
+
+
+def _named_path_reads(named_paths, trace, exclude_path=None, since=None):
+    """(named path, read path) pairs where the run read what a block named.
+
+    The read half of `_named_path_writes`, and deliberately identical in
+    shape: the same file-not-directory rule, the same component join, and the
+    same exclusion of the block's own document - reading CLAUDE.md is not
+    obeying CLAUDE.md any more than editing it is.
+    """
+    read = [p for p, ts in _timed_reads(trace)
+            if since is None or ts is None or ts >= since]
+    if exclude_path:
+        read = [r for r in read if not _path_names_target(exclude_path, r)]
+    out = []
+    for n in named_paths:
+        for r in read:
+            if _path_names_target(n, r) and (n, r) not in out:
+                out.append((n, r))
+    return out
+
+
+# A heredoc body, up to its closing marker. Real appends are cut short by the
+# transcript often enough that a missing marker takes the rest of the command
+# rather than yielding nothing.
+_HEREDOC_RE = re.compile(r"<<-?\s*['\"]?(\w+)['\"]?\s*?\n(.*?)(?:\n\s*\1\s*$|\Z)",
+                         re.S | re.M)
+
+
+def _written_chunks(calls):
+    """Text this scope wrote into files: {path, text, t} per write.
+
+    The keyword fallback reads `all_assistant_text` only, so a template
+    reproduced in the file the agent wrote - the entire point of a template
+    block - counted for nothing. Heredoc bodies count too, for the same reason
+    `_shell_write_targets` exists: the memory-rule anchor appended its
+    templated entry with `cat >> $M/ERRORS.md <<'EOF'`, and a reader who only
+    knows about the edit tools sees a session that wrote nothing.
+    """
+    out = []
+    for c in calls:
+        if c["name"] == "Bash":
+            cmd = c["input"].get("command", "")
+            targets = _redirect_write_targets(cmd)
+            if not targets:
+                continue
+            bodies = [b for _marker, b in _HEREDOC_RE.findall(cmd) if b.strip()]
+            # One command can author two files; pair them off only when the
+            # counts agree, or a two-heredoc command cites the wrong file.
+            paired = zip(targets, bodies) if len(targets) == len(bodies) \
+                else ((targets[0], b) for b in bodies)
+            for path, body in paired:
+                out.append({"path": path, "text": body, "t": c.get("ts"), "shell": True})
+            continue
+        path = (c.get("input") or {}).get("file_path") or ""
+        out += [{"path": path, "text": t, "t": c.get("ts")}
+                for t in rule_checks.written_texts(c)]
+    return out
+
+
+# A bold label survives being filled in (`**Decided:**` stays put while what
+# follows it is replaced); the prose around a placeholder does not.
+_BOLD_LABEL_RE = re.compile(r"^\*\*[^*\n]{1,40}\*\*:?")
+_LIST_MARKER_RE = re.compile(r"^(?:[-*+]\s+|\d+[.)]\s+)")
+_PLACEHOLDER_RE = re.compile(r"<[^<>\n]{1,60}>|YYYY|MM-DD|\.\.\.|…")
+_MIN_LITERAL_LEN = 10
+
+
+def _template_literals(content):
+    """Literal fragments of a template this block spells out.
+
+    Markdown structure only - a bold label and a heading line - because those
+    are what a filled-in copy still carries verbatim. A heading holding a
+    placeholder is dropped whole (`# Plan: <Feature Name>` is never reproduced
+    as written, so searching for it could only ever miss), while a bold label
+    keeps just its prefix, which is the half that is not filler.
+    """
+    out = []
+    for raw in content.splitlines():
+        line = _LIST_MARKER_RE.sub("", raw.strip())
+        m = _BOLD_LABEL_RE.match(line)
+        if m and len(m.group(0)) >= 6:
+            out.append(m.group(0))
+            continue
+        if _PLACEHOLDER_RE.search(line):
+            continue
+        if re.match(r"#{1,6}\s+\S", line) and len(line) >= _MIN_LITERAL_LEN:
+            out.append(line)
+    return sorted(set(out))
+
+
+def _template_hits_for(block, file, trace):
+    """The template-echo hits this block is credited with.
+
+    Same `_document_executed` gate as the two path joins, and for the same
+    reason: a template's literals are prose until something says the document
+    was running. Without it, a global "Decision Memory" rule was credited by a
+    research document that *described* its template in a sentence, and a
+    `/prd-to-plan` command file was credited by the session that was editing a
+    second copy of the command file itself - the copy `exclude_path` cannot
+    recognise, since that comparison is over paths.
+    """
+    own = (file or {}).get("abs_path")
+    if _document_executed(file, trace):
+        scope = trace
+    else:
+        window = _carried_window(file, trace)
+        if window is None:
+            return []
+        end = window[1]
+        scope = {"written_chunks": [ch for ch in trace.get("written_chunks") or ()
+                                    if end is None or (ch.get("t") and ch["t"] < end)]}
+    return _memo(trace, ("templates", own, block["content"]),
+                 lambda: _template_echo_hits(_template_literals(block["content"]), scope,
+                                             exclude_path=own))
+
+
+def _template_echo_hits(literals, trace, min_literals=2, exclude_path=None):
+    """Files this scope wrote that reproduce the block's template.
+
+    Returns [{path, t, literals}]. Two literals in one file is the floor: a
+    single common heading (`## Approach`) is a coincidence between two
+    markdown documents, not a template being followed.
+
+    `exclude_path` is the block's own document. Editing the rule file itself
+    rewrites the template's own text, so without this a session that merely
+    updated CLAUDE.md would read as having followed every template in it.
+    The comparison is `_path_names_target`, not equality of resolved paths: an
+    append written as `cd <dir> && cat >> DECISIONS.md` carries a relative
+    path that resolves against this process's cwd, so equality let a file
+    match its own template and marked every older entry in it `used`. The
+    component join also suppresses a same-named file in another tree, which
+    costs credit and never invents an accusation - the safe direction here.
+    """
+    if not literals:
+        return []
+    by_path = {}
+    for ch in trace.get("written_chunks") or ():
+        if exclude_path and _path_names_target(exclude_path, ch["path"]):
+            continue
+        hit = [lit for lit in literals if lit in ch["text"]]
+        if not hit:
+            continue
+        rec = by_path.setdefault(ch["path"], {"path": ch["path"], "t": ch["t"],
+                                              "literals": []})
+        rec["literals"] = sorted(set(rec["literals"]) | set(hit))
+    return [r for r in by_path.values() if len(r["literals"]) >= min_literals]
+
+
+# A heredoc opener (`<<EOF`, `<<-'EOF'`) and the operators that end one
+# command and begin the next. `&&` is listed before the bare `&` so a chain is
+# split once rather than into two empty halves.
+# A here-string (`<<< "x"`) is not a heredoc and has no body to skip. A bare
+# `&` is only a separator when it is not part of a redirection (`2>&1`, `&>f`).
+_HEREDOC_OPEN_RE = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)(\w+)\1")
+_SEGMENT_SPLIT_RE = re.compile(r"&&|\|\||[|;\n]|(?<![<>])&(?!>)")
+_PIPELINE_SPLIT_RE = re.compile(r"&&|\|\||[;\n]|(?<![<>])&(?!>)")
+_QUOTED_ARG_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
+# `CI=1 yarn test` runs `yarn test`; the assignments in front of it are not a
+# different command.
+_ENV_PREFIX_RE = re.compile(r"^(?:\w+=\S*\s+)+")
+
+
+def _command_segments(bash_cmd, keep_pipes=False):
+    """The commands one Bash call actually runs, heredoc bodies excluded.
+
+    A heredoc body is content the command carries - a PR description, a file
+    being written - so the lines inside it are not commands. The opener line
+    itself is kept, because it is one.
+
+    `keep_pipes` stops splitting on a bare `|`, so a whole pipeline comes back
+    as one segment. That is the shape a *prescribed* pipeline has to be
+    compared against: with the pipe split away, any run whose last stage
+    happened to be the same program matched a rule about the whole pipeline.
+    """
+    lines = _strip_heredoc_bodies(bash_cmd)
+    masked = _QUOTED_ARG_RE.sub(
+        lambda m: m.group(0)[0] + "\x00" * (len(m.group(0)) - 2) + m.group(0)[0],
+        lines)
+    splitter = _PIPELINE_SPLIT_RE if keep_pipes else _SEGMENT_SPLIT_RE
+    out = []
+    for part in splitter.split(masked):
+        seg = part.strip().lstrip("({").strip()
+        seg = _ENV_PREFIX_RE.sub("", seg)
+        if keep_pipes:
+            seg = _normalize_pipeline(seg)
+        if seg:
+            out.append(seg)
+    return out
+
+
+def _strip_heredoc_bodies(bash_cmd):
+    lines = bash_cmd.splitlines()
+    kept, i = [], 0
+    while i < len(lines):
+        line = lines[i]
+        kept.append(line)
+        i += 1
+        m = _HEREDOC_OPEN_RE.search(line)
+        if not m:
+            continue
+        term = m.group(2)
+        while i < len(lines) and lines[i].strip() != term:
+            i += 1
+        i += 1  # the terminator line is not a command either
+    return "\n".join(kept)
+
+
+def _command_echo_count(cmd, bash_cmds):
+    """How many bash commands ran this whole prescribed command as a command.
+
+    Matched at the *start* of a command segment, so the block's command has to
+    be the program being run rather than a string some other command carried:
+    `just talos-hmi-lint` pasted into a `gh pr create` PR body was counted as a
+    lint run, which is a PR description read as evidence of a gate. Heredoc
+    bodies and quoted arguments are dropped for the same reason. Bounded on the
+    right so `yarn test` counts `yarn test --watch=false` (the prescribed
+    command did run) but not `yarn testing`.
+    """
+    if not cmd:
+        return 0
+    piped = "|" in cmd
+    pattern = re.compile(re.escape(cmd) + r"(?![\w-])")
+    return sum(1 for bc in bash_cmds
+               if any(pattern.match(seg)
+                      for seg in _command_segments(bc, keep_pipes=piped)))
+
+
+def _runs_as_program(cmd, bash_cmd):
+    """Is `cmd` the program one of this call's command segments runs?
+
+    A word anywhere in the call used to count, so `> /dev/null` was "`null`
+    ran", a branch name was "`main` ran" and an `mv` argument was "`plan`
+    ran" - cards claiming a run that never happened.
+    """
+    return any(seg.split()[0] == cmd for seg in _command_segments(bash_cmd))
+
+
+def _command_mention_count(cmd, bash_cmds):
+    """Bash commands that ran this command's name as a program."""
+    return sum(1 for bc in bash_cmds if _runs_as_program(cmd, bc))
+
+
+def _any_echoed(echo_cmds, trace):
+    return any(_command_echo_count(c, bash(trace)) for c, bash in echo_cmds)
+
+
+def _all_bash(trace):
+    return trace["bash_cmds"]
+
+
+def _invocations(trace):
+    """(time, name) for every skill or command invocation record, in order."""
+    out = [(c.get("ts"), (c["input"].get("skill") or "").strip().lstrip("/").lower())
+           for c in trace.get("calls") or () if c["name"] == "Skill"]
+    out += [(w.get("t"), (w.get("name") or "").lower())
+            for w in trace.get("cmd_wrappers") or ()]
+    return sorted((o for o in out if o[0]), key=lambda o: o[0])
+
+
+def _procedure_bash(file, trace):
+    """Bash commands run while this skill or command was the procedure running.
+
+    A window opens at each invocation of the document and closes at the next
+    invocation of a different one. An inline command in a step is ordinary
+    prose about a generic tool (`git status`, `git branch --show-current`), so
+    the same command running for the user's own request before `/commit`, or
+    for `/create-pr` after it, is not the step being carried out.
+    """
+    name = ((file or {}).get("name") or "").strip().lstrip("/").lower()
+
+    def compute():
+        invs = _invocations(trace)
+        windows = []
+        for i, (ts, n) in enumerate(invs):
+            if n != name:
+                continue
+            end = next((t for t, m in invs[i + 1:] if m != name), None)
+            windows.append((ts, end))
+        return [c["input"].get("command", "") for c in trace.get("calls") or ()
+                if c["name"] == "Bash" and c.get("ts")
+                and any(c["ts"] >= a and (b is None or c["ts"] < b) for a, b in windows)]
+    return _memo(trace, ("procedure-bash", name), compute)
+
+
+def _describe_command_mention(cmd, trace, echo_cmds):
+    if _any_echoed(echo_cmds, trace):
+        # The strong row already cites these runs. Repeating the count here put
+        # one run in two evidence rows at two strengths, which reads as two
+        # separate things having happened.
+        return f"`{cmd}` ran as a command - cited above as `command-echo`"
+    n = _command_mention_count(cmd, trace["bash_cmds"])
+    return (f"`{cmd}` ran as a command {n}× this session" if n
+            else f"`{cmd}` did not run as a command this session")
+
+
+def _describe_skill_execution(name, trace):
+    source, _rec = _trigger_evidence(name, trace)
+    if source == "skill":
+        return f"`Skill` tool invoked `/{name}` - this block was part of what ran"
+    if source == "wrapper":
+        return f"User invoked `/{name}` as a slash command - this block was part of what ran"
+    return f"No record of `/{name}` being invoked this run"
+
+
+def _is_identity_block(block, file):
+    """Is this the document's own first block - the one the invocation is about?
+
+    An invocation record says the *document* ran. It says nothing about
+    whether any particular instruction inside it was carried out: an audited
+    session invoked a `commit` skill three times while its "match the GitHub
+    account" step demonstrably never happened, and the invocation alone scored
+    that step green. Every other block has to earn its verdict from a record
+    of its own.
+
+    Identity is positional, never recognised from the heading's wording:
+    reading prose to decide which block is the title block is exactly the
+    single-user pattern-matching this tool retired.
+    """
+    blocks = (file or {}).get("blocks") or []
+    if not blocks:
+        return False
+    first = blocks[0]
+    if first is block:
+        return True
+    return (first.get("start_line") is not None
+            and first.get("start_line") == block.get("start_line"))
+
+
+def derive_predicates(block, file=None):
     """Inspect block content and return a list of predicate dicts.
 
     Each predicate has:
@@ -1799,14 +3307,23 @@ def derive_predicates(block):
       describe(trace) -> str      (human-readable evidence text)
 
     `strength` tiers the evidence. A strong predicate ties the block to a
-    specific observable outcome - the command it names was typed, the cwd row
-    it selects also ran its command, the response shape it demands appeared,
-    the thing it forbids did or did not happen - so it can carry the full
-    verdict range. A weak predicate only observes that something the block
+    specific observable outcome - a `trigger` whose command really ran, or one
+    of the structural joins below - so it can carry the full verdict range. A weak predicate only observes that something the block
     happens to name occurred, with no causal link back to the block: a
     command-mention `matches` unconditionally, so before tiering, any block
     naming a command that ran anywhere in the session scored `used`. Weak
     evidence is capped at `possibly-referenced` by `assess_block`.
+
+    The structural kinds (`skill-invocation`, `reads-named-path`,
+    `writes-to-named-path`, `template-echo`, `command-echo`) are *credit-only*:
+    their `applicable` is the signal itself and their `matches` is unconditionally true, so they can
+    lift a block but never accuse one (CLAUDE.md step 6 says why). Their strength is nonetheless `strong`: each is a
+    harness-defined record (a Skill call, a tool-call file path, a bash
+    command) tied to something the block itself names, not a word that
+    happened to co-occur.
+
+    `file` supplies the document: without it only the trigger and command
+    kinds can be derived.
     """
     content = block["content"]
     title = block["title"]
@@ -1814,130 +3331,247 @@ def derive_predicates(block):
     content_l = content.lower()
     predicates = []
 
-    # ----- trigger phrase: "Trigger: /foo" or "When the user types `/foo`"
+    # ----- trigger declaration: the slash command this block says invokes it
     trigger_cmds = set()
-    for m in re.finditer(r"trigger:\s*`?(/[a-z][\w-]*)`?", content, re.I):
-        trigger_cmds.add(m.group(1).lower())
-    for m in re.finditer(r"types\s+`(/[a-z][\w-]*)`", content, re.I):
-        trigger_cmds.add(m.group(1).lower())
+    examples = _example_spans(content)
+    for pattern in (_TRIGGER_DECL, r"trigger:\s*`?(/[a-z][\w-]*)`?",
+                    r"types\s+`(/[a-z][\w-]*)`"):
+        for m in re.finditer(pattern, content, re.I):
+            # A declaration quoted whole is documentation about the syntax, not
+            # an instruction. See `_example_spans`.
+            if _in_span(m.start(), examples):
+                continue
+            trigger_cmds.add(m.group(1).lower())
     for cmd in trigger_cmds:
+        ran = (lambda t, c=cmd: _trigger_evidence(c, t)[0] in ("skill", "wrapper"))
         predicates.append({
             "kind": "trigger",
             "strength": "strong",
             "cmd": cmd,
             "label": f"trigger {cmd}",
-            "applicable": (lambda t, c=cmd: bool(t["user_prompt"]) and c in t["user_prompt"].lower()),
-            "matches":    (lambda t, c=cmd: bool(t["user_prompt"]) and c in t["user_prompt"].lower()),
-            "describe":   (lambda t, c=cmd: f"User prompt: `{(t['user_prompt'] or '')[:100]}` — "
-                                            + ("contains" if (t["user_prompt"] and c in t["user_prompt"].lower()) else "does not contain")
-                                            + f" `{c}`"),
+            # A `/name` the user merely mentioned is not a record of the
+            # command running, and this predicate is strong evidence: one
+            # prompt reading "either /grill-prd or /prd-to-plan - you choose"
+            # greened both skills. Same bar as `skill-invocation` below.
+            "applicable": ran,
+            "matches":    ran,
+            "describe":   (lambda t, c=cmd: _describe_trigger(c, t)),
         })
 
-    # ----- path table: cwd-conditional rules
-    # Detect markdown tables that look like the project-routing pattern.
-    if re.search(r"\|\s*Project path contains\s*\|", content, re.I) or re.search(r"project path contains", content_l):
-        # parse table rows
-        rows = []
-        for line in content.splitlines():
-            cols = [c.strip() for c in line.strip().strip("|").split("|")]
-            if len(cols) >= 3 and not all(set(c) <= set("-: ") for c in cols):
-                rows.append(cols)
-        # drop header + separator
-        data_rows = []
-        for cols in rows:
-            joined = " ".join(cols).lower()
-            if "project path contains" in joined or "required" in joined or "switch command" in joined:
-                continue
-            # extract path-token from first col (between backticks if present)
-            m = re.search(r"`([^`]+)`", cols[0])
-            path_token = m.group(1) if m else cols[0]
-            # extract a shell command from any cell
-            cmd = ""
-            for c in cols:
-                cm = re.search(r"`([^`]+)`", c)
-                if cm and any(s in cm.group(1) for s in [" ", "-"]):
-                    cmd = cm.group(1)
-                    break
-            data_rows.append({"path_token": path_token, "cmd": cmd})
+    # A cwd-conditional rule ("in this repo, use that account") used to be
+    # read straight out of a markdown table whose header this tool matched
+    # literally - one user's own gh-account table, and the only shape it ever
+    # recognised. It was wrong in both directions on every session audited:
+    # the row's account name substring-matched an unrelated `git log --author=`
+    # flag for a false green, and the literal switch string it demanded could
+    # not express "check, and switch only if needed" for a false red. Such a
+    # rule is now `tool_never_without_prior` in a compiled checks file, where
+    # the ordering is decided over the tool log and every finding cites the
+    # call that went wrong.
 
-        if data_rows:
-            tokens = [r["path_token"] for r in data_rows]
-            cmds = [r["cmd"] for r in data_rows if r["cmd"]]
-            predicates.append({
-                "kind": "path-table",
-                "strength": "strong",
-                "label": "cwd vs path table",
-                "applicable": (lambda t, toks=tokens: any(tok and tok in t["cwd"] for tok in toks)),
-                "matches":    (lambda t, cs=cmds: any(c and any(c in bc for bc in t["bash_cmds"]) for c in cs)),
-                "describe":   (lambda t, toks=tokens, cs=cmds:
-                               f"cwd `{t['cwd']}` matches: " +
-                               (", ".join(tk for tk in toks if tk and tk in t["cwd"]) or "(none)") +
-                               f"; matching commands ran: " +
-                               (", ".join(c for c in cs if any(c in bc for bc in t["bash_cmds"])) or "(none)")),
-            })
+    # ----- an executed skill or command: its identity block is what ran
+    if (file and file.get("kind") in ("skill", "command") and file.get("name")
+            and _is_identity_block(block, file)):
+        name = file["name"]
+        predicates.append({
+            "kind": "skill-invocation",
+            "strength": "strong",
+            "cmd": f"/{name}",
+            "label": f"skill /{name} executed",
+            # A prompt that merely mentions `/name` is deliberately not
+            # enough. It is the weakest of the three loading signals - a guess
+            # about intent - and letting it carry a verdict would turn every
+            # block of a skill green because the user typed its name.
+            "applicable": (lambda t, n=name: _trigger_evidence(n, t)[0] in ("skill", "wrapper")),
+            "matches":    (lambda t: True),
+            "describe":   (lambda t, n=name: _describe_skill_execution(n, t)),
+        })
+
+    # ----- reads of a path the block names, inside a procedure that ran
+    #
+    # Reading is what a session does to everything, so "the block names a file
+    # and the run read it" is coincidence on its own: measured over the whole
+    # corpus a bare read join turned a tech-stack table green because the
+    # session opened one of the files it lists, and a repo tour green because
+    # something read the README. That is ruling 3's own argument - the file was
+    # going to be read whether or not the block named it.
+    #
+    # It stops being coincidence inside a document the run *executed*. The
+    # invocation is a harness record that this procedure ran; on its own it
+    # credits the identity block and nothing else, but a step of a running
+    # procedure whose own named file was read in the same scope has a second,
+    # independent record behind it, which is the read this tool never had.
+    named_paths = _named_paths(content)
+    skill_name = (file or {}).get("name") if (file or {}).get("kind") in ("skill", "command") else None
+    if named_paths and skill_name:
+        def _read_hits(t, ps=named_paths, f=file):
+            return _split_reads(ps, f, t)[0]
+
+        def _shared_hits(t, ps=named_paths, f=file):
+            return _split_reads(ps, f, t)[1]
+
+        predicates.append({
+            "kind": "reads-named-path",
+            "strength": "strong",
+            # The label says "read" rather than "used", because a reader has
+            # to be able to tell a read from a write without opening the card.
+            "label": "read a file the block names",
+            "applicable": (lambda t: bool(_read_hits(t))),
+            "matches":    (lambda t: True),
+            "describe":   (lambda t, ps=named_paths: (
+                              "read " + ", ".join(dict.fromkeys(
+                                  f"`{r}`" for _n, r in _read_hits(t)))
+                              if _read_hits(t)
+                              else "no read is this step's alone - see the shared-read row"
+                              if _shared_hits(t)
+                              else "none of " + ", ".join(f"`{p}`" for p in ps)
+                                   + " was read while this document was running")),
+        })
+    # The read several steps name is withheld from the strong tier, not
+    # dropped: it did happen, and saying so is the most this tool can
+    # support. Weak, so it caps at `possibly-referenced` and never accuses.
+    # Derived only where another block names a file of the same name, which
+    # every shared read needs, so no other block gains an evidence row.
+    if named_paths and skill_name and _names_a_file_another_block_names(block, file, named_paths):
+        predicates.append({
+            "kind": "reads-shared-path",
+            "strength": "weak",
+            "label": "read a file several steps of this document name",
+            "applicable": (lambda t: bool(_shared_hits(t))),
+            "matches":    (lambda t: True),
+            "describe":   (lambda t, f=file: (
+                              _describe_shared_read(_shared_hits(t), f)
+                              if _shared_hits(t)
+                              else "no read of a file other steps also name")),
+        })
+
+    # ----- writes to a path the block names, inside a procedure that ran
+    #
+    # Emitted only for an executable document, exactly like the read join: for
+    # a plain rule document this join has nothing to say, and a predicate that
+    # can never fire would still put a row in the evidence list denying a write
+    # that did happen. See `_document_executed` for why the token needs the
+    # invocation to carry any direction at all.
+    if named_paths and skill_name:
+        own_doc = (file or {}).get("abs_path")
+        predicates.append({
+            "kind": "writes-to-named-path",
+            "strength": "strong",
+            "label": "wrote a file the block names",
+            "applicable": (lambda t, ps=named_paths, o=own_doc, f=file: bool(_writes_for(ps, f, t, o))),
+            "matches":    (lambda t: True),
+            "describe":   (lambda t, ps=named_paths, o=own_doc, f=file: (
+                              "wrote " + ", ".join(dict.fromkeys(
+                                  f"`{w}`" for _n, w in _writes_for(ps, f, t, o)))
+                              if _writes_for(ps, f, t, o)
+                              else _no_write_note(ps, f, t))),
+        })
+
+    # ----- template the block spells out, reproduced in a written file
+    literals = _template_literals(content)
+    if len(literals) >= 2 and skill_name:
+        predicates.append({
+            "kind": "template-echo",
+            "strength": "strong",
+            "label": "template reproduced in a written file",
+            "applicable": (lambda t, b=block, f=file: bool(_template_hits_for(b, f, t))),
+            "matches":    (lambda t: True),
+            "describe":   (lambda t, b=block, f=file: (
+                              "; ".join(f"`{h['path']}` carries "
+                                        + ", ".join(f"`{lit}`" for lit in h["literals"][:4])
+                                        for h in _template_hits_for(b, f, t))
+                              or "no file written while this document was running "
+                                 "reproduces the template")),
+        })
 
     # ----- command mention: backtick'd command tokens, or known shell commands in prose
     cmd_tokens = set()
-    for tok in _extract_backtick_tokens(content):
+    for tok in _extract_backtick_tokens(_strip_table_rows(content)):
         # only care about things that look like commands (single word, lowercase, no slashes-leading)
         first = tok.split()[0]
         if first.startswith("/"):
             continue
-        if re.fullmatch(r"[a-z][\w.-]*", first) and len(first) >= 2:
+        if _looks_like_command_word(first):
             cmd_tokens.add(first)
-    # well-known command words even without backticks
-    for word in ("pbcopy", "xclip", "xsel", "printf", "echo"):
-        if re.search(rf"\b{word}\b", content):
-            cmd_tokens.add(word)
-    # drop things that aren't commands
-    NON_CMDS = {"the", "a", "an", "and", "or", "if", "see", "use", "any", "all", "rule", "always",
-                "never", "must", "i", "you", "we", "it", "is", "are", "was", "were", "this",
-                "that", "these", "those", "trigger", "yaml", "json", "md", "ts", "tsx", "py",
-                "argparse", "claude.md", "skill.md"}
-    cmd_tokens = {c for c in cmd_tokens if c.lower() not in NON_CMDS}
+    # A whole prescribed command that ran verbatim is a different claim from
+    # "a program this block names ran somewhere": `yarn test` matching is the
+    # documented gate having been run, while `yarn` matching is not. So the
+    # multi-token fenced commands leave the weak tier for `command-echo` -
+    # emitting both would put the same command in two evidence rows.
+    # An untagged fence counts for the echo tier only. The tag requirement
+    # exists to stop `import re` being read as a program, and a candidate that
+    # must then have *run verbatim* cannot make that mistake - which is what
+    # the palletizer AGENTS.md anchor needs, its `just` recipes sitting in a
+    # bare ``` fence while every one of them ran.
+    cmd_tokens.update(c for c in _extract_fenced_commands(content) if " " not in c)
+    # Single-word fenced commands are echo candidates too: `pytest` alone in a
+    # fence is as prescribed as `yarn test`, and 18 real `pytest` runs credited
+    # nothing while echo demanded a space. What keeps that honest is the
+    # whole-segment rule in `_command_echo_count` - a bare word has to be the
+    # program a segment runs, not a word inside another command's arguments.
+    fenced = set(_fenced_commands(content, None))
+    echo_cmds = sorted(fenced | set(_inline_commands(content)))
+    # Only an inline command in a skill or command is windowed; a fence is a
+    # prescription by its shape, and a rule document has no procedure to run.
+    procedure = (file or {}).get("kind") in ("skill", "command") and (file or {}).get("name")
+    for cmd in echo_cmds:
+        bash = (_all_bash if cmd in fenced or not procedure
+                else (lambda t, f=file: _procedure_bash(f, t)))
+        where = "this session" if bash is _all_bash else "while this document was running"
+        predicates.append({
+            "kind": "command-echo",
+            "strength": "strong",
+            "cmd": cmd,
+            "bash": bash,
+            "label": f"`{cmd}` ran verbatim",
+            "applicable": (lambda t, c=cmd, b=bash: _command_echo_count(c, b(t)) > 0),
+            "matches":    (lambda t: True),
+            "describe":   (lambda t, c=cmd, b=bash, w=where: (
+                              f"`{c}` ran verbatim {_command_echo_count(c, b(t))}× {w}"
+                              if _command_echo_count(c, b(t))
+                              else f"`{c}` did not run {w}")),
+        })
+
+    # Five shell words (`pbcopy`, `xclip`, `xsel`, `printf`, `echo`) used to be
+    # harvested from bare prose here, hardcoded because of one user's clipboard
+    # rule. A word list of "commands worth noticing" is the same
+    # reverse-engineering the strong predicates were: it says nothing about the
+    # next user's rules, and backtick-free prose naming a program is prose.
+    # Keyed by program as well as by whole command: inline `yarn test` also
+    # puts `yarn` in the weak tier, and its run is the echo row's to cite.
+    echoed = {}
+    for p in predicates:
+        if p["kind"] == "command-echo":
+            pair = (p["cmd"], p["bash"])
+            echoed.setdefault(p["cmd"], []).append(pair)
+            echoed.setdefault(p["cmd"].split()[0], []).append(pair)
     for cmd in sorted(cmd_tokens):
         predicates.append({
             "kind": "command-mention",
             "strength": "weak",
             "cmd": cmd,
             "label": f"`{cmd}` in bash",
-            "applicable": (lambda t, c=cmd: any(re.search(rf"\b{re.escape(c)}\b", bc) for bc in t["bash_cmds"])),
+            # A run the echo tier already credited is not also a mention: the
+            # same command in a strong row and a weak one reads as two facts.
+            # The mention survives where echo found nothing, which is the case
+            # worth keeping - the command's name occurred, and that is all.
+            "applicable": (lambda t, c=cmd, e=tuple(echoed.get(cmd, ())): (
+                not _any_echoed(e, t)
+                and _command_mention_count(c, t["bash_cmds"]) > 0)),
             "matches":    (lambda t, c=cmd: True),  # if it ran at all, the rule about that command had a chance
-            "describe":   (lambda t, c=cmd: (
-                              f"`{c}` ran "
-                              + str(sum(1 for bc in t['bash_cmds'] if re.search(rf"\b{re.escape(c)}\b", bc)))
-                              + "× this session"
-                              if any(re.search(rf"\b{re.escape(c)}\b", bc) for bc in t['bash_cmds'])
-                              else f"`{c}` did not run this session")),
+            "describe":   (lambda t, c=cmd, e=tuple(echoed.get(cmd, ())):
+                           _describe_command_mention(c, t, e)),
         })
 
-    # ----- end-of-message rule: summary-after-edits etc.
-    if (re.search(r"end\s+your\s+response", content_l)
-            or re.search(r"\b\d-\d\s+sentences?\b", content)
-            or re.search(r"\buser-facing summary\b", content_l)
-            or "end-of-implementation" in title_l):
-        def _fires(t):
-            la = t["last_assistant"]
-            if not la:
-                return False
-            has_summary = any(k in la.lower() for k in SUMMARY_KEYWORDS) or len(la.strip().split("\n\n")[-1]) > 0
-            paras = [p.strip() for p in la.strip().split("\n\n") if p.strip()]
-            final_para = paras[-1] if paras else ""
-            sentences = len(re.findall(r"[.!?]+", final_para))
-            has_tech = bool(CODE_EXT.search(la)) or bool(re.search(r"\b(controller|service|schema|route)\b", la.lower()))
-            return has_summary and sentences <= 4 and not has_tech
-
-        predicates.append({
-            "kind": "end-of-message",
-            "strength": "strong",
-            "label": "summary at end of response",
-            "applicable": (lambda t: bool(t["edits"])),
-            "matches":    _fires,
-            "describe":   (lambda t: (
-                              f"{len(t['edits'])} edit(s) made; "
-                              + f"final message: {len(t['last_assistant'])} chars, "
-                              + f"final paragraph ~{len(re.findall(r'[.!?]+', (t['last_assistant'].strip().split(chr(10)+chr(10))[-1] if t['last_assistant'].strip() else '')))} sentences")),
-        })
+    # A rule about the *shape of the response* ("close with a short
+    # user-facing summary") used to fire here on its author's own phrasing -
+    # "end your response", "1-3 sentences", "user-facing summary" - and then
+    # scored the wording of the closing paragraph against a hardcoded notion of
+    # what an implementation detail is. It condemned a compliant three-sentence
+    # summary in every implementation session audited. Its checkable half is a
+    # sentence count and its load-bearing half is a judgement about meaning, so
+    # a compiled record carries it: `scope: "communication"` in the `judged`
+    # bucket, which reports as unchecked until the opt-in judge tier runs it.
 
     # A "never X" rule used to become a shell-command predicate here: the word
     # after `never` was looked up among the session's bash commands, so a rule
@@ -1947,53 +3581,6 @@ def derive_predicates(block):
     # and demands a citable span in the code before it accuses anyone.
 
     return predicates
-
-
-def _windows_around(haystack, needle, window=140, max_hits=3):
-    """Return up to `max_hits` text windows centered on case-insensitive matches of `needle`."""
-    if not haystack or not needle:
-        return []
-    out = []
-    pat = re.compile(re.escape(needle), re.I)
-    for m in pat.finditer(haystack):
-        start = max(0, m.start() - window)
-        end = min(len(haystack), m.end() + window)
-        snippet = haystack[start:end].strip()
-        if start > 0: snippet = "…" + snippet
-        if end < len(haystack): snippet = snippet + "…"
-        # collapse runs of whitespace for compactness
-        snippet = re.sub(r"[ \t]+", " ", snippet)
-        out.append(snippet)
-        if len(out) >= max_hits:
-            break
-    return out
-
-
-def _block_keywords(content, prompt=""):
-    """Distinctive 5+ char tokens from block content, minus stopwords + words present in user prompt."""
-    stop = {"about", "above", "after", "again", "always", "before", "below", "between",
-            "could", "every", "first", "have", "having", "their", "there", "these", "those",
-            "through", "under", "until", "where", "which", "while", "would", "should", "claude",
-            "rules", "rule", "block", "section", "files", "file", "code", "task", "tasks"}
-    tokens = re.findall(r"\b[a-zA-Z][a-zA-Z0-9_-]{4,}\b", content)
-    prompt_words = set(re.findall(r"\b[a-zA-Z][a-zA-Z0-9_-]{4,}\b", prompt or "")) | stop
-    out, seen = [], set()
-    for t in tokens:
-        tl = t.lower()
-        if tl in prompt_words or tl in seen:
-            continue
-        seen.add(tl)
-        out.append(tl)
-        if len(out) >= 12:
-            break
-    return out
-
-
-def _is_topical(text, keywords, threshold=1):
-    if not text or not keywords:
-        return False
-    tl = text.lower()
-    return sum(1 for k in keywords if k in tl) >= threshold
 
 
 def _last_sentence_with_causal(text):
@@ -2011,41 +3598,123 @@ def _moment(t, kind, verdict, label, text="", **extra):
     return {"t": t, "kind": kind, "verdict": verdict, "label": label, "text": text, **extra}
 
 
-def _find_intent_before(seg_idx, segs, keywords, max_back=6):
-    """Walk backwards in segs from seg_idx to find an assistant text segment that's topical to the block.
-    Returns (text, ts) or (None, None)."""
-    i = seg_idx - 1
-    steps = 0
-    while i >= 0 and steps < max_back:
-        s = segs[i]
-        if s["role"] == "assistant" and s["kind"] == "text":
-            if _is_topical(s["text"], keywords) or CAUSAL_RE.search(s["text"]):
-                return _last_sentence_with_causal(s["text"]), s["t"]
-            steps += 1
-        i -= 1
-    return None, None
+# A moment card is a causal claim: TRIGGER -> INTENT -> ACTION reads as "the
+# block caused this". Lexical overlap cannot support one - a design-system
+# block cited a rate-limiting review because both say "design", and a
+# tech-stack table cited an Effect-vs-react-query discussion because both say
+# "React" - so the two non-causal kinds below carry their own disclaimer in the
+# card text rather than relying on the reader knowing which kinds are weak.
+CO_OCCURRENCE_NOTE = ("Co-occurrence only: the block and the run mention the same thing. "
+                      "Nothing in the trace ties the behaviour back to the block.")
+
+THINKING_SELF_REPORT_NOTE = ("Self-report, not evidence: models describe reasoning they did "
+                             "not do (measured faithfulness under 20%), so this corroborates "
+                             "the verdict at most and never sets it.")
 
 
-def _ranked_topical_segments(segs, keywords, limit=3):
-    """Rank assistant text segments by topical+causal score; return top N."""
-    if not keywords:
+def _lexical_result(content, trace):
+    """Score one block's wording against this scope's prose. One matcher.
+
+    The badge, the moment card and the baked `lexical` record all read this
+    one call: `assess_block` used to tokenize the block one way and the card
+    another, so a block could sit `unused` - "no keyword overlap" - above a
+    card counting three shared words.
+    """
+    cache = trace.setdefault("lexical_cache", {})
+    hit = cache.get(content)
+    if hit is None:
+        hit = lexical.score(content, trace.get("lexical_bg"), trace.get("lexical_q"))
+        cache[content] = hit
+    return hit
+
+
+def _structural_intents(file, trace):
+    """INTENT cards from harness records, never from keyword-ranked prose.
+
+    The old builders filled this slot with whichever assistant paragraph
+    scored highest on the block's keywords, which is how Decision Memory ended
+    up narrated by YIN pitch-detection math. The only antecedents admitted here
+    are records the harness wrote: the Read that delivered the file, and - via
+    the trigger card its own builder emits - the Skill call or slash-command
+    expansion that loaded it.
+    """
+    abs_target = _resolve_key(file.get("abs_path") or file.get("path"))
+    if not abs_target:
         return []
-    scored = []
-    for s in segs:
-        if s["role"] != "assistant" or s["kind"] != "text":
+    out = []
+    for r in trace.get("read_calls", []):
+        fp = (r.get("input") or {}).get("file_path", "")
+        if _resolve_key(fp) != abs_target:
             continue
-        tl = s["text"].lower()
-        overlap = sum(1 for k in keywords if k in tl)
-        if overlap == 0:
+        out.append(_moment(r.get("t"), "intent", None,
+                           "Read delivered this file", text=f"Read({fp})"))
+        if len(out) >= 3:
+            break
+    return out
+
+
+def _thinking_join_tokens(block, file):
+    """The block's citable, non-English tokens: `/name`, paths, whole commands.
+
+    Deliberately not `_block_keywords`: prose overlap is the thing this phase
+    stops trusting, and it is loose enough to be useless here - the two
+    readable thinking blocks in this repo's own logs matched an
+    `/implement-plan` pointer on the words "agent" and "review". A `/name`, a
+    path or a multi-word command is not something a paragraph of unrelated
+    reasoning contains by accident, and none of the three is English, which
+    the keyword tier is.
+
+    Every fence is read, not only the shell-tagged ones, for the reason
+    `_fenced_commands` documents: the caller demands the candidate appear
+    verbatim, so a mis-parsed `import re` cannot pass as a match.
+    """
+    tokens = set()
+    name = (file.get("name") or "").strip()
+    if file.get("kind") in ("skill", "command") and name:
+        tokens.add("/" + name)
+    tokens.update(_named_paths(block["content"]))
+    tokens.update(c for c in _fenced_commands(block["content"], None) if " " in c)
+    # Kept as written, matched case-insensitively: a card citing `agent.md`
+    # for a block that says `AGENT.md` sends the reader grepping for a string
+    # that is not in either text.
+    return {t for t in tokens if len(t) >= 3}
+
+
+def _thinking_corroboration(block, file, trace, segs, limit=2):
+    """Readable extended thinking that names something this block names.
+
+    Availability is mixed per model and CLI version - officially the field is
+    encrypted and empty, empirically 43 of 82 blocks were readable in a recent
+    transcript - so absence must cost nothing: this returns [] and no status
+    moves. Presence is not an evidence tier either; see
+    THINKING_SELF_REPORT_NOTE.
+    """
+    # Most scopes have no readable thinking at all, and this runs per block per
+    # turn: extracting the block's tokens first would re-parse every fence in
+    # every rule document for nothing.
+    readable = [s for s in segs
+                if s.get("kind") == "thinking" and (s.get("text") or "").strip()]
+    if not readable:
+        return []
+    tokens = _thinking_join_tokens(block, file)
+    if not tokens:
+        return []
+    out = []
+    for s in readable:
+        text = s["text"].strip()
+        # Right-bounded like `_command_echo_count`: `/cp` must not be found
+        # inside `/cpu`, nor `yarn test` inside `yarn testing`.
+        low = text.lower()
+        hits = sorted(t for t in tokens
+                      if re.search(re.escape(t.lower()) + r"(?![\w-])", low))
+        if not hits:
             continue
-        score = overlap
-        if CAUSAL_RE.search(s["text"]):
-            score += 2
-        if "claude.md" in tl or "the rule" in tl or "global rules" in tl:
-            score += 1
-        scored.append((score, s))
-    scored.sort(key=lambda x: -x[0])
-    return [s for sc, s in scored[:limit] if sc >= 2]
+        out.append(_moment(s.get("t"), "corroboration", None,
+                           f"Agent's own thinking names {', '.join(hits[:3])} (self-report)",
+                           text=THINKING_SELF_REPORT_NOTE + "\n" + text[:400]))
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _moments_for_skill_or_command(block, file, trace, segs, kind_hint):
@@ -2053,36 +3722,28 @@ def _moments_for_skill_or_command(block, file, trace, segs, kind_hint):
     name = (file.get("name") or "").lower()
     moments = []
     user_prompt = trace["user_prompt"] or ""
-    triggered_in_prompt = _is_triggered(name, user_prompt)
-    triggered_via_wrapper = any(w["name"].lower() == name for w in trace["cmd_wrappers"])
-    skill_calls = [c for c in trace["calls"]
-                   if c["name"] == "Skill"
-                   and (c["input"].get("skill") or "").strip().lstrip("/").lower() == name]
+    source, rec = _trigger_evidence(name, trace)
 
-    if triggered_in_prompt or triggered_via_wrapper or skill_calls:
+    if source:
         # TRIGGER ✓
-        if skill_calls:
-            sc = skill_calls[0]
-            moments.append(_moment(sc.get("ts"), "trigger", "yes",
+        if source == "skill":
+            moments.append(_moment(rec.get("ts"), "trigger", "yes",
                                    f"`Skill` tool invoked /{name}",
-                                   text=json.dumps(sc.get("input", {}))[:400]))
-        elif triggered_via_wrapper:
-            w = next(w for w in trace["cmd_wrappers"] if w["name"].lower() == name)
-            moments.append(_moment(w["t"], "trigger", "yes",
+                                   text=json.dumps(rec.get("input", {}))[:400]))
+        elif source == "wrapper":
+            moments.append(_moment(rec["t"], "trigger", "yes",
                                    f"User invoked /{name} via slash-command",
-                                   text=w["text"]))
+                                   text=rec["text"]))
         else:
-            moments.append(_moment(None, "trigger", "yes",
-                                   f"User prompt mentioned /{name}",
-                                   text=user_prompt[:400]))
+            # A `/name` the user typed with no expansion and no `Skill` call
+            # behind it is a mention, which is why `skill-invocation` refuses
+            # it as evidence of execution. A ✓ TRIGGER here would put a
+            # satisfied green step above the weaker badge that refusal earns.
+            moments.append(_moment(None, "co-occurrence", None,
+                                   f"User prompt mentioned /{name}, but nothing shows it running",
+                                   text=f"{CO_OCCURRENCE_NOTE}\n{user_prompt[:400]}"))
 
-        # Topical assistant segments after trigger → INTENT
-        keywords = _block_keywords(block["content"], user_prompt)
-        intents = _ranked_topical_segments(segs, keywords, limit=2)
-        for s in intents:
-            moments.append(_moment(s["t"], "intent", None,
-                                   "Agent reasoning",
-                                   text=_last_sentence_with_causal(s["text"])))
+        moments.extend(_structural_intents(file, trace))
     else:
         # NON-EVENT explaining
         reason = (f"This {kind_hint} only loads when the user invokes `/{name}` "
@@ -2116,131 +3777,95 @@ def _moments_for_subagent(block, file, trace, segs):
     return moments
 
 
-def _moments_for_path_table(block, file, trace, segs, predicates):
-    """Path-table rule: list each row's match status against cwd."""
-    moments = []
-    cwd = trace["cwd"] or "(unknown)"
-    table_pred = next((p for p in predicates if p["kind"] == "path-table"), None)
-    if not table_pred:
-        return moments
-    # Re-extract rows from content (mirrors derive_predicates)
-    rows = []
-    for line in block["content"].splitlines():
-        cols = [c.strip() for c in line.strip().strip("|").split("|")]
-        if len(cols) >= 3 and not all(set(c) <= set("-: ") for c in cols):
-            joined = " ".join(cols).lower()
-            if "project path contains" in joined or "switch command" in joined:
-                continue
-            m = re.search(r"`([^`]+)`", cols[0])
-            tok = m.group(1) if m else cols[0]
-            cmd_m = ""
-            for col in cols:
-                cm = re.search(r"`([^`]+)`", col)
-                if cm and any(s in cm.group(1) for s in [" ", "-"]):
-                    cmd_m = cm.group(1)
-                    break
-            rows.append((tok, cmd_m))
-    matched_rows = [(tok, cmd) for tok, cmd in rows if tok and tok in cwd]
-
-    moments.append(_moment(None, "condition", "yes" if matched_rows else "no",
-                           f"cwd vs path table",
-                           text=f"cwd: {cwd}\nrows: " + ", ".join(f"`{t}`" for t, _ in rows)))
-
-    if not matched_rows:
-        moments.append(_moment(None, "non-event", "no",
-                               "Rule had no chance to fire",
-                               text=f"None of the table rows ({', '.join(f'`{t}`' for t, _ in rows)}) "
-                                    f"matched cwd `{cwd}`. Consider scoping this as a path-rule "
-                                    "instead of a global rule."))
-        return moments
-
-    for tok, cmd in matched_rows:
-        # Did the prescribed command run?
-        ran = next((bc for bc in trace["bash_cmds"] if cmd and cmd in bc), None)
-        if ran:
-            moments.append(_moment(None, "action", "yes",
-                                   f"prescribed command for `{tok}` ran",
-                                   text=ran[:400]))
-        else:
-            # Was *something* (e.g., gh) attempted that should have been preceded by it?
-            related = next((bc for bc in trace["bash_cmds"] if "gh " in bc or bc.startswith("gh ")), None)
-            if related:
-                moments.append(_moment(None, "violation", "no",
-                                       f"`{tok}` matched but switch command not run",
-                                       text=f"Found a `gh` command without preceding switch:\n{related[:400]}"))
-            else:
-                moments.append(_moment(None, "omission", None,
-                                       f"`{tok}` matched but command was unnecessary",
-                                       text=f"No `gh` command this session, so no switch needed."))
-    return moments
-
-
 def _moments_for_command_mention(block, file, trace, segs, predicates):
-    """Emit ACTION moments for each Bash call invoking a mentioned command. Pair with intent."""
-    moments = []
-    cmds = sorted({p["cmd"] for p in predicates if p["kind"] == "command-mention"})
-    keywords = _block_keywords(block["content"], trace["user_prompt"])
+    """One co-occurrence card per mentioned command that ran.
 
-    bash_calls_in_segs = [(i, s) for i, s in enumerate(segs)
-                          if s["kind"] == "tool_use" and s.get("name") == "Bash"]
-    seen = set()
-    for cmd in cmds:
-        for i, s in bash_calls_in_segs:
-            bc = s["input"].get("command", "")
-            if not re.search(rf"\b{re.escape(cmd)}\b", bc):
-                continue
-            key = (cmd, s["t"], bc[:80])
-            if key in seen: continue
-            seen.add(key)
-            # intent before
-            intent_text, intent_t = _find_intent_before(i, segs, keywords)
-            if intent_text:
-                moments.append(_moment(intent_t, "intent", None,
-                                       "Agent reasoning",
-                                       text=intent_text))
-            desc = s["input"].get("description") or ""
-            text = (f"$ {bc[:400]}" + (f"\n# {desc}" if desc else ""))
-            moments.append(_moment(s["t"], "action", "yes", f"Bash ran `{cmd}`", text=text))
-            if len(moments) > 30:
+    A block naming `printf` and a run that used `printf` share a name and
+    nothing more, so this is deliberately not an ACTION card paired with the
+    nearest topical paragraph - that pairing manufactured a motive for every
+    command the block happened to spell. The citation survives the reframing:
+    the card still names the run count and shows the first command verbatim,
+    which is the part a reader can check.
+    """
+    moments = []
+    # The predicate stands down where echo credited the same command; the card
+    # has to as well, or a "name overlap only" note sits beside the ACTION card
+    # that named the very runs it is disclaiming.
+    echoed = set()
+    for p in predicates:
+        if (p["kind"] == "command-echo"
+                and _command_echo_count(p["cmd"], p["bash"](trace))):
+            echoed.update((p["cmd"], p["cmd"].split()[0]))
+    for cmd in sorted({p["cmd"] for p in predicates if p["kind"] == "command-mention"}):
+        if cmd in echoed:
+            continue
+        runs = [s for s in segs
+                if s["kind"] == "tool_use" and s.get("name") == "Bash"
+                and _runs_as_program(cmd, s["input"].get("command", ""))]
+        if not runs:
+            continue
+        first = runs[0]["input"].get("command", "")
+        moments.append(_moment(runs[0]["t"], "co-occurrence", None,
+                               f"`{cmd}` ran as a command {len(runs)}× this run (name overlap only)",
+                               text=f"{CO_OCCURRENCE_NOTE}\n$ {first[:400]}"))
+        if len(moments) >= 8:
+            break
+    return moments
+
+
+STRUCTURAL_KINDS = ("reads-named-path", "writes-to-named-path",
+                    "template-echo", "command-echo")
+
+
+def _moments_for_structural(block, file, trace, segs, predicates):
+    """ACTION cards for the artifacts a structural predicate cites.
+
+    Without these a block lifted by a write or a verbatim command run fell
+    through to the loose-keyword cards, so the reader got a topical-overlap
+    narrative underneath a badge earned by something else entirely - the same
+    badge-versus-card contradiction the trigger matcher was unified to remove.
+    """
+    moments = []
+    named = _named_paths(block["content"])
+    own, shared = _split_reads(named, file, trace)
+    reads = list(dict.fromkeys(r for _n, r in own))
+    for r in reads[:12]:
+        moments.append(_moment(_first_read_time(r, trace), "action", "yes",
+                               f"Read `{r}`, a path this block names"))
+    for r in list(dict.fromkeys(r for _n, r in shared))[:12]:
+        moments.append(_moment(_first_read_time(r, trace), "co-occurrence", None,
+                               f"Read `{r}`, which several steps of this document name",
+                               text=(f"{CO_OCCURRENCE_NOTE}\nNothing in the transcript "
+                                     "says which step this read served, so it is not "
+                                     "credited to this one.")))
+    # Capped like the command loop below: a block naming a directory can join
+    # every file written under it, and a card per file buries the verdict.
+    writes = list(dict.fromkeys(
+        w for _n, w in _writes_for(named, file, trace, file.get("abs_path"))))
+    for w in writes[:12]:
+        ch = next((c for c in (trace.get("written_chunks") or ()) if c["path"] == w), None)
+        moments.append(_moment(ch["t"] if ch else None, "action", "yes",
+                               f"Wrote `{w}`, a path this block names",
+                               text=((ch["text"][:400]) if ch else "")))
+    hits = _template_hits_for(block, file, trace)
+    for hit in hits[:12]:
+        moments.append(_moment(hit["t"], "action", "yes",
+                               f"`{hit['path']}` reproduces this block's template",
+                               text=", ".join(hit["literals"][:6])))
+    echo = [(p["cmd"], set(p["bash"](trace)))
+            for p in predicates if p["kind"] == "command-echo"]
+    for s in segs:
+        if s["kind"] != "tool_use" or s.get("name") != "Bash":
+            continue
+        bc = s["input"].get("command", "")
+        for cmd, ran in echo:
+            if bc in ran and _command_echo_count(cmd, [bc]):
+                moments.append(_moment(s["t"], "action", "yes",
+                                       f"Bash ran `{cmd}` verbatim", text=f"$ {bc[:400]}"))
                 break
+        if len(moments) > 30:
+            break
     return moments
-
-
-def _moments_for_end_of_message(block, file, trace, segs):
-    moments = []
-    if not trace["edits"]:
-        moments.append(_moment(None, "non-event", "no",
-                               "No edits → rule didn't apply",
-                               text="The rule applies only when code is modified. No Edit/Write/MultiEdit "
-                                    "calls in this session, so the rule had no chance to fire."))
-        return moments
-    moments.append(_moment(None, "applicability", "yes",
-                           f"{len(trace['edits'])} code edits → rule applies",
-                           text=f"Edits across {len(set(c['input'].get('file_path','') for c in trace['edits']))} files."))
-    la = trace["last_assistant"]
-    if la:
-        paras = [p.strip() for p in la.strip().split("\n\n") if p.strip()]
-        final_para = paras[-1] if paras else ""
-        sentences = len(re.findall(r"[.!?]+", final_para))
-        has_summary = any(k in la.lower() for k in SUMMARY_KEYWORDS) or sentences > 0
-        has_tech = bool(CODE_EXT.search(la)) or bool(re.search(r"\b(controller|service|schema|route)\b", la.lower()))
-        compliant = has_summary and sentences <= 4 and not has_tech
-        last_ts = next((s["t"] for s in reversed(segs) if s["role"] == "assistant" and s["kind"] == "text"), None)
-        moments.append(_moment(last_ts,
-                               "compliance" if compliant else "violation",
-                               "yes" if compliant else "no",
-                               "Final assistant message",
-                               text=la.strip()[-700:]))
-    return moments
-
-
-def _normalize_path(p):
-    if not p:
-        return ""
-    try:
-        return str(Path(p).expanduser().resolve(strict=False))
-    except Exception:
-        return str(p)
 
 
 def _intent_text_between(prev_user_seg_idx, read_seg_idx, segs):
@@ -2261,7 +3886,7 @@ def _find_user_prompt_seg_before(seg_idx, segs):
 def _moments_for_read_driven(block, file, trace, segs):
     moments = []
     user_prompt = trace["user_prompt"] or ""
-    abs_target = _normalize_path(file.get("abs_path") or file.get("path"))
+    abs_target = _resolve_key(file.get("abs_path") or file.get("path"))
 
     trigger_seg = next(
         (s for s in segs if s["role"] == "user" and s["kind"] in ("text", "command-wrapper")),
@@ -2276,7 +3901,7 @@ def _moments_for_read_driven(block, file, trace, segs):
 
     matching_reads = [
         r for r in trace.get("read_calls", [])
-        if _normalize_path((r.get("input") or {}).get("file_path", "")) == abs_target
+        if _resolve_key((r.get("input") or {}).get("file_path", "")) == abs_target
     ]
 
     if not matching_reads:
@@ -2300,22 +3925,24 @@ def _moments_for_read_driven(block, file, trace, segs):
                 text=_last_sentence_with_causal(intent_text),
             ))
 
-        # Encrypted-thinking hint: count thinking blocks between the user prompt
-        # and this Read. Their content is empty (Anthropic encrypts extended-
-        # thinking), but presence + duration is meaningful.
-        thinking_segs = [s for s in segs[prev_user_idx + 1:r["seg_idx"]]
-                         if s.get("kind") == "thinking"]
-        if thinking_segs and not (intent_text and len(intent_text.strip()) >= 20):
+        # Encrypted-thinking hint: count the *unreadable* thinking blocks
+        # between the user prompt and this Read. Presence + duration is all
+        # they offer. Blocks that did come through readable are left to
+        # `_thinking_corroboration`, or this card would report reasoning as
+        # unreadable while the text of it sits two cards below.
+        unreadable = [s for s in segs[prev_user_idx + 1:r["seg_idx"]]
+                      if s.get("kind") == "thinking" and not (s.get("text") or "").strip()]
+        if unreadable and not (intent_text and len(intent_text.strip()) >= 20):
             # Compute duration from first thinking timestamp to the Read timestamp.
-            t0 = parse_iso(thinking_segs[0].get("t"))
+            t0 = parse_iso(unreadable[0].get("t"))
             t1 = parse_iso(r.get("t"))
             dur = ""
             if t0 and t1:
                 secs = max(0, int((t1 - t0).total_seconds()))
                 dur = f", ~{secs}s" if secs else ""
             moments.append(_moment(
-                thinking_segs[0].get("t"), "thinking-gap", None,
-                f"{len(thinking_segs)} encrypted thinking block{'s' if len(thinking_segs) > 1 else ''}{dur}",
+                unreadable[0].get("t"), "thinking-gap", None,
+                f"{len(unreadable)} encrypted thinking block{'s' if len(unreadable) > 1 else ''}{dur}",
                 text="",  # nothing readable to show
             ))
 
@@ -2333,20 +3960,35 @@ def _moments_for_read_driven(block, file, trace, segs):
     return moments
 
 
-def _moments_for_loose_keyword(block, file, trace, segs):
-    moments = []
-    keywords = _block_keywords(block["content"], trace["user_prompt"])
-    intents = _ranked_topical_segments(segs, keywords, limit=3)
-    if not intents:
-        moments.append(_moment(None, "non-event", "no",
-                               "No topical reasoning detected",
-                               text="No assistant text segment had ≥2 distinctive keywords from this block."))
-        return moments
-    for s in intents:
-        moments.append(_moment(s["t"], "intent", None,
-                               "Agent reasoning (topical)",
-                               text=_last_sentence_with_causal(s["text"])))
-    return moments
+# What each lexical label says on the card. The label names the evidence, so
+# the card has to as well - and the two negative labels are different facts: a
+# block nobody could score is not a block the run left no trace of.
+LEXICAL_LABELS = {
+    lexical.ECHOED: "The run reproduced this block's wording",
+    lexical.TOPICAL: "The run's prose is over-represented in this block's terms",
+    lexical.NO_TRACE: "No lexical trace of this block in the run's prose",
+    lexical.UNSCORABLE: "Not lexically scorable",
+}
+
+
+def _moments_for_lexical(result):
+    """The one card a block earns when its only evidence is shared wording.
+
+    This used to rank the assistant's paragraphs by keyword overlap and file
+    the top three as INTENT, so a Figma design-system block got a
+    TRIGGER-shaped narrative built out of a rate-limiting review. There is no
+    narrative to tell here: the honest report is what the two texts share and
+    that sharing it means nothing, so the tier gets exactly one card and both
+    positive labels stay `co-occurrence`. Even a verbatim quote is self-report.
+    """
+    label = LEXICAL_LABELS[result["label"]]
+    if result["label"] in (lexical.NO_TRACE, lexical.UNSCORABLE):
+        return [_moment(None, "non-event", "no", label, text=result["reason"])]
+    detail = (f"Quoted: \u201c{result['quote']['text']}\u201d"
+              if result.get("quote")
+              else "Shared terms: " + ", ".join(result["significant"][:12]))
+    return [_moment(None, "co-occurrence", None, label,
+                    text=f"{CO_OCCURRENCE_NOTE}\n{result['reason']}\n{detail}")]
 
 
 def assemble_moments(block, file, trace, predicates):
@@ -2358,51 +4000,67 @@ def assemble_moments(block, file, trace, predicates):
     if not file["loaded"]:
         moments.append(_moment(None, "non-event", "no",
                                "Not loaded into context",
-                               text=f"File on disk but not loaded — see file's load condition. "
+                               text=f"File on disk but not loaded - see file's load condition. "
                                     f"User prompt was: \"{(trace['user_prompt'] or '')[:160]}\"."))
         return moments
 
-    if file_kind == "skill":
-        moments.extend(_moments_for_skill_or_command(block, file, trace, segs, "skill"))
-    elif file_kind == "command":
-        moments.extend(_moments_for_skill_or_command(block, file, trace, segs, "command"))
+    if file_kind in ("skill", "command"):
+        moments.extend(_moments_for_skill_or_command(block, file, trace, segs, file_kind))
+        # The badge above these cards can be earned by a structural join - a
+        # step's named file being read while the skill ran, its prescribed
+        # command running - and the invocation cards alone would then say
+        # nothing about what earned it.
+        if any(p["kind"] in STRUCTURAL_KINDS for p in predicates):
+            moments.extend(_moments_for_structural(block, file, trace, segs, predicates))
     elif file_kind == "agent":
         moments.extend(_moments_for_subagent(block, file, trace, segs))
     elif file_kind in ("read", "preloaded", "attached"):
         moments.extend(_moments_for_read_driven(block, file, trace, segs))
     else:
         # global / project / rule / reference: derive from predicates
-        if any(p["kind"] == "path-table" for p in predicates):
-            moments.extend(_moments_for_path_table(block, file, trace, segs, predicates))
         if any(p["kind"] == "command-mention" for p in predicates):
             moments.extend(_moments_for_command_mention(block, file, trace, segs, predicates))
-        if any(p["kind"] == "end-of-message" for p in predicates):
-            moments.extend(_moments_for_end_of_message(block, file, trace, segs))
+        if any(p["kind"] in STRUCTURAL_KINDS for p in predicates):
+            moments.extend(_moments_for_structural(block, file, trace, segs, predicates))
         # Trigger predicate (e.g., # graphify registration in CLAUDE.md): defer to skill-style detection
         if any(p["kind"] == "trigger" for p in predicates):
             for p in [p for p in predicates if p["kind"] == "trigger"]:
                 cmd = p.get("cmd", "")
-                # Same evidence order as the skill files themselves, so a
-                # CLAUDE.md pointer to `/foo` and foo's own SKILL.md can never
-                # disagree about whether foo fired.
-                bare = cmd.lstrip("/")
-                fired = _is_triggered(bare, trace["user_prompt"])
-                wrapper = any(f"/{w['name'].lower()}" == cmd for w in trace["cmd_wrappers"])
-                called = bare in _skill_tool_names(trace["calls"])
-                if fired or wrapper or called:
+                # The predicate's own matcher, so a CLAUDE.md pointer to
+                # `/foo`, foo's own SKILL.md and the badge above this card can
+                # never disagree about whether foo fired.
+                source = _trigger_evidence(cmd, trace)[0]
+                if source in ("skill", "wrapper"):
                     moments.append(_moment(None, "trigger", "yes",
                                            f"`{cmd}` was invoked",
-                                           text=trace["user_prompt"][:400]))
+                                           text=(trace["user_prompt"] or "")[:400]))
+                elif source == "prompt":
+                    # Same refusal as the predicate above: a mention shares a
+                    # name with the command and nothing more.
+                    moments.append(_moment(
+                        None, "co-occurrence", None,
+                        f"User prompt mentioned `{cmd}`, but nothing shows it running",
+                        text=f"{CO_OCCURRENCE_NOTE}\n{(trace['user_prompt'] or '')[:400]}"))
                 else:
                     moments.append(_moment(None, "non-event", "no",
                                            f"`{cmd}` not invoked this run",
                                            text=f"User prompt: \"{(trace['user_prompt'] or '')[:160]}\""))
-        # If nothing matched → loose keyword fallback (skipped for read-style kinds, handled above)
+        # If nothing matched → the lexical tier (skipped for read-style kinds, handled above)
         if not moments:
             if file_kind == "reference":
                 moments.extend(_moments_for_read_driven(block, file, trace, segs))
+            elif (file or {}).get("text_source") == "stale":
+                return [_moment(None, "non-event", "no",
+                                "Not compared with the run",
+                                text=(file or {}).get("text_note") or "")]
             else:
-                moments.extend(_moments_for_loose_keyword(block, file, trace, segs))
+                # The lexical tier gets exactly the one card that builder
+                # returns: corroboration is appended below only where there is
+                # something for it to corroborate, because a second card here
+                # starts reassembling the narrative this tier cannot support.
+                return _moments_for_lexical(_lexical_result(block["content"], trace))
+
+    moments.extend(_thinking_corroboration(block, file, trace, segs))
 
     # Dedup by (kind, label, t, text first 200 chars) preserving first occurrence.
     seen = set()
@@ -2467,7 +4125,7 @@ def _shared_phrase(shingles_a, shingles_b):
     return sorted(common, key=len, reverse=True)[0]
 
 
-def compute_duplicates(files_out, trace, similarity_threshold=0.30, min_words=15):
+def compute_duplicates(files_out, similarity_threshold=0.30, min_words=15):
     """Pairwise near-duplicate detection across blocks from different files.
     Returns list of {idA, idB, similarity, sharedPhrase, tokens, classification}.
 
@@ -2504,6 +4162,8 @@ def compute_duplicates(files_out, trace, similarity_threshold=0.30, min_words=15
                 "shingles": shingles,
                 "wc": wc,
                 "cost": b.get("cost") or {},
+                "status": b.get("status"),
+                "label": b.get("evidenceLabel"),
             })
 
     pairs = []
@@ -2535,11 +4195,11 @@ def compute_duplicates(files_out, trace, similarity_threshold=0.30, min_words=15
             # that could have been deleted, and only its overlapping share.
             tokens = int(min(tokens_a, tokens_b) * sim)
 
-            # Classification — only meaningful when both files were loaded into context
+            # Classification - only meaningful when both files were loaded into context
             if not (a["loaded"] and b["loaded"]):
                 classification = "not-loaded"
             else:
-                classification = _classify_pair(a, b, trace)
+                classification = _classify_pair(a, b)
 
             pairs.append({
                 "idA": a["id"],
@@ -2572,6 +4232,21 @@ def _is_strong(predicate):
     return predicate.get("strength", "strong") == "strong"
 
 
+def _is_exercised(predicate, trace):
+    """Was the behaviour this predicate judges actually attempted this scope?
+
+    Applicability answers "could the rule have fired"; exercise answers "did
+    the run do the kind of thing the rule is about". They part company for a
+    path-conditional rule, whose precondition is the cwd: without this gate a
+    turn that ran no `gh` command at all was reported as a GitHub-account
+    violation, which is how a dozen compliant turns ended up under a red
+    session badge. Predicates whose precondition *is* the exercise (a trigger
+    whose command was invoked, edits that were made) need no separate answer.
+    """
+    check = predicate.get("exercised")
+    return check(trace) if check else predicate["applicable"](trace)
+
+
 def _fired_strongly(predicate, trace):
     """A strong predicate whose precondition was met and whose rule was followed.
 
@@ -2585,21 +4260,19 @@ def _fired_strongly(predicate, trace):
             and predicate["matches"](trace))
 
 
-def _classify_pair(a, b, trace):
-    """Decide whether a session-loaded duplicate pair was used or wasted."""
-    keywords = _block_keywords(a["content"] + "\n" + b["content"], trace["user_prompt"])
-    relevance = _ranked_topical_segments(trace["segs"], keywords, limit=1)
-    if relevance:
-        return "referenced"
-    # Predicate-based fall-through, restricted to the strong tier for the same
-    # reason `assess_block` restricts it: weak evidence is not usage.
-    a_block = {"title": a["title"], "content": a["content"], "level": 2}
-    b_block = {"title": b["title"], "content": b["content"], "level": 2}
-    a_fires = any(_fired_strongly(p, trace) for p in derive_predicates(a_block))
-    b_fires = any(_fired_strongly(p, trace) for p in derive_predicates(b_block))
-    if a_fires or b_fires:
-        return "referenced"
-    return "redundant"
+def _classify_pair(a, b):
+    """`referenced` when either block was used, or its topic was live this session.
+
+    Read off each block's own verdict and lexical label rather than re-judged:
+    a second matcher here let a pair read `referenced` above two blocks that
+    both read `unused`. The lexical label is the topic question a pair asks,
+    so a bare command mention is still honestly `redundant`.
+    """
+    live = ("used", "used-partial")
+    topical = (lexical.ECHOED, lexical.TOPICAL)
+    return ("referenced"
+            if any(x["status"] in live or x["label"] in topical for x in (a, b))
+            else "redundant")
 
 
 def _block_undelivered(block, file):
@@ -2623,12 +4296,24 @@ def _delivery_gap(start, ranges):
     return before, after
 
 
+# A block judged off the disk file carries this at the end of its reason. The
+# text a verdict is about has to be the text the model saw, and where the
+# transcript kept no copy the reader is owed the doubt rather than a verdict
+# that hides it: two greens in one audited session cited a sentence first
+# committed eight hours after the session ended.
+DISK_TEXT_CAVEAT = (" Judged against the file as it is on disk now - the transcript "
+                    "carries no copy of what was delivered, so this wording may "
+                    "postdate the session.")
+
+
 def assess_block(block, file, trace):
     """Evaluate a single block. Returns dict with status, reason, evidence, moments."""
     title = block["title"]
     content = block["content"]
     block_type = classify_block(title, content)
     file_loaded = file["loaded"]
+    text_source = file.get("text_source", "disk")
+    text_note = file.get("text_note")
 
     if not file_loaded:
         not_loaded_moments = [_moment(None, "non-event", "no",
@@ -2641,9 +4326,13 @@ def assess_block(block, file, trace):
             "level": block["level"],
             "content": content,
             "status": "not-loaded",
-            "reason": "Skill/command/agent was not invoked this run — its blocks were not loaded into context.",
+            "reason": "Skill/command/agent was not invoked this run - its blocks were not loaded into context.",
             "evidence": [],
             "moments": not_loaded_moments,
+            # No caveat here or on `undelivered`: neither reason is a claim
+            # about what the block says, so where its text came from changes
+            # nothing about them.
+            "textSource": text_source,
         }
 
     if _block_undelivered(block, file):
@@ -2674,14 +4363,28 @@ def assess_block(block, file, trace):
             "evidence": [],
             "moments": [_moment(None, "non-event", "no",
                                 "Never reached the model", text=reason)],
+            "textSource": text_source,
         }
 
-    predicates = derive_predicates(block)
+    # Text the harness's own log proves is not what it loaded derives nothing.
+    # A predicate is a claim about a rule, and this is not the rule: `content`
+    # here is whatever the file says today, which may be a sentence the session
+    # itself never saw.
+    predicates = [] if text_source == "stale" else derive_predicates(block, file)
+    # Set only by the branch that actually consults the lexical tier. Reading it
+    # back off the trace's memo instead would attach a label to any block whose
+    # content happens to match one that *was* scored.
+    lexical_result = None
     strong = [p for p in predicates if _is_strong(p)]
     weak = [p for p in predicates if not _is_strong(p)]
     applicable = [p for p in strong if p["applicable"](trace)]
+    exercised = [p for p in applicable if _is_exercised(p, trace)]
     fired_applicable = [p for p in applicable if p["matches"](trace)]
-    unfired_applicable = [p for p in applicable if not p["matches"](trace)]
+    # Blame is limited to exercised predicates while credit is not: an
+    # applicable rule the run never exercised has nothing to be unsatisfied
+    # about, and counting it as unsatisfied is what dragged a fully compliant
+    # block down to `used-partial`.
+    unfired_exercised = [p for p in exercised if not p["matches"](trace)]
     weak_hits = [p for p in weak if p["applicable"](trace) and p["matches"](trace)]
 
     evidence = []
@@ -2693,7 +4396,7 @@ def assess_block(block, file, trace):
 
     # Only strong predicates can reach the used/ignored end of the scale.
     if applicable:
-        if fired_applicable and not unfired_applicable:
+        if fired_applicable and not unfired_exercised:
             status = "used"
             reason = (f"{len(fired_applicable)} predicate(s) applied and were satisfied: "
                       + ", ".join(p["label"] for p in fired_applicable))
@@ -2701,35 +4404,59 @@ def assess_block(block, file, trace):
             status = "used-partial"
             reason = (f"Mixed: {len(fired_applicable)} satisfied "
                       f"({', '.join(p['label'] for p in fired_applicable)}); "
-                      f"{len(unfired_applicable)} applied but unsatisfied "
-                      f"({', '.join(p['label'] for p in unfired_applicable)}).")
+                      f"{len(unfired_exercised)} applied but unsatisfied "
+                      f"({', '.join(p['label'] for p in unfired_exercised)}).")
+        elif not exercised:
+            status = "dormant"
+            reason = (f"{len(applicable)} predicate(s) applied but were not exercised - "
+                      "the run never did the kind of thing the rule governs, so there was "
+                      "nothing to follow or break: "
+                      + ", ".join(p["label"] for p in applicable))
         else:
             status = "ignored"
-            reason = (f"{len(applicable)} predicate(s) applied but none were satisfied: "
-                      + ", ".join(p["label"] for p in applicable))
+            reason = (f"{len(exercised)} predicate(s) applied but none were satisfied: "
+                      + ", ".join(p["label"] for p in exercised))
     elif weak_hits:
         status = "possibly-referenced"
-        reason = ("Weak evidence only — "
+        reason = ("Weak evidence only - "
                   + ", ".join(p["label"] for p in weak_hits)
                   + ". The block names something that happened this run, but nothing "
                     "ties the behaviour back to the block.")
+        shared = next((p for p in weak_hits if p["kind"] == "reads-shared-path"), None)
+        if shared:
+            reason += " It " + shared["describe"](trace) + "."
     elif predicates:
         status = "dormant"
-        reason = ("No predicate's preconditions were met this run — the rule didn't apply. "
+        reason = ("No predicate's preconditions were met this run - the rule didn't apply. "
                   "Block was loaded into context but could not have fired.")
+    elif text_source == "stale":
+        # Same reason as the predicates above: the wording here is not what the
+        # model was given, so a coincidental match with it is about nothing.
+        status = "unused"
+        reason = "The wording was not compared with the run."
     else:
-        keywords = [w.lower() for w in re.findall(r"\b[a-zA-Z]{5,}\b", content)][:8]
-        hits_per_kw = {k: trace["all_assistant_text"].lower().count(k) for k in keywords}
-        hits = sum(1 for k, n in hits_per_kw.items() if n > 0)
-        if keywords and hits >= 2:
+        # The lexical tier, and only here: it is consulted when nothing else
+        # has anything to say. Its ceiling is `possibly-referenced` whatever it
+        # finds - shared wording is co-occurrence, and a verbatim quote is the
+        # model reporting on itself.
+        lexical_result = _lexical_result(content, trace)
+        lex = lexical_result
+        if lex["label"] in (lexical.ECHOED, lexical.TOPICAL):
             status = "possibly-referenced"
-            reason = (f"Weak evidence only — loose keyword match, {hits}/{len(keywords)} "
-                      "keywords from the block appear in the assistant's reasoning. Common "
-                      "words match by coincidence, so this is a hint, not compliance.")
-            evidence.append({"label": "keyword overlap", "text": f"{hits}/{len(keywords)} keywords matched"})
+            evidence.append({"label": f"lexical: {lex['label']}", "text": lex["reason"]})
         else:
             status = "unused"
-            reason = "No predicate derivable and no keyword overlap with the assistant's reasoning."
+        # The lexical reason is quoted whole, so the badge and the card stand in
+        # a containment relation and cannot contradict each other; the prefix
+        # only says why the tier was reached at all, which the old reason
+        # ("No predicate derivable and no keyword overlap") carried and the
+        # lexical sentence on its own does not.
+        reason = f"No predicate derivable, so only the wording could be compared. {lex['reason']}"
+
+    if text_note:
+        reason += " " + text_note
+    elif text_source == "disk":
+        reason += DISK_TEXT_CAVEAT
 
     moments = assemble_moments(block, file, trace, predicates)
 
@@ -2742,13 +4469,48 @@ def assess_block(block, file, trace):
         "reason": reason,
         "evidence": evidence,
         "moments": moments,
+        "textSource": text_source,
     }
+    # Appended only where there is one: the aggregate rewrites a block's reason
+    # when the combine rule overrules it, and the caveat has to survive that or
+    # a session-scope verdict sits above a sentence that no longer says which
+    # text it is about.
+    if text_note:
+        out["textNote"] = text_note
+    # Appended, not inserted, and only where the tier actually ran: a block
+    # decided by a Skill call or a compiled check has no lexical claim to make,
+    # and inventing a label for it would read as one.
+    if lexical_result is not None:
+        out["evidenceLabel"] = lexical_result["label"]
+        out["lexical"] = lexical_result
 
     rule_check = _rule_check_for(block, file, trace)
     if rule_check:
         out["ruleCheck"] = rule_check
+        before = (out["status"], out["reason"])
         _apply_rule_check(out, rule_check)
+        if out["status"] != before[0]:
+            # The compiled check decided this block, so the lexical tier's
+            # label is no longer a claim about it.
+            out.pop("evidenceLabel", None)
+            out.pop("lexical", None)
+        if out["reason"] != before[1]:
+            if text_note:
+                out["reason"] += " " + text_note
+            elif text_source == "disk":
+                out["reason"] += DISK_TEXT_CAVEAT
+        # Read after the check has had its say, so the dissent is from the
+        # status the reader actually sees. Appended only where there is one:
+        # an empty record would read as a second opinion that agreed.
+        contested = _contested_from(out["status"], rule_check)
+        if contested:
+            out["contested"] = contested
     return out
+
+
+# The file kinds whose prose is a rule the agent agreed to follow, and so the
+# only ones a compile hint or a mechanical extraction has any business on.
+GUIDELINE_KINDS = ("global", "project", "rule")
 
 
 def _rule_check_for(block, file, trace):
@@ -2757,8 +4519,51 @@ def _rule_check_for(block, file, trace):
     loaded = rule_checks.checks_for_doc(file.get("abs_path") or "")
     # Mechanical extraction only makes sense on a guidelines document. Reading
     # a file does not make its prose a rule the agent agreed to follow.
-    fallback = file.get("kind") in ("global", "project", "rule")
-    return rule_checks.check_block(block, loaded, corpus, fallback=fallback)
+    # Never on text the hook log proves is not what was loaded: the fallback
+    # derives its patterns from the block's own wording, and this wording is
+    # not the rule. A compiled check is unaffected - its patterns were authored
+    # against the rule, and one pinned with a `rule_key` refuses the mismatch
+    # itself.
+    fallback = (file.get("kind") in GUIDELINE_KINDS
+                and file.get("text_source") != "stale")
+    return rule_checks.check_block(block, loaded, corpus, fallback=fallback,
+                                   doc_path=file.get("path") or "",
+                                   judge=trace.get("judge"))
+
+
+# The two statuses that say the trace tied this block to nothing. They are
+# where the code is measurably weakest - the blind-judge experiment counted 84
+# missed compliances against the judge's 28 - so they are the one direction in
+# which a second opinion is worth printing.
+CONTESTABLE_STATUSES = ("unused", "dormant")
+
+
+def _contested_from(status, rule_check):
+    """The judge's dissent from a NOT-USED verdict, or None.
+
+    Deliberately narrow. Judge and code disagree on 43.4% of blocks, and
+    flagging all of that is noise with a confidence score attached. Only the
+    disagreement that points at the code's known hole is reported - the judge
+    reading compliance where the code found nothing - and only when the judge
+    quoted something `_quote_span` located in the evidence it was handed, which
+    is what gives the reader somewhere to go and look.
+
+    A judge `violated` contests nothing, in either direction. That is where its
+    eleven false reds live, and the code's own red path already requires a
+    citation by construction, so there is no silence there for a model to fill.
+
+    This is not a status. It never combines, it never reaches
+    `combine_verdicts`, and it can move no badge.
+    """
+    if status not in CONTESTABLE_STATUSES:
+        return None
+    for f in (rule_check or {}).get("findings") or []:
+        if (f.get("judge") and f.get("judgeVerdict") == "compliant"
+                and f.get("judgeQuote")):
+            return {"judgeVerdict": f["judgeVerdict"],
+                    "quote": f["judgeQuote"],
+                    "reason": f.get("message") or ""}
+    return None
 
 
 def _apply_rule_check(verdict, rule_check):
@@ -2767,28 +4572,138 @@ def _apply_rule_check(verdict, rule_check):
     Only a violation an author signed off on turns the block red, and the
     confidence consulted is that of the violating finding itself - never the
     block's aggregate, which a bystander check could have raised. A mechanically
-    extracted fallback finding is low confidence by construction and stays a
-    note: a false red badge accuses the agent of misconduct it did not commit,
-    which is the failure this whole phase exists to prevent.
+    extracted fallback finding never reaches here as a violation at all - it is
+    reported `unclear` at source - and is low confidence besides: a false red
+    badge accuses the agent of misconduct it did not commit, which is the
+    failure this whole phase exists to prevent.
+
+    A conditional check that reports its obligation *satisfied* is the other
+    half of the same record, and it gives credit for the same reasons a
+    violation takes it away: the rule's antecedent fired, the consequent
+    happened, and the finding names the call. Without it, retiring the prose
+    predicates would have left a session that obeyed a compiled rule a dozen
+    times reading `unused`, and one violating turn would then have repainted
+    the whole session `ignored` - the F-COMBINE failure coming back through the
+    new mechanism.
+
+    Credit is as gated as blame, and deliberately narrower than `clear`.
+    `clear` also covers "the checks ran and matched nothing", which for a
+    forbidden-pattern rule over a coarse scope (any bash command at all, for a
+    shell kind) is the absence of a violation rather than evidence the block
+    was followed - exactly the kind of green this architecture exists to
+    refuse. Only the satisfied stage of a conditional kind says the rule was
+    exercised and met.
     """
-    findings = rule_check["findings"]
+    # The opt-in judge tier's semantic verdicts are advisory: they are listed,
+    # they can weaken the rule-check state, and they are filtered out here so
+    # they can never be the thing that paints the block red or green. A model's
+    # read of a whole file is not a citable finding about a site this tool
+    # established, and the badge is where that difference has to hold.
+    findings = [f for f in rule_check["findings"] if not f.get("advisory")]
     violations = [f for f in findings
                   if f["state"] == "violated" and f["confidence"] in ("high", "medium")]
+    satisfied = [f for f in findings
+                 if f.get("stage") == rule_checks.STAGE_SATISFIED
+                 and f["confidence"] in ("high", "medium")]
+    decided = None
     if violations:
-        first = violations[0]
+        decided = violations[0]
         verdict["status"] = "ignored"
-        verdict["reason"] = (f"Rule check `{first['checkId']}` fired: "
-                             f"{first['path']}:{first['line']} — `{first['match'][:120]}`. "
-                             + (first["message"] or "This rule was broken in code written this run."))
+        verdict["reason"] = (f"Rule check `{decided['checkId']}` fired: "
+                             f"{decided['path']}:{decided['line']} - `{decided['match'][:120]}`. "
+                             + (decided["message"]
+                                or "This rule was broken in code written this run."))
+    elif (satisfied and rule_check["source"] == "checks-file"
+            # `clear` and not merely "no violation among these findings": a
+            # block also carrying an `unclear` or `acknowledged` finding has a
+            # possible violation on it, and one satisfied sibling check must
+            # not paint over it.
+            and rule_check["state"] == "clear"
+            and verdict["status"] != "ignored"):
+        decided = satisfied[0]
+        # A block a prescribed command already lifted keeps its own reason,
+        # but still gets the card: the reviewed check is the stronger record.
+        if verdict["status"] not in ("used", "used-partial"):
+            named = ", ".join(f"`{f['checkId']}`" for f in satisfied[:4])
+            verdict["status"] = "used"
+            verdict["reason"] = (f"Reviewed rule check{'s' if len(satisfied) != 1 else ''} "
+                                 f"{named} {'were' if len(satisfied) != 1 else 'was'} triggered "
+                                 "this run and satisfied.")
+    elif (rule_check["state"] == "not-exercised"
+            and rule_check["source"] == "checks-file"
+            # `dormant` too: a prescribed command that never ran leaves the
+            # predicate's generic reason, and the check says why.
+            and verdict["status"] in ("unused", "dormant")):
+        # "The rule's precondition never came up" is what `dormant` says, and
+        # a reviewed check is the only thing left that can say it now that the
+        # prose predicates are gone. Leaving the badge at `unused` - "no
+        # predicate derivable, no keyword overlap" - would put two different
+        # claims about one record on one screen.
+        verdict["status"] = "dormant"
+        verdict["reason"] = ("Reviewed rule checks ran, but the run never did the kind of "
+                             "thing this rule governs, so there was nothing to follow or "
+                             "break.")
+    # The finding that *decided* the status gets a moment card - and only that
+    # one. Without it, a block the check just painted green or red carries only
+    # its lexical card, whose own text says "nothing in the trace ties the
+    # behaviour back to the block": the badge and the card contradicting each
+    # other, which is the failure the moment kinds were tiered to remove. A
+    # satisfied note that did not decide anything gets no card either, or a
+    # green step would appear under a block whose state is `unclear`.
+    if decided:
+        cite = (f"{decided['path']}:{decided['line']} - {decided['match'][:200]}"
+                if decided.get("match") else (decided.get("message") or ""))
+        verdict["moments"].append(_moment(
+            None, "violation" if violations else "compliance",
+            "no" if violations else "yes",
+            f"Rule check `{decided['checkId']}` - {decided['state']}",
+            text=f"{decided.get('ruleText') or ''}\n{cite}".strip()))
+
     for f in findings:
+        stage = f" ({f['stage']})" if f.get("stage") else ""
+        # A stage report about a conditional that never fired has no call to
+        # quote, and `(tools):0 - ` reads as a citation the reader can go and
+        # check. Its own message is the whole of what is known.
+        text = (f"{f['path']}:{f['line']} - {f['match'][:200]}" if f.get("match")
+                else (f.get("message") or ""))
         verdict["evidence"].append({
-            "label": f"rule check `{f['checkId']}` — {f['state']}",
-            "text": f"{f['path']}:{f['line']} — {f['match'][:200]}",
+            "label": f"rule check `{f['checkId']}` - {f['state']}{stage}",
+            "text": text,
         })
     for nc in rule_check["notCheckable"]:
         verdict["evidence"].append({
             "label": "not mechanically checkable",
             "text": nc.get("why", ""),
+        })
+    # A check pinned to wording the rule no longer carries was applied to
+    # nothing, so this block is unchecked. Leaving that to the page alone read
+    # as silence in the evidence list, which reads as a rule that was followed.
+    for st in rule_check.get("stale") or []:
+        verdict["evidence"].append({
+            "label": f"rule check `{st.get('id', '')}` - stale, not applied",
+            "text": st.get("why", ""),
+        })
+    # The command that closes the gap. A rule nobody compiled is honestly
+    # unchecked; a rule nobody compiled and no way to act on it is a dead end.
+    if rule_check.get("hint"):
+        verdict["evidence"].append({
+            "label": "no reviewed check for this rule",
+            "text": f"{rule_check['hint']}",
+        })
+    # A check whose fixtures no longer reproduce, and a rule whose bucket needs
+    # a judge this run did not have, are both rules that went unchecked. They
+    # are named here rather than left to the page alone: silence about a broken
+    # check reads as a rule that was followed.
+    for d in rule_check.get("demoted") or []:
+        verdict["evidence"].append({
+            "label": f"rule check `{d.get('id', '')}` - demoted to the "
+                     f"`{d.get('bucket', 'judged')}` bucket",
+            "text": d.get("why", ""),
+        })
+    for j in rule_check.get("judged") or []:
+        verdict["evidence"].append({
+            "label": f"rule `{j.get('id', '')}` - bucket `{j.get('bucket', 'judged')}`",
+            "text": j.get("why", ""),
         })
 
 
@@ -2867,12 +4782,16 @@ def chronological_segments(events):
                                 "input": c.get("input", {}), "idx": ev_idx,
                                 "id": c.get("id")})
                 elif c.get("type") == "thinking":
-                    # Claude's extended-thinking blocks. Content is encrypted in
-                    # transcripts (empty `thinking` field + signature), but their
-                    # presence + count + duration is meaningful — useful for
-                    # surfacing "agent reasoned here, even if we can't read it".
+                    # Claude's extended-thinking blocks. Officially the content
+                    # is encrypted (empty `thinking` field + signature), but
+                    # availability is mixed per model and CLI version, so both
+                    # shapes reach us and both are kept: an empty one still
+                    # says "the agent reasoned here" and a readable one is weak
+                    # corroboration. Deliberately absent from
+                    # `assistant_text_segments`, so it can never reach the
+                    # lexical tier's query text and move a verdict.
                     out.append({"t": ts, "role": "assistant", "kind": "thinking",
-                                "text": "", "idx": ev_idx,
+                                "text": (c.get("thinking") or "").strip(), "idx": ev_idx,
                                 "encrypted": bool(c.get("signature"))})
     return out
 
@@ -2907,7 +4826,54 @@ def fmt_offset(start_dt, ts):
     return f"+{h}h{m:02d}m"
 
 
-def build_trace(events, calls, asst_segments, user_prompt):
+def governing_prompts_for_calls(events, calls, turns=None):
+    """The prompt of the turn each call falls in, one record per call.
+
+    `ctx-allow` lets written code carry a deliberate exception at the violation
+    site; a transcript has none, so "the user typed this action in the prompt
+    that caused the call" - the strongest rationale there is - was invisible to
+    the rule checker, and a reviewed high-confidence record red-badged six real
+    sessions for doing what they were told.
+
+    The join is positional and nothing else: turns already run prompt to
+    prompt, so the governing prompt is the one of the turn whose event range
+    contains the call. Deciding it by matching words in the prompt would be the
+    single-user prose matching step 6 retired, and it would read a prompt
+    written in another language as silence.
+
+    Containment rather than "the nearest earlier prompt": a turn absorbs every
+    event before its own prompt, so a call the agent made before the human
+    first spoke belongs to the first turn and the two readings differ there.
+    A turn with no real user prompt - a session driven entirely by a
+    task-notification - yields None, because absence must never read as
+    authorisation.
+
+    `turns` is the caller's own turn list, in the same event coordinates as
+    `calls`. The payload splits with the compaction boundaries, and a split
+    taken here from the prompts alone would number every turn after a
+    compaction low - the finding would cite a turn number the drill-down and
+    `--query` contradict. It also carries the prompt in flight onto a
+    compaction-carved turn, which holds none of its own: reporting nothing
+    there is the absence rule firing on a turn that *was* authorised.
+    """
+    if turns is None:
+        turns = split_into_turns(events)
+    out = []
+    for c in calls:
+        idx = c.get("eventIdx")
+        rec = None
+        if idx is not None:
+            for t in turns:
+                if t["startEventIdx"] <= idx < t["endEventIdx"]:
+                    text = (t.get("userPrompt") or "").strip()
+                    if text:
+                        rec = {"text": text, "turnIndex": t["index"]}
+                    break
+        out.append(rec)
+    return out
+
+
+def build_trace(events, calls, asst_segments, user_prompt, turns=None):
     """Bundle everything predicates and moment-assemblers need to introspect."""
     bash_cmds = [c["input"].get("command", "") for c in calls if c["name"] == "Bash"]
     edits = [c for c in calls if c["name"] in ("Edit", "Write", "MultiEdit", "NotebookEdit")]
@@ -2934,10 +4900,23 @@ def build_trace(events, calls, asst_segments, user_prompt):
         for idx, s in enumerate(segs)
         if s["kind"] == "tool_use" and s.get("name") == "Read"
     ]
+    written_chunks = _written_chunks(calls)
+    # Copies rather than the originals: every other consumer of `calls` reads
+    # what the transcript carried, and only the rule corpus needs the turn.
+    corpus_calls = [dict(c, governingPrompt=g) for c, g in
+                    zip(calls, governing_prompts_for_calls(events, calls, turns))]
+    written_paths = _written_paths({"edits": edits, "bash_cmds": bash_cmds})
+    # The lexical tier reads assistant prose and nothing else - tool inputs and
+    # results never enter, and what the agent quoted back out of a file it read
+    # is stripped, or every block of that file matches itself.
+    query_segments = lexical.clean_query_segments(
+        [s["text"] for s in asst_segments],
+        copied=[s["text"] for s in segs if s["kind"] == "tool_result"])
     return {
         "bash_cmds": bash_cmds,
         "edits": edits,
-        "rule_corpus": rule_checks.build_corpus(calls),
+        "rule_corpus": rule_checks.build_corpus(
+            corpus_calls, shell_writes=[w for w in written_chunks if w.get("shell")]),
         "all_assistant_text": all_assistant_text,
         "last_assistant": last_assistant,
         "cwd": cwd,
@@ -2948,6 +4927,15 @@ def build_trace(events, calls, asst_segments, user_prompt):
         "cmd_wrappers": cmd_wrappers,
         "tool_results_by_call_id": tool_results_by_call_id,
         "read_calls": read_calls_with_seg,
+        "written_chunks": written_chunks,
+        "written_paths": written_paths,
+        "written_text": "\n\n".join(ch["text"] for ch in written_chunks),
+        "query_segments": query_segments,
+        "lexical_q": lexical.query_stats(query_segments),
+        # Filled in by `_compute_payload`, which is the only caller that knows
+        # the session's whole block collection. A trace without it scores on
+        # D2 alone rather than reporting less.
+        "lexical_bg": None,
     }
 
 
@@ -3319,6 +5307,38 @@ def resolve_session_id(per_session_data, prefix):
 
 # ---------- main ----------
 
+def _split_query_argv(argv, option_strings):
+    """Lift `--query`'s values out of argv before argparse sees them.
+
+    A block id can legitimately start with `-` (`file_slug` slices the 40-char
+    tail of a long path after stripping, so the tail often begins on a
+    separator), and argparse reads any such value as an unknown option whatever
+    `nargs` says. `--` is no help: it disables option parsing for everything
+    after it, so `--field` and `--all` would stop working. A value here ends
+    the list only when it is one of this parser's own option strings, which
+    keeps the ids the tool's own listings print addressable.
+    """
+    rest, query = [], None
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if query is None and tok.startswith("--query"):
+            if tok.startswith("--query="):
+                query = [tok.split("=", 1)[1]]
+                i += 1
+                continue
+            if tok == "--query":
+                query = []
+                i += 1
+                while i < len(argv) and argv[i] not in option_strings:
+                    query.append(argv[i])
+                    i += 1
+                continue
+        rest.append(tok)
+        i += 1
+    return rest, query
+
+
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--transcript", type=Path, default=None,
@@ -3352,10 +5372,42 @@ def parse_args():
                    help="With --query: print one field in full, unbounded "
                         "(block: title/status/reason/content/moments; agent: prompt/result; "
                         "session or turn: prompt).")
+    # The LLM audit tier (research doc §9.1). On by default since 2026-11-04:
+    # a tier nobody switches on is a tier that does not exist. The cost is
+    # stated rather than softened - session content is sent to the model
+    # through the user's own Claude Code auth - and `--no-judge` is the
+    # offline path, which the tier's presence may never change.
+    p.add_argument("--no-judge", action="store_true",
+                   help="Run offline: rules this tool cannot decide deterministically are "
+                        "reported as unchecked instead of being asked of a model. By "
+                        "default they are asked through your own Claude Code auth, which "
+                        "sends session content to the model.")
+    p.add_argument("--judge-model", type=str, default=None,
+                   help="The model id to ask (default: sonnet). Part of the "
+                        "verdict cache key.")
+    p.add_argument("--judge-cache", type=Path, default=None,
+                   help="The verdict cache file "
+                        "(default: $CTXIDE_JUDGE_CACHE, else ~/.claude/ctxide/judge-cache.json).")
+    p.add_argument("--judge-max-calls", type=int, default=200,
+                   help="Cap on model calls in one run (default: 200). "
+                        "Cached verdicts are free and do not count.")
     p.add_argument("--all", action="store_true",
                    help="With --query: print every row of a listing instead of the first "
                         f"{QUERY_ROW_LIMIT}.")
-    return p.parse_args()
+    p.add_argument("--compile-status", action="store_true",
+                   help="With --query: list every rule document in the project, its "
+                        "compile state and its bucket mix, and name the command that "
+                        "compiles the next one.")
+    # Read off the parser rather than hand-listed: a list that had to be kept
+    # in step would silently start eating whichever flag someone added next.
+    option_strings = {s for a in p._actions for s in a.option_strings}
+    rest, query = _split_query_argv(sys.argv[1:], option_strings)
+    args = p.parse_args(rest)
+    if query is not None:
+        if not query:
+            p.error("argument --query: expected at least one argument")
+        args.query = query
+    return args
 
 
 def _fmt_dur(sec):
@@ -3437,14 +5489,14 @@ def _bounded(value, full_cmd):
     if len(text) <= QUERY_FIELD_LIMIT:
         return text
     return (text[:QUERY_FIELD_LIMIT]
-            + f" … [{len(text) - QUERY_FIELD_LIMIT} more chars — full value: {full_cmd}]")
+            + f" … [{len(text) - QUERY_FIELD_LIMIT} more chars - full value: {full_cmd}]")
 
 
 def _bounded_rows(rows, full_cmd, show_all):
     if show_all or len(rows) <= QUERY_ROW_LIMIT:
         return list(rows)
     return list(rows[:QUERY_ROW_LIMIT]) + [
-        f"… {len(rows) - QUERY_ROW_LIMIT} more rows — full listing: {full_cmd}"]
+        f"… {len(rows) - QUERY_ROW_LIMIT} more rows - full listing: {full_cmd}"]
 
 
 def _resolve_query_session(data, prefix):
@@ -3486,10 +5538,22 @@ def _find_query_block(session_data, block_id):
 def _moment_verdict(moment):
     """A moment's verdict, readable when it has none.
 
-    Informational moments (agent reasoning, non-events) carry `verdict: null`,
-    which would otherwise print as the literal `None`.
+    Informational moments (non-events, co-occurrence, corroboration) carry
+    `verdict: null`, which would otherwise print as the literal `None`.
     """
     return moment.get("verdict") or "-"
+
+
+def _moment_line(moment):
+    """One moment as the CLI prints it, kind included.
+
+    The kind is what carries the epistemic weight after the moment rework - a
+    co-occurrence card and an action card can read almost alike in their label
+    - and the page shows it as a chip. Dropping it here would leave the CLI
+    unable to say which of the two a reader is looking at.
+    """
+    return (f"{moment.get('kind', '')}: {moment.get('label', '')} "
+            f"- {moment.get('text', '')}")
 
 
 def _query_field(obj, field, valid):
@@ -3497,8 +5561,7 @@ def _query_field(obj, field, valid):
         raise QueryError(f"error: unknown field `{field}`. Valid fields: {', '.join(valid)}")
     value = obj.get(field)
     if field == "moments":
-        return [f"[{_moment_verdict(m)}] {m.get('label', '')} — {m.get('text', '')}"
-                for m in (value or [])]
+        return [f"[{_moment_verdict(m)}] {_moment_line(m)}" for m in (value or [])]
     return [str(value if value is not None else "")]
 
 
@@ -3512,10 +5575,27 @@ def query_sessions(data, show_all=False):
                     f"{_bounded(s.get('promptPreview'), _query_cmd(s['id'], '--field prompt'))}")
     lines = [f"{len(rows)} session(s) in {(data.get('project') or {}).get('cwd', '')}"]
     lines += _bounded_rows(rows, _query_cmd("sessions", "--all"), show_all)
+    # The listing is a fresh reader's first command, so the compile gap belongs
+    # here too: finding it three commands deeper reads as a limit of the tool.
+    hint = _compile_hint_line(data)
+    if hint:
+        lines.append(hint)
     if rows:
         first = (data.get("sessions") or [{}])[0].get("id", "")
         lines.append(f"next: {_query_cmd(first, 'turns')}")
     return lines
+
+
+def _compile_hint_line(data):
+    """The active session's compile hint, or "" when nothing is left to compile.
+
+    One session's hint stands for the listing's because the rule documents are
+    a property of the project, not of a session.
+    """
+    per = data.get("perSession") or {}
+    active = per.get(data.get("activeSessionId")) or {}
+    hint = (active.get("ruleCompile") or {}).get("hint", "")
+    return f"note: {hint}" if hint else ""
 
 
 def query_session(sid, session_data, field=None):
@@ -3523,7 +5603,7 @@ def query_session(sid, session_data, field=None):
     if field:
         return _query_field({"prompt": sess.get("userPrompt")}, field, ("prompt",))
     counts = session_data.get("counts") or {}
-    return [
+    lines = [
         f"session  {sid}",
         f"when     {_when(sess.get('startTime'))}",
         f"turns    {session_data.get('turnCount', 0)}",
@@ -3531,9 +5611,90 @@ def query_session(sid, session_data, field=None):
         f"{counts.get('filesEdited', 0)} files edited",
         f"tokens   {_usage_brief(session_data.get('usage'))}",
         f"prompt   {_bounded(sess.get('userPrompt'), _query_cmd(sid, '--field prompt'))}",
-        f"next: {_query_cmd(sid, 'turns')}",
-        f"      {_query_cmd(sid, 'blocks')}",
     ]
+    lines += _compile_lines(session_data.get("ruleCompile") or {})
+    lines += _waste_lines(session_data)
+    lines.append(f"next: {_query_cmd(sid, 'turns')}")
+    lines.append(f"      {_query_cmd(sid, 'blocks')}")
+    return lines
+
+
+def _waste_lines(session_data):
+    """The one-line answer to "what did this session's context cost, and for what"."""
+    roll = session_data.get("wastedContext") or {}
+    if not roll.get("loadedFiles"):
+        return []
+    head = (f"context  {roll['loadedFiles']} loaded file(s), "
+            f"{_fmt_tokens(roll['totalTokens'])} attributed")
+    if not roll["judged"]:
+        return [head + (f" ({roll['note']})" if roll.get("note")
+                        else " (relevance not judged this run)")]
+    return [head + f"; {roll['notPertinent']} of {roll['asked']} judged "
+                   f"not pertinent, costing {_fmt_tokens(roll['tokens'])}"]
+
+
+def _compile_lines(roll):
+    """The compile state of the project's rule documents, one line per document.
+
+    The same baked figures the page shows: a rule the compiler never saw is
+    reported unchecked in both views, and named the same way in both.
+    """
+    if not roll.get("rules"):
+        return []
+    lines = [f"rules    {roll.get('compiled', 0)} of {roll['rules']} compiled, "
+             f"{roll.get('refused', 0)} reviewed as not checkable, "
+             f"{roll.get('uncompiled', 0)} not compiled, "
+             f"{roll.get('stale', 0)} stale"]
+    for d in roll.get("docs") or []:
+        lines.append(f"  {d['path']} - {d['compiled']}/{d['rules']} compiled "
+                     f"({_bucket_mix(d)})"
+                     + (f", {d['uncompiled']} not compiled" if d["uncompiled"] else "")
+                     + (f", {d['stale']} stale" if d["stale"] else ""))
+    if roll.get("hint"):
+        lines.append(f"todo     {roll['hint']}")
+    return lines
+
+
+def _bucket_mix(doc):
+    """The three answers the compiler gave this document's rules, in words.
+
+    `deterministic` is the only one that makes the report decidable with the
+    judge off, so a document that compiled entirely into `judged` has to read
+    as what it is rather than as a compiled count.
+    """
+    return (f"{doc.get('deterministic', 0)} deterministic, "
+            f"{doc.get('judged', 0)} judged, "
+            f"{doc.get('notCheckable', 0)} reviewed as not checkable")
+
+
+def query_compile_status(data):
+    """Every rule document in the project, its state, its mix, and what to run.
+
+    Project scope, not session scope: the list is every rule document on disk
+    under the project, the ones this session never opened included, so it
+    answers the same way whichever session is active.
+    """
+    per = data.get("perSession") or {}
+    roll = ((per.get(data.get("activeSessionId")) or {}).get("ruleCompile")) or {}
+    docs = roll.get("docs") or []
+    if not docs:
+        return ["no rule documents in this project - nothing to compile"]
+    lines = [f"{len(docs)} rule document(s) in "
+             f"{(data.get('project') or {}).get('cwd', '')}"]
+    for d in docs:
+        lines.append(f"{d.get('state', ''):<11s} {d['path']} - "
+                     f"{d['rules']} rule(s): {_bucket_mix(d)}"
+                     + (f", {d['uncompiled']} not compiled" if d["uncompiled"] else "")
+                     + (f", {d['stale']} stale" if d["stale"] else ""))
+        if d.get("checksFile"):
+            # Printed as `source` rather than as the checks file's path: the
+            # value is the checks file's own `source` field where it has one,
+            # and labelling an author-written string as a path would send the
+            # reader looking for a file that is not there.
+            lines.append(f"            source: {d['checksFile']}")
+    if roll.get("hint"):
+        lines.append(f"next: {roll['hint']}")
+    return lines
 
 
 def query_turns(sid, session_data, show_all=False):
@@ -3544,7 +5705,7 @@ def query_turns(sid, session_data, show_all=False):
                     f"{(t.get('counts') or {}).get('totalToolCalls', 0)} calls  "
                     f"{_usage_brief(t.get('usage'))}  {_agents_note(t)}"
                     f"{_bounded(t.get('promptPreview'), _query_cmd(sid, t['id'], '--field prompt'))}")
-    lines = [f"session {sid} — {len(turns)} turn(s)"]
+    lines = [f"session {sid} - {len(turns)} turn(s)"]
     lines += _bounded_rows(rows, _query_cmd(sid, "turns", "--all"), show_all)
     if turns:
         lines.append(f"next: {_query_cmd(sid, turns[0]['id'], 'blocks')}")
@@ -3583,7 +5744,7 @@ def query_blocks(sid, session_data, turn=None, show_all=False):
         for b in f["blocks"]:
             rows.append(f"{b['id']}  [{b.get('status', '')}]  {f['path']}: {b.get('title', '')}")
             first_id = first_id or b["id"]
-    lines = [f"session {sid} — {label} — {len(rows)} block(s)"]
+    lines = [f"session {sid} - {label} - {len(rows)} block(s)"]
     lines += _bounded_rows(rows, _blocks_listing_cmd(sid, turn, "--all"), show_all)
     if first_id:
         lines.append(f"next: {_query_cmd(sid, first_id)}")
@@ -3614,7 +5775,7 @@ def query_files(sid, session_data, turn=None, show_all=False):
     rows = [f"{f.get('id', '')}  [{_file_group(f)}]  {f['path']}: "
             f"{(f.get('rollup') or {}).get('summary', '')}" for f in ordered]
     n_active = sum(1 for f in files if _file_group(f) == "active")
-    lines = [f"session {sid} — {label} — {len(files)} context file(s): "
+    lines = [f"session {sid} - {label} - {len(files)} context file(s): "
              f"{n_active} active, {len(files) - n_active} quiet"]
     lines += _bounded_rows(rows, _files_listing_cmd(sid, turn, "--all"), show_all)
     if ordered:
@@ -3708,6 +5869,36 @@ def _agent_groups(session_data):
     return out
 
 
+def query_waste(sid, session_data, show_all=False):
+    """What each loaded file cost, ordered worst-value first.
+
+    Printed straight off the baked `wastedContext`, so the page's waste list and
+    this one cannot disagree about which file the reader should look at.
+    """
+    roll = session_data.get("wastedContext") or {}
+    rows_in = roll.get("files") or []
+    head = (f"session {sid} - session scope - {roll.get('loadedFiles', 0)} loaded "
+            f"file(s) by attributed cost")
+    if roll.get("judged"):
+        head += (f"; {roll['notPertinent']} of {roll['asked']} judged not pertinent, "
+                 f"costing {_fmt_tokens(roll['tokens'])}")
+    lines = [head]
+    if not roll.get("judged"):
+        # Said out loud rather than left to the empty column: cost alone is not
+        # waste, and a reader who does not know the question was never asked
+        # will read the top of this list as the answer to it.
+        lines.append(roll.get("note")
+                     or "relevance was not judged this run - cost only. The mode "
+                        "line below says why no model was asked.")
+    rows = [f"{r['id']}  [{r['relevanceLabel']}]  "
+            f"{r['path']}: {_fmt_tokens(r['tokens'])} over {r['sentCount']} request(s), "
+            f"resident in {r['turns']} turn(s)"
+            + (f" - {r['reason']}" if r.get("reason") else "")
+            for r in rows_in]
+    lines += _bounded_rows(rows, _query_cmd(sid, "waste", "--all"), show_all)
+    return lines
+
+
 def _agents_listing_cmd(sid, turn, *extra):
     return (_query_cmd(sid, turn["id"], "agents", *extra) if turn is not None
             else _query_cmd(sid, "agents", *extra))
@@ -3737,7 +5928,7 @@ def query_agents(sid, session_data, turn=None, show_all=False):
             f"{spawn_turn}  {_fmt_ms(a.get('durationMs'))}  "
             f"{_fmt_tokens(a['tokens']) if a.get('tokens') is not None else NO_FIGURE}  "
             f"lane {a.get('lane', 0)}  {group}  {a.get('name', '')}")
-    lines = [f"session {sid} — {label} — {len(agents)} subagent run(s)"]
+    lines = [f"session {sid} - {label} - {len(agents)} subagent run(s)"]
     lines += _bounded_rows(rows, _agents_listing_cmd(sid, turn, "--all"), show_all)
     if agents:
         lines.append(f"next: {_query_cmd(sid, _agent_address(agents[0]['id']))}")
@@ -3809,8 +6000,20 @@ def query_block(sid, session_data, block_id, turn=None, field=None):
         f"file     {file_rec['path']} ({'loaded' if file_rec.get('loaded') else 'not loaded'})",
         f"title    {block.get('title', '')}",
         f"status   {block.get('status', '')}",
+        # Which text the verdict is about. A block judged off today's disk file
+        # may be judged against wording that postdates the session, and a
+        # reader who cannot see which one it was cannot weigh the verdict.
+        f"text     {block.get('textSource', 'disk')}",
         f"reason   {_bounded(block.get('reason'), reason_cmd)}",
     ]
+    # What the wording alone can say, named as evidence rather than as a
+    # verdict. The page shows it as a chip beside the status, so the CLI has to
+    # print it or the two describe the same block with different information.
+    if block.get("evidenceLabel"):
+        lex = block.get("lexical") or {}
+        detail = ", ".join(lex.get("terms") or [])[:120]
+        lines.append(f"lexical  {block['evidenceLabel']}"
+                     + (f" (coverage {lex.get('coverage')}; terms: {detail})" if detail else ""))
     # A rule that could not be checked has to say so here too: the CLI is the
     # agent-facing view, and silence there reads as "the rule was followed".
     rule_check = block.get("ruleCheck")
@@ -3818,26 +6021,91 @@ def query_block(sid, session_data, block_id, turn=None, field=None):
         lines.append(f"rule     {rule_check['state']} ({rule_check['confidence']} "
                      f"confidence, {rule_check['source']})")
         for f in rule_check.get("findings") or []:
-            lines.append(f"  [{f['state']}] {f['checkId']} — "
-                         f"{f['path']}:{f['line']} {f['match'][:120]}")
+            # The stage is what separates "the rule never came up" from "the
+            # rule was broken", and the page shows it as its own line, so the
+            # CLI has to carry it or the two describe the record differently.
+            stage = f" {f['stage']}" if f.get("stage") else ""
+            # A verdict a model gave and one a fixture-gated pattern gave are
+            # different kinds of claim, and the page shows them differently, so
+            # the CLI has to as well.
+            who = (" judge/advisory" if f.get("advisory")
+                   else " judge" if f.get("judge") else "")
+            # A finding with nothing to cite has its message as the whole of
+            # what it says, so it takes the em dash's place rather than sitting
+            # after a second one.
+            tail = (f" - {f['path']}:{f['line']} {f['match'][:120]}" if f.get("match")
+                    else f" - {f['message']}" if f.get("message") else "")
+            lines.append(f"  [{f['state']}]{stage}{who} {f['checkId']}{tail}")
+            # The instruction that caused the cited call, verbatim. Without it
+            # a reader cannot tell an agent acting unbidden from one doing what
+            # it was told, which is the whole of the difference between a
+            # violation and a false red.
+            gov = f.get("governingPrompt")
+            if gov:
+                lines.append(f"  [prompt] turn {gov.get('turnIndex')}, call "
+                             f"{gov.get('callIndex')}: {gov.get('text', '')[:300]}")
+            auth = f.get("authorisation")
+            if auth:
+                # A refused question and an answered one are different facts:
+                # one says the user asked for this, the other says the call
+                # tried to pick its own answer and the violation stands.
+                tag = "injection" if auth.get("injection") else "authorised"
+                lines.append(f"  [{tag}] {auth.get('note', '')} - "
+                             f"{auth.get('reason', '')}")
         for nc in rule_check.get("notCheckable") or []:
             lines.append(f"  [why] {nc.get('why', '')}")
+        # A check pinned to wording the rule no longer carries was applied to
+        # nothing. Saying so here, with the command that re-compiles it, is the
+        # difference between an honest gap and silence.
+        for st in rule_check.get("stale") or []:
+            lines.append(f"  [stale] {st.get('id', '')} - {st.get('why', '')}")
+        for d in rule_check.get("demoted") or []:
+            lines.append(f"  [demoted] {d.get('id', '')} - {d.get('why', '')}")
+        for j in rule_check.get("judged") or []:
+            lines.append(f"  [{j.get('bucket', 'judged')}] {j.get('id', '')} - "
+                         f"{j.get('why', '')}")
+        if rule_check.get("hint"):
+            lines.append(f"  [todo] {rule_check['hint']}")
+    # Not a verdict and not a badge - a second reader's dissent, with the words
+    # it quoted so the first reader can go and look. The page shows the same
+    # three fields, so the CLI has to print them or the two describe one block
+    # differently.
+    contested = block.get("contested")
+    if contested:
+        lines.append(f"contested judge said {contested['judgeVerdict']}: "
+                     f"`{contested['quote'][:120]}` - {contested['reason'][:300]}")
     lines.append(f"moments  {len(block.get('moments') or [])}")
     for m in block.get("moments") or []:
-        text = _bounded(f"{m.get('label', '')} — {m.get('text', '')}", moments_cmd)
-        lines.append(f"  [{_moment_verdict(m)}] {text}")
+        lines.append(f"  [{_moment_verdict(m)}] {_bounded(_moment_line(m), moments_cmd)}")
     lines.append(f"next: {_query_cmd(sid, block_id, '--field content')}")
     return lines
 
 
-def run_query(data, address, field=None, show_all=False):
+def run_query(data, address, field=None, show_all=False, compile_status=False):
     """Answer one address against the baked payload. Returns the lines to print.
 
     Read-only by construction: it touches nothing but `data`, which is why the
     query path can never leave an HTML artifact behind.
+
+    Every answer ends with the mode it was produced in, the same string the
+    page header shows: a verdict a model was behind and one it was not read
+    identically otherwise.
     """
+    lines = _answer(data, address, field=field, show_all=show_all,
+                    compile_status=compile_status)
+    # Never under `--field`, which exists to print one value and nothing else:
+    # a footer there lands in whatever the caller piped it into.
+    if field:
+        return lines
+    return lines + [f"mode: {data.get('judgeMode') or JUDGE_MODE_OFF}"]
+
+
+def _answer(data, address, field=None, show_all=False, compile_status=False):
     if not address:
         raise QueryError(f"error: --query needs an address. Start with: {_query_cmd('sessions')}")
+    # Project scope, so it answers the same whatever address asked for it.
+    if compile_status:
+        return query_compile_status(data)
     head = address[0]
     if head == "sessions":
         if len(address) > 1:
@@ -3857,13 +6125,22 @@ def run_query(data, address, field=None, show_all=False):
     if rest:
         raise QueryError(f"error: unexpected address `{' '.join(rest)}`. "
                          f"An address is <session> [turn-N] "
-                         f"[turns|files|blocks|agents|<file-id>|<block-id>|agent-<id>].")
-    if token in ("turns", "files", "blocks", "agents"):
+                         f"[turns|files|blocks|agents|waste|<file-id>|<block-id>|"
+                         f"agent-<id>].")
+    if token in ("turns", "files", "blocks", "agents", "waste"):
         if field:
             raise QueryError(f"error: --field addresses one session, turn, block "
                              f"or agent, not the `{token}` listing.")
         if token == "turns":
             return query_turns(sid, session_data, show_all=show_all)
+        if token == "waste":
+            # Session scope only: relevance is judged against what the session
+            # did, so a turn-scoped waste list would answer a question the
+            # payload does not carry an answer to.
+            if turn is not None:
+                raise QueryError("error: `waste` is a session-scope listing. "
+                                 f"Try: {_query_cmd(sid, 'waste')}")
+            return query_waste(sid, session_data, show_all=show_all)
         if token == "files":
             return query_files(sid, session_data, turn=turn, show_all=show_all)
         if token == "agents":
@@ -3918,8 +6195,10 @@ def cmd_query(args):
 
     all_paths, active_path = select_transcripts(args)
     sessions, per_session_data, active_id = bake_sessions(all_paths, active_path, args)
-    data = build_data(os.getcwd(), sessions, per_session_data, active_id)
-    for line in run_query(data, address, field=args.field, show_all=args.all):
+    data = build_data(os.getcwd(), sessions, per_session_data, active_id,
+                      judge=getattr(args, "judge_runner", None))
+    for line in run_query(data, address, field=args.field, show_all=args.all,
+                          compile_status=args.compile_status):
         print(line)
 
 
@@ -3969,8 +6248,12 @@ ACTIVE_BLOCK_STATUSES = frozenset({"used", "used-partial", "ignored",
                                    "possibly-referenced", "undelivered"})
 
 
+@functools.lru_cache(maxsize=8192)
 def _resolve_key(path):
     """Filesystem-identity key for a path, for joining activity to a file.
+
+    Memoized: resolving touches the filesystem, and the path-join predicates
+    ask about the same handful of paths once per block.
 
     The activity counters are keyed by the raw `file_path` a tool input carried
     and context files by their `abs_path`, which most - but not all - of the
@@ -3978,8 +6261,10 @@ def _resolve_key(path):
     a symlinked home (/var vs /private/var on macOS) or a `~` in a tool input
     from reporting every file as untouched, which looks plausible.
     """
+    if not path:
+        return ""
     try:
-        return str(Path(path).resolve())
+        return str(Path(path).expanduser().resolve())
     except Exception:
         return str(path)
 
@@ -4017,12 +6302,13 @@ def _annotate_rollup(rec):
     edits = activity.get("edits", 0)
     total = len(blocks)
     matched = counts["used"] + counts["used-partial"]
+    violated = _violated_count(blocks)
     # A rule that fired is one the trace tied to an outcome, followed or not.
     fired = matched + counts["ignored"]
 
-    if counts["ignored"]:
+    if violated:
         summary = (f"{fired} rule{'s' if fired != 1 else ''} fired, "
-                   f"{counts['ignored']} violated")
+                   f"{violated} violated")
     elif edits:
         summary = (f"edited {edits} time{'s' if edits != 1 else ''}; "
                    f"{matched} of {total} sections matched the trace")
@@ -4042,9 +6328,350 @@ def _annotate_rollup(rec):
     }
 
 
+def _violated_count(blocks):
+    """How many of these blocks a violation was found in, at this scope.
+
+    A scope with both compliant and violating turns combines to `used-partial`
+    (see `combine_verdicts`), so counting `ignored` alone would headline a
+    session "nothing violated" over a turn that plainly did. The aggregate
+    carries `violatingTurns` for exactly that case.
+    """
+    return sum(1 for b in blocks
+               if b["status"] == "ignored" or b.get("violatingTurns"))
+
+
+# The rule-document filenames the harness loads by convention. A nested one is
+# delivered only when the harness injects it or something reads it, so the
+# project's rule documents are a strict superset of the session's.
+RULE_DOC_NAMES = ("CLAUDE.md", "AGENTS.md", "AGENTS.override.md")
+
+# Directories a rule document under them would not be the project's own.
+_RULE_SCAN_SKIP = {"node_modules", "dist", "build", "vendor", "target",
+                   "venv", "__pycache__", "site-packages"}
+
+
+@functools.lru_cache(maxsize=8)
+def project_rule_documents(project_dir):
+    """Every rule document on disk under the project, as minimal file records.
+
+    The compile-status screen answers for the project, so a document this
+    session never opened still has to be on it: a reader who sees every listed
+    document compiled must not still have uncompiled rules a directory down.
+    Cached per project because the walk would otherwise run once per turn.
+    """
+    root = Path(project_dir)
+    found = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames
+                             if d not in _RULE_SCAN_SKIP
+                             and (not d.startswith(".") or d == ".claude"))
+        found += [Path(dirpath) / fn for fn in sorted(filenames)
+                  if fn in RULE_DOC_NAMES]
+    ignored = _git_ignored(root, found)
+    out = []
+    for f in found:
+        if str(f) in ignored:
+            continue
+        try:
+            text = f.read_text(errors="replace")
+        except OSError:
+            continue
+        ap = str(f.resolve())
+        out.append({"kind": "project", "abs_path": ap,
+                    "path": _display_path(ap), "blocks": parse_claude_md(text)})
+    return tuple(out)
+
+
+def _git_ignored(root, paths):
+    """Which of these paths git ignores, as strings. Empty where git cannot say.
+
+    A frozen transcript corpus or a vendored checkout under the project is
+    input data, not the project's own rules - and listing another project's
+    CLAUDE.md as work to do buries the documents the reader can act on.
+    """
+    if not paths:
+        return set()
+    try:
+        proc = subprocess.run(["git", "-C", str(root), "check-ignore", "--stdin"],
+                              input="\n".join(str(p) for p in paths),
+                              capture_output=True, text=True, timeout=20)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return set()
+    return {ln for ln in proc.stdout.splitlines() if ln}
+
+
+def _rule_compile_rollup(context_files, project_dir=None):
+    """Which of this project's rule documents have reviewed checks, and what to run.
+
+    Read off the documents on disk rather than off the verdicts: an uncompiled
+    rule reports `not-checkable`, which reads as a limit of the tool when the
+    truth is that nobody has compiled it yet. The first report over a project
+    is the onboarding step, so it has to name the count and the one command
+    that closes it.
+
+    Scope is the project, not the session: the loaded documents come first (a
+    nested CLAUDE.md the harness injected is already one of them), and the walk
+    adds the rest. What the walk already covers is keyed on the guideline-kind
+    files only - a nested CLAUDE.md the session merely *read* enters as a read
+    file, so keying on every loaded path dropped it from both halves and made
+    the screen list fewer documents the more of them a session opened.
+    """
+    docs = []
+    totals = Counter()
+    scanned = project_rule_documents(str(project_dir)) if project_dir else ()
+    guideline = [f for f in context_files if f["kind"] in GUIDELINE_KINDS]
+    loaded_paths = {f.get("abs_path") for f in guideline}
+    for f in guideline + [d for d in scanned
+                          if d["abs_path"] not in loaded_paths]:
+        status = rule_checks.compile_status(
+            f["blocks"], rule_checks.checks_for_doc(f.get("abs_path") or ""))
+        # A document that states no rules has nothing to compile, and listing it
+        # would make every project look like it has pending work.
+        if not status["rules"]:
+            continue
+        totals.update({k: v for k, v in status.items() if isinstance(v, int)})
+        docs.append(dict(status, path=f["path"], kind=f["kind"],
+                         id=file_slug(f["abs_path"])))
+
+    out = {k: totals.get(k, 0)
+           for k in ("rules", "compiled", "refused", "stale", "uncompiled")}
+    pending = [d["path"] for d in docs if d["uncompiled"]]
+    drifted = [d["path"] for d in docs if d["stale"]]
+    if pending:
+        # Counted in documents, not rules: the reader's next action is to run
+        # the command once per document, and a count of rules tells them how
+        # much prose is unchecked rather than how much work is in front of them.
+        out["hint"] = (f"{len(pending)} rule document"
+                       f"{'s' if len(pending) != 1 else ''} not compiled - "
+                       f"{rule_checks.compile_hint(pending)}")
+    elif drifted:
+        out["hint"] = (f"{out['stale']} check{'s' if out['stale'] != 1 else ''} stale - "
+                       f"{rule_checks.compile_hint(drifted, stale=True)}")
+    else:
+        out["hint"] = ""
+    out["docs"] = docs
+    out.update({b: totals.get(b, 0) for b in rule_checks.COMPILE_BUCKETS})
+    return out
+
+
+# ---------- 11c. wasted context: cost x relevance ----------
+
+# Bounds on what one relevance question is allowed to carry. A digest is a
+# reminder of what the session was about, not a transcript: past a few prompts
+# the question stops being answerable and starts being a summarisation task.
+_DIGEST_PROMPTS = 12
+_DIGEST_PROMPT_CHARS = 300
+_SUMMARY_TITLES = 30
+_SUMMARY_OPENING_CHARS = 600
+
+# Ordering rank, worst first. `None` (nothing was asked) sits with
+# `undecidable` deliberately: an unasked question and an unanswerable one are
+# the same amount of knowledge, and sorting either below a judged-pertinent
+# file would claim the tier said something it did not.
+_RELEVANCE_RANK = {"not-pertinent": 0, "undecidable": 1, None: 1, "pertinent": 2}
+
+RELEVANCE_LABELS = {
+    "pertinent": "pertinent",
+    "not-pertinent": "not pertinent this session",
+    "undecidable": "undecidable",
+}
+
+
+def task_digest(turn_payloads, fallback_prompt=""):
+    """What this session was asked to do, as the relevance question sees it.
+
+    Every real user prompt in order, clipped: the first prompt alone is what a
+    session *started* as, and a run that pivoted three turns in would have every
+    later file judged against a task it no longer had.
+    """
+    prompts = [(t.get("userPrompt") or "").strip() for t in turn_payloads or []]
+    prompts = [p for p in prompts if p]
+    if not prompts and fallback_prompt:
+        prompts = [fallback_prompt.strip()]
+    lines = []
+    for i, p in enumerate(prompts[:_DIGEST_PROMPTS], 1):
+        clipped = p[:_DIGEST_PROMPT_CHARS]
+        lines.append(f"{i}. {clipped}" + ("…" if len(p) > _DIGEST_PROMPT_CHARS else ""))
+    extra = len(prompts) - _DIGEST_PROMPTS
+    if extra > 0:
+        lines.append(f"… and {extra} further prompt(s) not listed")
+    return "\n".join(lines)
+
+
+def _file_relevance_summary(rec):
+    """What a file is about, from what this tool already parsed out of it.
+
+    Titles plus the opening of the first section, never the whole file: the
+    question is what the file is *about*, and a model handed 40k characters is
+    being asked to summarise rather than to place it.
+    """
+    blocks = rec.get("blocks") or []
+    titles = [b.get("title", "") for b in blocks[:_SUMMARY_TITLES] if b.get("title")]
+    opening = ""
+    for b in blocks:
+        if b.get("content"):
+            opening = b["content"][:_SUMMARY_OPENING_CHARS]
+            break
+    parts = [f"path: {rec.get('path', '')}",
+             f"kind: {rec.get('kind', '')}"]
+    if rec.get("name"):
+        parts.append(f"name: {rec['name']}")
+    if titles:
+        parts.append("sections: " + "; ".join(titles))
+    if len(blocks) > _SUMMARY_TITLES:
+        parts.append(f"… and {len(blocks) - _SUMMARY_TITLES} further section(s)")
+    if opening:
+        parts.append("opening:\n" + opening)
+    return "\n".join(parts)
+
+
+def _relevance_content(rec):
+    """The text the cache keys this file on.
+
+    The path is hashed with the content because two files can legitimately parse
+    to the same blocks - an empty one especially - and one cached answer serving
+    both would put a verdict about one file's name under another's.
+    """
+    body = "\n".join(b.get("content", "") for b in rec.get("blocks") or [])
+    return f"{rec.get('path', '')}\n{body}"
+
+
+def judge_relevance(files, digest, judge):
+    """Ask, per loaded file, whether it pertained to this session. Annotates in place.
+
+    Expensive files first, because the budget is finite and the question is
+    about what the run paid for: spending the last call on a file that cost 30
+    tokens answers nothing anyone was asking. A loaded file with no attributed
+    cost is skipped for the same reason and stays honestly "not judged" - it is
+    counted out of `asked`, never in among the ones that came back fine.
+    """
+    import judge_tier
+    ordered = sorted((f for f in files if f.get("loaded")
+                      and (f.get("cost") or {}).get("tokens")),
+                     key=lambda f: -f["cost"]["tokens"])
+    for rec in ordered:
+        request = judge_tier.relevance_request(
+            rec.get("path", ""), _file_relevance_summary(rec), digest,
+            file_hash=judge_tier.content_hash(_relevance_content(rec)),
+            model=judge.model)
+        if request["fileInjections"]:
+            # Never asked: this file tried to pick its own answer, so whatever
+            # came back would be the one answer we know nothing about.
+            # `undecidable` costs the file nothing, which is the only safe
+            # direction - the mirror, silently trusting it, is the attack.
+            rec["relevance"] = {"verdict": judge_tier.RELEVANCE_UNKNOWN,
+                                "reason": judge_tier.INJECTION_NOTE,
+                                "cached": False, "injection": True}
+            continue
+        answer = judge.ask(request)
+        out = {"verdict": answer["verdict"], "reason": answer.get("reason", ""),
+               "cached": bool(answer.get("cached"))}
+        if answer.get("unavailable"):
+            out["unavailable"] = True
+        rec["relevance"] = out
+
+
+def carried_invocations(events, calls, asst_segs, turns):
+    """Per turn index, what earlier turns invoked: `{"names", "running"}`.
+
+    `names` is every skill or command an earlier turn invoked. Each turn is
+    otherwise judged on its own slice, so a skill invoked in turn 0 read
+    `not-loaded` in turn 1 and the work it drove there could never earn credit.
+
+    `running` is `{"name", "ts"}` for the last invocation before the turn
+    starts. Only the template join reads it, bounded by the next invocation of
+    a different document; see `_carried_window` for why reads, writes and
+    commands in a later turn are not credited to it. Only invocation records count - a `/name` the prompt merely
+    mentions loads nothing in a later turn, as it runs nothing in its own.
+    """
+    out, names, last = {}, set(), None
+    for t in turns:
+        out[t["index"]] = {"names": frozenset(names), "running": last}
+        e_slice, c_slice, _s = turn_slice(events, calls, asst_segs, t)
+        segs = chronological_segments(e_slice)
+        invs = _invocations({"calls": c_slice,
+                             "cmd_wrappers": [s for s in segs if s["kind"] == "command-wrapper"]})
+        names |= {n for _ts, n in invs if n}
+        if invs and invs[-1][1]:
+            last = {"name": invs[-1][1], "ts": invs[-1][0]}
+    return out
+
+
+def resident_turns(turns, turn_payloads, file_items, nonresident_by_turn):
+    """Per file id, the turn indices it sat in context for.
+
+    A file is resident from the first turn that loaded it until a compaction
+    evicts it. Merely being listed in a turn is not residency: a skill the
+    session invoked in turn 9 is in every turn's file list, and counting those
+    reported it resident in 29 turns where it had been in context for 2.
+    A file no turn loaded keeps the whole session, which is how it was priced.
+    """
+    first = {}
+    for tp in turn_payloads:
+        for f in tp["contextFiles"]:
+            if f.get("loaded"):
+                first.setdefault(re.sub(r"^turn\d+-", "", f["id"]), tp["index"])
+    out = {}
+    for abs_path, _chars, rec in file_items:
+        if not rec.get("loaded"):
+            continue
+        start = first.get(rec["id"], 0)
+        out[rec["id"]] = {t["index"] for t in turns
+                          if t["index"] >= start
+                          and abs_path not in (nonresident_by_turn.get(t["index"]) or ())}
+    return out
+
+
+def wasted_context(files, resident, note=""):
+    """What each loaded file cost, how long it sat there, and whether it earned it.
+
+    Ordered by relevance first and cost second. With the tier off every file
+    ranks the same, so the list is the cost ordering the offline build always
+    produced - the judgment reorders it, it does not create it.
+    """
+    rows = []
+    for f in files:
+        if not f.get("loaded"):
+            continue
+        cost = f.get("cost") or {}
+        rel = f.get("relevance") or {}
+        rows.append({
+            "id": f.get("id", ""),
+            "path": f.get("path", ""),
+            "tokens": cost.get("tokens", 0),
+            "sentCount": cost.get("sentCount", 0),
+            "turns": len(resident.get(f.get("id", ""), ())),
+            "relevance": rel.get("verdict"),
+            "relevanceLabel": RELEVANCE_LABELS.get(rel.get("verdict"), "not judged"),
+            "reason": rel.get("reason", ""),
+            **({"unavailable": True} if rel.get("unavailable") else {}),
+        })
+    rows.sort(key=lambda r: (_RELEVANCE_RANK.get(r["relevance"], 1), -r["tokens"]))
+    return dict(_waste_rollup(rows), note=note, files=rows)
+
+
+def _waste_rollup(rows):
+    """The counts every view prints, baked once.
+
+    `asked` is separate from `notPertinent` because a run whose budget ran out
+    part way leaves the rest of the list unjudged, and a header reading "3 not
+    pertinent" over two hundred rows invites the reader to take the other 197 as
+    judged fine.
+    """
+    wasted = [r for r in rows if r["relevance"] == "not-pertinent"]
+    # A call the backend never answered asked nothing.
+    asked = [r for r in rows if r["relevance"] and not r.get("unavailable")]
+    return {"loadedFiles": len(rows),
+            "asked": len(asked),
+            "notPertinent": len(wasted),
+            "tokens": sum(r["tokens"] for r in wasted),
+            "totalTokens": sum(r["tokens"] for r in rows),
+            "judged": bool(asked)}
+
+
 def _violation_headline(files):
     """One line naming the most consequential thing a turn or session did."""
-    n = sum(1 for f in files for b in (f.get("blocks") or []) if b["status"] == "ignored")
+    n = sum(_violated_count(f.get("blocks") or []) for f in files)
     if not n:
         return "nothing violated"
     return f"{n} rule{'s' if n != 1 else ''} violated"
@@ -4052,7 +6679,8 @@ def _violation_headline(files):
 
 def _compute_payload(events, calls, asst_segs, args, project_dir, id_prefix="", hook_facts=None,
                      nonresident_paths=None, usage_entries=None, history_chars=None,
-                     nonresident_by_request=None):
+                     nonresident_by_request=None, skill_listing=None, lexical_bg=None,
+                     delivered=None, carried=None, turns=None):
     """Run the assessment pipeline against an event/call/segment bundle.
 
     Used twice in process_session: once over the full session (the aggregate)
@@ -4072,14 +6700,36 @@ def _compute_payload(events, calls, asst_segs, args, project_dir, id_prefix="", 
     `nonresident_by_request`) prices the files: pass the whole session's series
     for the aggregate and the turn's slice for a turn, and per-turn costs sum
     back to the session's.
+
+    `delivered` is the delivered-text map for this scope (see
+    `load_context_files`): pass `delivered_at(versions, 0)` for the aggregate
+    and the turn's own start index for a turn, so a document the session
+    rewrote is judged, in each turn, against the wording that turn was given.
+
+    `carried` is `carried_invocations`' answer for a turn: the documents an
+    earlier turn invoked (loaded here) and the one still running at its start
+    (which only the template join reads, see `_carried_window`).
+
+    `lexical_bg` is the session's term backgrounds. The aggregate builds its
+    own and every turn is handed that same one, so a block's distinctive terms
+    cannot change between the turns a status is combined from and the aggregate
+    it is combined into.
     """
     user_prompt = first_real_user_prompt(events)
     timeline = build_timeline(events)
     reads, edits_counter = file_activity(calls)
-    trace = build_trace(events, calls, asst_segs, user_prompt)
+    trace = build_trace(events, calls, asst_segs, user_prompt, turns=turns)
+    # The one hop from the CLI to the block assessment. None on the default
+    # path, which is what makes every rule check below fully offline.
+    trace["judge"] = getattr(args, "judge_runner", None)
+    trace["carried_running"] = (carried or {}).get("running")
 
     context_files = load_context_files(events, calls, project_dir, args, user_prompt,
-                                       hook_facts=hook_facts)
+                                       hook_facts=hook_facts, skill_listing=skill_listing,
+                                       delivered=delivered,
+                                       carried_names=(carried or {}).get("names") or ())
+    trace["lexical_bg"] = lexical_bg or lexical.build_background(
+        context_files, trace["query_segments"])
     files_out = []
     file_items = []  # (abs_path, chars, rec) parallel to files_out, for pricing
     for f in context_files:
@@ -4182,6 +6832,13 @@ def _compute_payload(events, calls, asst_segs, args, project_dir, id_prefix="", 
             "edits": edits_counter.most_common(),
         },
         "trace": trace,  # caller uses this for compute_duplicates; not emitted
+        "fileItems": file_items,  # not emitted: the caller re-prices on residency
+        # Also not emitted: the caller hands it to every turn so the term
+        # backgrounds are the session's, not each slice's.
+        "lexicalBackground": trace["lexical_bg"],
+        # Same as `trace`: the caller bakes this at session scope only. The
+        # rule documents on disk are a property of the project, not of a turn.
+        "ruleCompile": _rule_compile_rollup(context_files, project_dir),
     }
 
 
@@ -4260,25 +6917,43 @@ def process_session(transcript_path, args):
     attach_subagent_transcripts(agent_data["agents"], transcript_path)
     nonresident_by_request = _nonresident_by_request(series, turns, nonresident_by_turn)
 
+    # What the model was actually handed, per file and per point in the
+    # session. Derived once over the whole transcript because a turn's own
+    # slice rarely contains the read that recovered the text.
+    versions = delivered_versions(events)
+
     # Aggregate ("All turns") payload: keeps today's exact shape and behaviour.
     aggregate = _compute_payload(events, calls, asst_segs, args, project_dir,
                                  hook_facts=hook_facts, usage_entries=series,
                                  history_chars=history_chars,
-                                 nonresident_by_request=nonresident_by_request)
+                                 nonresident_by_request=nonresident_by_request,
+                                 delivered=delivered_at(versions, 0),
+                                 turns=turns)
     _insert_compaction_rows(aggregate["timeline"], compaction_records)
     # Detected once over the whole session: a break is a transition between two
     # consecutive requests, and a per-turn series would miss every break that
     # happens across a turn boundary.
     breaks = cache_breaks(series)
     _insert_cache_break_rows(aggregate["timeline"], breaks)
+    # Lifted to the session because the harness injects it once. See
+    # `load_context_files`'s `skill_listing`.
+    session_attach = extract_attachments(events)
+    skill_listing = {"present": session_attach["skill_listing_present"],
+                     "entries": session_attach["skill_listing"]}
     turn_payloads = []
+    carried = carried_invocations(events, calls, asst_segs, turns)
     for t in turns:
         e_slice, c_slice, s_slice = turn_slice(events, calls, asst_segs, t)
         p = _compute_payload(e_slice, c_slice, s_slice, args, project_dir,
                              id_prefix=f"turn{t['index']}-", hook_facts=hook_facts,
                              nonresident_paths=nonresident_by_turn.get(t["index"]),
                              usage_entries=usage_for_turn(series, t),
-                             history_chars=history_chars)
+                             history_chars=history_chars,
+                             skill_listing=skill_listing,
+                             lexical_bg=aggregate["lexicalBackground"],
+                             delivered=delivered_at(versions, t["startEventIdx"]),
+                             carried=carried.get(t["index"]),
+                             turns=[_rebased_turn(t)])
         _insert_cache_break_rows(p["timeline"], _breaks_within(breaks, t))
         turn_payloads.append({
             "id": f"turn-{t['index']}",
@@ -4308,7 +6983,7 @@ def process_session(transcript_path, args):
     # Per PRD: the aggregate's per-block status must be derived from per-turn
     # statuses (combine rule), so the "All turns" view can never disagree with
     # any individual turn's verdict. We patch statuses in place on the aggregate
-    # block records — the rest of the verdict object (moments, evidence, title,
+    # block records - the rest of the verdict object (moments, evidence, title,
     # content) keeps its session-wide assessment, which is the most informative
     # view at aggregate scope.
     if turn_payloads:
@@ -4322,12 +6997,67 @@ def process_session(transcript_path, args):
             for b in f["blocks"]:
                 statuses = per_block_statuses.get(b["id"])
                 if statuses:
+                    own = b["status"]
                     b["status"] = combine_verdicts(statuses)
+                    # Some turn tied this block to the run after all, so the
+                    # silence the judge was dissenting from is gone. Leaving
+                    # the flag would put "the judge read this as used" beside a
+                    # verdict that already says so.
+                    if b["status"] not in CONTESTABLE_STATUSES:
+                        b.pop("contested", None)
+                    # Same rule as `delivery` and `hook`: the key appears only
+                    # when there is something to report. Without it a mixed
+                    # scope's downgrade to `used-partial` would leave the file
+                    # rollup and the session headline saying nothing was
+                    # violated over a turn whose badge is red.
+                    if statuses.count("ignored"):
+                        b["violatingTurns"] = statuses.count("ignored")
+                    # Rewrite the reason only where the combine rule overruled
+                    # the aggregate's own assessment - that is the record that
+                    # read "status ignored" above "applied and were satisfied".
+                    # Where the two agree the existing sentence already
+                    # describes the status it sits under.
+                    if b["status"] != own:
+                        b["reason"] = combined_reason(b["status"], statuses)
+                        if b.get("textNote"):
+                            b["reason"] += " " + b["textNote"]
+                        elif b.get("textSource") == "disk":
+                            b["reason"] += DISK_TEXT_CAVEAT
         # The rollups computed inside _compute_payload scored the session-wide
         # statuses; recompute them over the combined ones the aggregate now
         # carries, or the file summary contradicts the block list beneath it.
         for f in aggregate["contextFiles"]:
             _annotate_rollup(f)
+
+    # Re-priced once residency is known: the aggregate's own pass charged a file
+    # on every request of the session, so a skill first invoked in turn 9 was
+    # billed for the eight turns before it existed in context.
+    resident = resident_turns(turns, turn_payloads, aggregate["fileItems"], nonresident_by_turn)
+    if turn_payloads:
+        absent = {t["index"]: {p for p, _c, rec in aggregate["fileItems"]
+                               if rec["id"] in resident and t["index"] not in resident[rec["id"]]}
+                  for t in turns}
+        aggregate["attribution"] = _annotate_costs(
+            aggregate["fileItems"], series,
+            nonresident_by_request=_nonresident_by_request(series, turns, absent),
+            history_chars=history_chars)
+
+    # Session scope only, like `ruleCompile`: the question is whether a file
+    # pertained to what this *session* did, and asking it per turn would both
+    # multiply the calls and answer a question nobody has ("did the migrations
+    # doc pertain to turn 7?").
+    digest = task_digest(turn_payloads, aggregate["userPrompt"])
+    judge = aggregate["trace"].get("judge")
+    note = ""
+    if judge is not None and digest:
+        judge_relevance(aggregate["contextFiles"], digest, judge)
+    elif judge is not None:
+        # A transcript with no real user prompt has no task to be relevant to.
+        # Asking anyway would spend a call per file on an empty question, and
+        # every such session would then share one cache entry per file.
+        note = ("no user prompt in this session, so there was nothing to judge "
+                "each file's relevance against")
+    waste = wasted_context(aggregate["contextFiles"], resident, note=note)
 
     # Pull aggregate values back out for the existing top-level keys.
     user_prompt = aggregate["userPrompt"] or None
@@ -4346,7 +7076,7 @@ def process_session(transcript_path, args):
     session_id = next((e.get("sessionId") for e in events if e.get("sessionId")), transcript_path.stem)
     version = next((e.get("version") for e in events if e.get("version")), "")
 
-    duplicates = compute_duplicates(files_out, trace)
+    duplicates = compute_duplicates(files_out)
 
     summary = {
         "id": session_id,
@@ -4397,19 +7127,42 @@ def process_session(transcript_path, args):
         # Surfaced rather than swallowed: a notification that matches no spawn
         # means an agent silently lost its result and reads as never returning.
         "unmatchedNotifications": agent_data["unmatchedNotifications"],
+        "ruleCompile": aggregate["ruleCompile"],
+        "taskDigest": digest,
+        "wastedContext": waste,
     }
     summary["duplicatePairs"] = len(duplicates)
     summary["redundantPairs"] = sum(1 for d in duplicates if d["classification"] == "redundant")
     summary["duplicateTokens"] = sum(d["tokens"] for d in duplicates)
+    # Counts and the hint are cheap enough for the picker; the per-document
+    # breakdown stays in per_session, like every other heavy roll-up.
+    summary["ruleCompile"] = {k: v for k, v in aggregate["ruleCompile"].items()
+                              if k != "docs"}
+    # Same split as everywhere else: the counts are cheap enough for the picker,
+    # the per-file list stays in per_session.
+    summary["wastedContext"] = {k: v for k, v in waste.items() if k != "files"}
+    # Counted off the final payload, after the combine has dropped the flags it
+    # overruled, so the number and the blocks beneath it cannot disagree. Zero
+    # is baked rather than omitted: a reader has to be able to tell "the judge
+    # agreed everywhere" from "nobody asked a second opinion".
+    contested = sum(1 for f in per_session["contextFiles"] for b in f["blocks"]
+                    if b.get("contested"))
+    per_session["contestedBlocks"] = contested
+    summary["contestedBlocks"] = contested
     return summary, per_session
 
 
-def build_data(cwd, sessions, per_session_data, active_id, compare=None):
+def build_data(cwd, sessions, per_session_data, active_id, compare=None, judge=None):
     """Assemble the object baked into the page.
 
     The `compare` key is omitted entirely when no comparison was requested, so
     a default build serialises byte-for-byte as it did before compare existed.
+
+    `judgeMode` is computed here rather than in the template because the page
+    and `--query` both name it, and a mode worked out twice is a mode the two
+    views can disagree about.
     """
+    mode, unavailable = judge_mode(judge)
     data = {
         "project": {
             "cwd": cwd,
@@ -4421,6 +7174,9 @@ def build_data(cwd, sessions, per_session_data, active_id, compare=None):
     }
     if compare is not None:
         data["compare"] = compare
+    data["judgeMode"] = mode
+    if unavailable:
+        data["judgeUnavailable"] = unavailable
     return data
 
 
@@ -4461,6 +7217,99 @@ def select_transcripts(args):
     return all_paths, active_path
 
 
+# The three modes a report can be produced in, named in the page header and in
+# every `--query` answer. A reader must never have to guess whether a model was
+# behind a verdict.
+JUDGE_MODE_JUDGED = "judged"
+JUDGE_MODE_OFF = "offline (--no-judge)"
+
+CONFIG_ENV = "CTXIDE_CONFIG"
+DEFAULT_CONFIG_PATH = Path.home() / ".claude" / "ctxide" / "config.json"
+NOTICE_KEY = "judgeNoticeShown"
+
+
+def config_path(override=None):
+    if override:
+        return Path(override)
+    env = os.environ.get(CONFIG_ENV, "").strip()
+    return Path(env) if env else DEFAULT_CONFIG_PATH
+
+
+def judge_notice(model=None, config=None, stream=None):
+    """Say once per machine what the default run sends, and to whom.
+
+    A notice, not a gate: the tier is on by default, nobody reads a README
+    before their first run, and a prompt would make the tool unusable in a
+    script. Printed on stderr so it can never land in a `--query` answer, and
+    recorded in the config file so it does not become a nag. Returns whether it
+    was printed.
+
+    A config file that cannot be read or written costs the user a repeated
+    notice, never a failed bake: this is the least important thing in the run.
+    """
+    import judge_tier
+    path = config_path(config)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    if data.get(NOTICE_KEY):
+        return False
+    print(
+        "note: the rule judge is on by default. Rules this tool cannot decide "
+        "deterministically are sent - with the code, prompts and rule text they "
+        f"are about - to Anthropic's `{model or judge_tier.DEFAULT_MODEL}` model "
+        "through your own Claude Code CLI auth. No judge answer can award a green "
+        f"or a red badge. Verdicts are cached at {judge_tier.cache_path()}. "
+        "Run with --no-judge to stay offline. (This notice prints once.)",
+        file=stream or sys.stderr)
+    data[NOTICE_KEY] = True
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n",
+                        encoding="utf-8")
+    except OSError:
+        pass
+    return True
+
+
+def judge_mode(judge):
+    """(mode, unavailable reason) for the report, from the runner that was used.
+
+    A judge that could not be reached is reported as the offline run it in fact
+    produced, naming the reason: degrading silently would let a reader take a
+    page of unchecked rules for a page of checked ones.
+    """
+    if judge is None:
+        return JUDGE_MODE_OFF, None
+    reason = judge.unavailable_reason()
+    if reason:
+        return f"offline (judge unavailable: {reason})", reason
+    return JUDGE_MODE_JUDGED, None
+
+
+def make_judge(args):
+    """The judge runner, or None under `--no-judge`.
+
+    Imported lazily, which is what keeps `--no-judge` a genuinely offline path:
+    with the flag on, the module that can send session content to a model is
+    never loaded at all.
+    """
+    if getattr(args, "no_judge", False):
+        return None
+    import judge_tier
+    # `or` would be wrong on the budget: `--judge-max-calls 0` is a deliberate
+    # dry run, and turning it into the default would spend two hundred calls
+    # the user asked not to make.
+    budget = getattr(args, "judge_max_calls", None)
+    return judge_tier.Judge(model=getattr(args, "judge_model", None),
+                            cache=getattr(args, "judge_cache", None),
+                            max_calls=judge_tier.DEFAULT_MAX_CALLS
+                            if budget is None else budget)
+
+
 def bake_sessions(all_paths, active_path, args):
     """Run the pipeline over every path. Returns (sessions, per_session, active_id).
 
@@ -4470,6 +7319,11 @@ def bake_sessions(all_paths, active_path, args):
     sessions = []
     per_session_data = {}
     active_id = None
+    # One runner for the whole bake, so its cache and its call budget span every
+    # session rather than resetting per transcript.
+    args.judge_runner = make_judge(args)
+    if args.judge_runner is not None:
+        judge_notice(model=args.judge_runner.model)
     for path in all_paths:
         try:
             summary, data = process_session(path, args)
@@ -4482,6 +7336,10 @@ def bake_sessions(all_paths, active_path, args):
             active_id = summary["id"]
     if active_id is None and sessions:
         active_id = sessions[0]["id"]
+    if args.judge_runner:
+        # On stderr, so it never lands in a `--query` answer: what the tier cost
+        # is a fact about the run, not about the session being reported.
+        print(args.judge_runner.summary(), file=sys.stderr)
     return sessions, per_session_data, active_id
 
 
@@ -4530,7 +7388,8 @@ def main():
         id_b = compare_id(per_session_data, args.compare[1])
         compare = compare_sessions(per_session_data[id_a], per_session_data[id_b])
 
-    data = build_data(os.getcwd(), sessions, per_session_data, active_id, compare=compare)
+    data = build_data(os.getcwd(), sessions, per_session_data, active_id,
+                      compare=compare, judge=getattr(args, "judge_runner", None))
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     # Escape sequences that would otherwise break out of the surrounding <script> tag.
@@ -4560,7 +7419,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Agent Context IDE — Real Session</title>
+<title>Agent Context IDE - Real Session</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
@@ -4668,7 +7527,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .rc-clear .rc-state { color: var(--green); }
   .rc-not-exercised .rc-state, .rc-not-checkable .rc-state { color: var(--text-dim); }
   .rc-not-checkable { border-style: dashed; }
+  .rc-judge { font-size: 9px; text-transform: uppercase; letter-spacing: 0.4px; border: 1px dashed var(--border); color: var(--text-dim); padding: 0 4px; border-radius: 3px; }
   .rc-conf { font-size: 9px; text-transform: uppercase; letter-spacing: 0.4px; border: 1px solid var(--border); color: var(--text-dim); padding: 0 4px; border-radius: 3px; margin-left: 6px; vertical-align: middle; }
+  /* An action the reader can take, not a verdict: readable, never coloured
+     like a finding. */
+  .rulecheck .rc-todo { color: var(--text); font-style: italic; }
+
+  /* The onboarding line. It sits above the file list because a project whose
+     rules were never compiled has to learn that from its first report. */
+  .compile-bar { border: 1px dashed var(--border); border-radius: 6px; padding: 8px 12px; margin-bottom: 12px; font-size: 12px; color: var(--text-dim); }
 
   .source-tag {
     display: inline-block; font-size: 9px; color: var(--text-dim);
@@ -4863,6 +7730,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .agent-notloaded { border-style: dashed; }
   .agent-notloaded code { font-family: monospace; font-size: 11px; color: var(--text); word-break: break-all; }
   .block-reason { color: var(--text-dim); font-size: 11px; }
+  .judge-mode { font-family: monospace; font-size: 10px; color: var(--text-dim); margin-left: 10px; }
   .scope-badge { display: inline-block; padding: 2px 7px; border-radius: 10px; background: var(--panel-2); border: 1px solid var(--border); font-size: 10px; color: var(--text-dim); font-family: monospace; letter-spacing: 0.3px; }
   .scope-badge.turn { color: var(--accent); border-color: var(--accent); }
   .block .scope-badge { margin-left: 6px; }
@@ -4890,6 +7758,17 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .detail-section .reason.dormant { border-left-color: var(--text-dim); }
   .detail-section .reason.not-loaded { border-left-color: var(--gray); }
   .detail-section .reason.undelivered { border-left-color: var(--purple); }
+  .lex-chip { margin-left: 10px; font-size: 10px; padding: 2px 7px; border-radius: 10px;
+              border: 1px dashed var(--border); color: var(--text-dim); font-weight: 400;
+              text-transform: none; letter-spacing: 0; }
+  .lex-echoed { border-style: solid; color: var(--green-soft); }
+  .src-transcript { border-style: solid; }
+  .src-disk { color: var(--amber); }
+  .src-stale { color: var(--red); border-style: solid; }
+  /* Deliberately uncoloured: this is a second reader's dissent, not a verdict,
+     and anything that reads as green or red here would be the badge the judge
+     is never allowed to award. */
+  .contested-chip { border-style: dotted; color: var(--text-dim); }
   .ev-card { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; }
   .ev-card .label { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 4px; }
   .ev-card .text { font-family: monospace; font-size: 11px; color: var(--text); word-break: break-word; white-space: pre-wrap; max-height: 220px; overflow-y: auto; }
@@ -4923,6 +7802,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .moment.kind-violation::before  { background: var(--red); }
   .moment.kind-non-event::before  { background: var(--gray); border: 1px dashed var(--text-dim); }
   .moment.kind-omission::before   { background: transparent; box-shadow: 0 0 0 1px var(--gray) inset, 0 0 0 2px var(--panel); }
+  /* The two non-causal kinds share the dashed, dimmed treatment of a
+     non-event: they must not read as a step in the causal chain above them. */
+  .moment.kind-co-occurrence::before,
+  .moment.kind-corroboration::before {
+    background: transparent; border: 1px dashed var(--text-dim);
+  }
 
   /* Encrypted-thinking gap: distinct purple-tinted card with lock icon */
   .moment.kind-thinking-gap {
@@ -4954,6 +7839,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .moment.kind-intent { border-left: 3px solid var(--purple); }
   .moment.kind-action { border-left: 3px solid var(--green); }
   .moment.kind-condition, .moment.kind-applicability { border-left: 3px solid var(--amber); }
+  .moment.kind-co-occurrence, .moment.kind-corroboration {
+    border-left: 3px dashed var(--text-dim); opacity: 0.9;
+  }
 
   .moment-head {
     display: flex; align-items: center; gap: 8px;
@@ -4976,6 +7864,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .moment.kind-compliance .moment-kind  { color: var(--green); }
   .moment.kind-violation .moment-kind   { color: var(--red); }
   .moment.kind-non-event .moment-kind   { color: var(--gray); }
+  .moment.kind-co-occurrence .moment-kind,
+  .moment.kind-corroboration .moment-kind { color: var(--text-dim); }
   .moment-verdict { font-size: 12px; font-weight: 700; }
   .moment-verdict.yes { color: var(--green); }
   .moment-verdict.no  { color: var(--red); }
@@ -5134,6 +8024,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .file-row .path { font-family: monospace; font-size: 11px; color: var(--text); word-break: break-all; }
   .file-row .path .basename { color: var(--text-bright); }
   .file-row .path .dir { color: var(--text-dim); }
+  .waste-row { display: grid; grid-template-columns: 1fr auto; gap: 10px; padding: 6px 8px; align-items: baseline; font-size: 12px; border-top: 1px solid var(--border); }
+  .waste-row:first-child { border-top: none; }
+  .waste-row .path { font-family: monospace; font-size: 11px; word-break: break-all; }
+  .waste-row .why { color: var(--text-dim); font-size: 11px; }
+  .waste-row .figures { font-family: monospace; font-size: 11px; color: var(--text-dim); white-space: nowrap; }
+  .waste-tag { font-size: 9px; text-transform: uppercase; letter-spacing: 0.4px; border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; margin-right: 6px; color: var(--text-dim); }
+  .waste-tag.bad { border-color: var(--amber); color: var(--amber); }
+  .waste-note { font-size: 11px; color: var(--text-dim); margin: -8px 0 8px; }
 
   ::-webkit-scrollbar { width: 8px; height: 8px; }
   ::-webkit-scrollbar-track { background: transparent; }
@@ -5156,6 +8054,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   </nav>
   <div class="session-picker">
     <span class="count" id="session-count"></span>
+    <span class="judge-mode" id="judge-mode"></span>
   </div>
 </header>
 <div class="crumb-bar" id="crumb-bar"></div>
@@ -5276,7 +8175,7 @@ function costOf(f) {
 
 function costTitle(c) {
   return `${c.tokens.toLocaleString()} tokens over ${c.sentCount} request${c.sentCount === 1 ? '' : 's'}`
-    + ` — ${c.cached.toLocaleString()} cached, ${c.fresh.toLocaleString()} fresh.`
+    + ` - ${c.cached.toLocaleString()} cached, ${c.fresh.toLocaleString()} fresh.`
     + ` Share of each request's reported prompt tokens, proportional to size.`;
 }
 
@@ -5973,7 +8872,7 @@ function agentRow(cell, groupKey, expanded) {
     tag: group ? `agents: ${many}` : `agent: ${agentTag(a)}`,
     tagColor: track, title: title, sub: sub, chips: chips,
     chev: group ? (expanded ? '⌄' : '›') : '›',
-    tip: group ? `${title} — click to list them` : `${a.type} · ${a.name}`,
+    tip: group ? `${title} - click to list them` : `${a.type} · ${a.name}`,
   });
 }
 
@@ -6066,7 +8965,7 @@ function turnRow(patch, label, scope, prompt, headline, inFlight) {
     aside: `${fmtDuration(dur)} · ${fmtTokens(u.promptTokens)} in`,
     chips: chips,
     cls: (counts['ignored'] || 0) > 0 ? 'violating' : '',
-    tip: headline ? `${label} — ${headline}` : label,
+    tip: headline ? `${label} - ${headline}` : label,
   });
 }
 
@@ -6119,11 +9018,11 @@ function renderAgentLevel() {
 
   const stats = `
     <div class="summary-strip agent-stats">
-      ${agentStat(a.durationMs == null ? '—' : fmtDuration(Math.round(a.durationMs / 1000)), 'wall time',
+      ${agentStat(a.durationMs == null ? '-' : fmtDuration(Math.round(a.durationMs / 1000)), 'wall time',
                   'How long the subagent ran, as its own notification reported it.')}
-      ${agentStat(a.tokens == null ? '—' : fmtTokens(a.tokens), 'subagent tokens',
+      ${agentStat(a.tokens == null ? '-' : fmtTokens(a.tokens), 'subagent tokens',
                   "Tokens the subagent spent in its own context, as its notification reported them. They are not part of this session's token counts.")}
-      ${agentStat(a.toolUses == null ? '—' : String(a.toolUses), 'tool calls',
+      ${agentStat(a.toolUses == null ? '-' : String(a.toolUses), 'tool calls',
                   "Tool calls the subagent made. None of them appear in this session's timeline: they happened in its own transcript.")}
       ${agentStat(String(returns.length), returns.length === 1 ? 'report back' : 'reports back',
                   'How many times this one spawn notified. An agent notifies each time it stops with no live children, so the same spawn can report more than once.')}
@@ -6292,7 +9191,7 @@ function statusChipsHtml(statusCounts, unit) {
 }
 
 // In per-turn scope, "unused" / "dormant" mean the block was loaded but not
-// referenced *in this turn* — the same block may have been used in a different
+// referenced *in this turn* - the same block may have been used in a different
 // turn. Relabel so a per-turn cold reading is not mistaken for a session-wide
 // "never triggered" verdict.
 function blockStatusLabel(status) {
@@ -6300,18 +9199,25 @@ function blockStatusLabel(status) {
   return {
     'used': 'used',
     'used-partial': 'partial compliance',
-    'possibly-referenced': 'possibly referenced — weak evidence',
+    'possibly-referenced': 'possibly referenced - weak evidence',
     'ignored': 'rule applied but ignored',
-    'unused': inTurn ? 'loaded — not referenced in this turn' : 'never triggered',
-    'dormant': inTurn ? 'loaded — preconditions unmet this turn' : 'dormant — preconditions unmet',
+    'unused': inTurn ? 'loaded - not referenced in this turn' : 'never triggered',
+    'dormant': inTurn ? 'loaded - preconditions unmet this turn' : 'dormant - preconditions unmet',
     'not-loaded': 'not loaded into context',
-    'undelivered': 'never reached the model — file truncated'
+    'undelivered': 'never reached the model - file truncated'
   }[status] || status;
 }
 
 function renderSessionCount() {
   document.getElementById('session-count').textContent =
     `${DATA.sessions.length} session${DATA.sessions.length===1?'':'s'} for ${DATA.project.name}`;
+  // Baked, never derived here: `--query` prints the same string, and a mode
+  // worked out twice is a mode the two views can disagree about.
+  const mode = document.getElementById('judge-mode');
+  mode.textContent = `mode: ${DATA.judgeMode || 'offline (--no-judge)'}`;
+  mode.title = DATA.judgeMode === 'judged'
+    ? 'Rules no pattern can decide were asked of a model. No judge answer awards a badge.'
+    : 'No model was asked; rules no pattern can decide are reported as unchecked.';
 }
 
 function rerenderAll() {
@@ -6327,7 +9233,7 @@ function rerenderAll() {
 const HELP_CONTENT = {
   'context-files': `
     <h5>What are these files?</h5>
-    <div>Every place Claude Code pulled instructions from for this run. We read what was loaded directly from the session transcript (the harness records it as <code>attachment</code> events) — and fall back to filesystem path conventions for anything missing or in older sessions.</div>
+    <div>Every place Claude Code pulled instructions from for this run. We read what was loaded directly from the session transcript (the harness records it as <code>attachment</code> events) - and fall back to filesystem path conventions for anything missing or in older sessions.</div>
     <h5>The kinds you'll see</h5>
     <ul>
       <li><span class="kind-tag" style="color:var(--accent)">global</span><code>~/.claude/CLAUDE.md</code> and <code>~/.claude/AGENTS.md</code></li>
@@ -6337,136 +9243,141 @@ const HELP_CONTENT = {
       <li><span class="kind-tag" style="color:var(--amber)">command</span>slash commands from <code>~/.claude/commands/</code> and <code>./.claude/commands/</code></li>
       <li><span class="kind-tag" style="color:#ff7b72">agent</span>subagents from <code>~/.claude/agents/</code> and <code>./.claude/agents/</code></li>
       <li><span class="kind-tag" style="color:var(--text-dim)">reference</span><code>@path.md</code> files mentioned inside CLAUDE.md</li>
-      <li><span class="kind-tag" style="color:#79c0ff">read</span>files the agent fetched <em>during</em> the session via the Read tool — these weren't pre-loaded but they functioned as context for at least part of the session</li>
+      <li><span class="kind-tag" style="color:#79c0ff">read</span>files the agent fetched <em>during</em> the session via the Read tool - these weren't pre-loaded but they functioned as context for at least part of the session</li>
       <li><span class="kind-tag" style="color:#79c0ff">preloaded</span>files the harness pre-attached with content (tool results, edited files etc.)</li>
       <li><span class="kind-tag" style="color:#ffa657">attached</span>files you drag-and-dropped or pasted into the chat</li>
     </ul>
     <h5>Three groups</h5>
     <div>Files are split into:
     <ul>
-      <li><b>Project</b> — anything inside the current project (<code>./CLAUDE.md</code>, <code>./.claude/</code>, sub-directory CLAUDE.mds).</li>
-      <li><b>Global</b> — everything in <code>~/.claude/</code>, available to every project.</li>
-      <li><b>Read this run</b> — .md files the agent dynamically fetched via the Read tool during the session.</li>
+      <li><b>Project</b> - anything inside the current project (<code>./CLAUDE.md</code>, <code>./.claude/</code>, sub-directory CLAUDE.mds).</li>
+      <li><b>Global</b> - everything in <code>~/.claude/</code>, available to every project.</li>
+      <li><b>Read this run</b> - .md files the agent dynamically fetched via the Read tool during the session.</li>
     </ul>
     The header for each group shows <code>N/M loaded</code> and the group's total token cost.</div>
     <h5>The ⚠ drift badge</h5>
-    <div>Means the file's current content on disk differs from the snapshot the agent saw during the session — usually because you edited it after the session ran. The block content shown reflects the snapshot the agent actually used, not the current disk state.</div>
+    <div>Means the file's current content on disk differs from the snapshot the agent saw during the session - usually because you edited it after the session ran. The block content shown reflects the snapshot the agent actually used, not the current disk state.</div>
     <h5>The dot on the left</h5>
     <div>
       <span class="loaded-dot on" style="margin-right:6px"></span>filled green = loaded into context this run<br>
       <span class="loaded-dot off" style="margin-right:6px"></span>hollow = on disk but not loaded
     </div>
     <h5>The colored badge</h5>
-    <div>Marks the file's <em>source</em> — which part of the agent's context surface it belongs to.</div>
+    <div>Marks the file's <em>source</em> - which part of the agent's context surface it belongs to.</div>
     <h5>The numbers on the right</h5>
-    <div>The file's cumulative token cost, then how many blocks (H1/H2 sections) it contains. The cost is the file's size-proportional share of the prompt tokens the API reported, summed over every request that carried it — hover it for the request count and the cached/fresh split. A loaded file is resent on every request, so a rule that never fires still bills on every one of them. Click the file to filter the block list to just that file.</div>
+    <div>The file's cumulative token cost, then how many blocks (H1/H2 sections) it contains. The cost is the file's size-proportional share of the prompt tokens the API reported, summed over every request that carried it - hover it for the request count and the cached/fresh split. A loaded file is resent on every request, so a rule that never fires still bills on every one of them. Click the file to filter the block list to just that file.</div>
     <h5>Why some are grayed out</h5>
     <div>Grayed = the file was on disk but <em>not loaded into context</em> for this session.
     <ul>
       <li><b>Skills</b> only load when their trigger (e.g. <code>/graphify</code>) appears in the user prompt.</li>
       <li><b>Commands</b> only load when invoked by name.</li>
       <li><b>Subagents</b> only load when an <code>Agent</code> tool call uses that subagent_type.</li>
-      <li><b>Global / project CLAUDE.md / rules / @-references</b> are always loaded — they never appear grayed.</li>
+      <li><b>Global / project CLAUDE.md / rules / @-references</b> are always loaded - they never appear grayed.</li>
     </ul>
-    A grayed file means tokens spent (or not) on context that couldn't have fired this run — useful for spotting dead context.</div>
+    A grayed file means tokens spent (or not) on context that couldn't have fired this run - useful for spotting dead context.</div>
   `,
   'block': `
     <h5>The block content</h5>
-    <div>The raw markdown of this section as it appears in your <code>CLAUDE.md</code>, <code>SKILL.md</code>, or other source file. No interpretation — just the literal text.</div>
+    <div>The raw markdown of this section as it appears in your <code>CLAUDE.md</code>, <code>SKILL.md</code>, or other source file. No interpretation - just the literal text.</div>
     <h5>How to use it</h5>
     <div>Read this <em>before</em> trusting the verdict. Sometimes the rule is more nuanced than our heuristics capture, and you'll want to judge for yourself whether the agent really followed it.</div>
     <h5>Example</h5>
-    <div>Verdict says <code>used-partial</code> on a "Copy to clipboard" rule because the agent ran <code>echo</code>. Read the block and you'll see the rule actually says <em>"never <code>echo</code> when piping to <code>pbcopy</code>"</em> — which the agent didn't actually do. The verdict is too strict; the timeline below confirms.</div>
+    <div>Verdict says <code>used-partial</code> on a "Copy to clipboard" rule because the agent ran <code>echo</code>. Read the block and you'll see the rule actually says <em>"never <code>echo</code> when piping to <code>pbcopy</code>"</em> - which the agent didn't actually do. The verdict is too strict; the timeline below confirms.</div>
   `,
   'rulecheck': `
     <h5>Where this comes from</h5>
-    <div>A rule document can carry a <em>checks file</em> beside it (<code>&lt;doc&gt;.checks.json</code>): each prose rule compiled once, ahead of time, into a deterministic pattern with its own self-tests. This tool never asks a model anything — at build time it re-runs every check's self-tests with its own matcher and throws out any check that fails, then applies the survivors to the code the agent wrote, the commands it ran, and the paths it touched.</div>
+    <div>A rule document can carry a <em>checks file</em> beside it (<code>&lt;doc&gt;.checks.json</code>): each prose rule compiled once, ahead of time, into a deterministic pattern with its own fixtures. By default this tool never asks a model anything - at build time it re-runs every check's fixtures with its own matcher and refuses any check that fails, then applies the survivors to the commands the agent ran, the paths it touched, and the code its writes left behind. A failing check is never quietly dropped: it is listed below as <em>demoted</em>, and so is any rule whose bucket needs a judge, because a rule nobody could check must not read as one that was followed.</div>
+    <div style="margin-top:6px">A rule whose question is about the <em>shape</em> of the code rather than its text - "never leave a catch body empty" - can carry a structural pattern instead, matched against the syntax tree by the optional ast-grep binary. It is never installed for you and never taken from your PATH; without it those rules report as unchecked and name the installer, and they are never approximated by a regex answering a different question.</div>
+    <div style="margin-top:6px">The rules a pattern cannot decide are asked of a model through your own Claude Code auth, which sends session content to it; <code>--no-judge</code> leaves them unchecked instead. With it on, findings are labelled <em>judge</em> - one call per rule per site, and a verdict that cannot quote the text it is about degrades to <em>unclear</em>. A purely semantic verdict is labelled <em>judge · advisory</em>: it may pull a rule down to <em>unclear</em>, but it can never on its own call a rule violated or mark it followed.</div>
+    <div style="margin-top:6px">Code rules are judged on the <b>net</b> effect of the session's writes. An attempt the agent wrote and then edited away is not in the tree, and a violation the reader cannot find when they go looking is worse than none. Rules broken by <em>omission</em> - "always implement the catch body" - leave nothing to match, so the checker enumerates the sites itself (every catch block, every comment) and asks about each one.</div>
     <h5>The states</h5>
     <ul>
-      <li><b style="color:var(--red)">rule violated</b> — a check fired on written code, with the file, line and matched text cited below. Comments and string literals are stripped before any pattern runs, and the match must hold both with and without that stripping.</li>
-      <li><b style="color:var(--amber)">acknowledged</b> — the same match, but the code carries a <code>ctx-allow</code> marker at the site: a deliberate, documented exception.</li>
-      <li><b style="color:var(--amber)">unclear</b> — the strict and stripped views disagree (typically the only hit was inside a comment). Never counted as a violation.</li>
-      <li><b style="color:var(--green)">checked, no violation</b> — checks ran over code in their scope and found nothing.</li>
-      <li><b>checked nothing</b> — the session wrote none of the code this rule governs.</li>
-      <li><b>not mechanically checkable</b> — the rule needs judgment, types, or whole-file context. Most rules land here, by design. It does <em>not</em> mean the rule was followed.</li>
+      <li><b style="color:var(--red)">rule violated</b> - a check fired on written code, with the file, line and matched text cited below. Comments and string literals are stripped before any pattern runs, and the match must hold both with and without that stripping.</li>
+      <li><b style="color:var(--amber)">acknowledged</b> - the same match, but it is a deliberate exception: either the code carries a <code>ctx-allow</code> marker at the site, or the user's own prompt for that turn instructed the action the call performs (shown verbatim beside the citation, and decided only by the opt-in judge tier - never by matching words in the prompt).</li>
+      <li><b style="color:var(--amber)">unclear</b> - the strict and stripped views disagree (typically the only hit was inside a comment), or a backend could not answer at all. Never counted as a violation.</li>
+      <li><b style="color:var(--green)">checked, no violation</b> - checks ran over code in their scope and found nothing.</li>
+      <li><b>checked nothing</b> - the session wrote none of the code this rule governs, or an omission rule found no site to ask about.</li>
+      <li><b>not mechanically checkable</b> - the rule needs judgment, types, or whole-file context; or it is a structural rule and ast-grep is not installed. Most rules land here, by design. It does <em>not</em> mean the rule was followed. The note below says which, and names the command that closes the gap.</li>
     </ul>
     <h5>Confidence</h5>
-    <div>Only a <code>high</code> or <code>medium</code> confidence violation from a reviewed checks file turns the block's verdict red. Patterns extracted mechanically from a document with no checks file are low confidence and stay a note.</div>
+    <div>Only a <code>high</code> or <code>medium</code> confidence violation from a reviewed checks file turns the block's verdict red. Patterns extracted mechanically from a document with no checks file are low confidence and stay a note, and so is every advisory judge verdict.</div>
   `,
   'verdict': `
     <h5>The verdict</h5>
-    <div>Our automatic conclusion about whether the agent followed this block this run. Evidence comes in two tiers: <em>strong</em> (a trigger the user actually typed, a path-table row whose command ran, an end-of-message rule) and <em>weak</em> (a command the block merely names, loose keyword overlap). Only strong evidence can produce a green <code>used</code>. One of:</div>
+    <div>Our automatic conclusion about whether the agent followed this block this run. Evidence comes in two tiers: <em>strong</em> (a trigger the user actually typed, a structural record - a skill the agent executed, a write to a file the block names, the block's template reproduced in a written file, a documented command run verbatim - or a reviewed compiled check that ran) and <em>weak</em> (a command the block merely names, or the lexical tier below). Only strong evidence can produce a green <code>used</code>. Every strong signal is either something the harness itself records or a check a human reviewed: nothing here is read out of the way your rules happen to be worded, so a rule written differently - or in another language - is judged the same way. The structural signals only ever give credit: nothing written to a file the block names is never read as a violation, because the run may have had nothing to write. One of:</div>
     <ul>
-      <li><b style="color:var(--green)">used</b> — at least one applicable predicate fired</li>
-      <li><b style="color:var(--amber)">used-partial</b> — some applicable predicates fired, others didn't</li>
-      <li><b style="color:var(--green-soft)">possibly-referenced</b> — only weak evidence: the block names a command that ran, or a few of its words show up in the assistant's text. Suggestive, not proof. Never promoted to <code>used</code>.</li>
-      <li><b style="color:var(--red)">ignored</b> — predicates applied but none fired (rule was relevant but skipped)</li>
-      <li><b style="color:var(--text-dim)">dormant</b> — rule was loaded but no precondition was met (couldn't have fired)</li>
-      <li><b style="color:var(--text-dim)">unused</b> — no predicates derivable, no keyword overlap</li>
-      <li><b style="color:var(--gray)">not-loaded</b> — file wasn't in context this run (skill/command not invoked)</li>
-      <li><b style="color:var(--purple)">undelivered</b> — the file was loaded but this block sat outside the delivered line range, so the model never saw it. Not the same as being ignored.</li>
+      <li><b style="color:var(--green)">used</b> - at least one applicable predicate fired</li>
+      <li><b style="color:var(--amber)">used-partial</b> - some applicable predicates fired, others didn't</li>
+      <li><b style="color:var(--green-soft)">possibly-referenced</b> - only weak evidence: the block names a command that ran, or the run's prose reused the block's own distinctive wording. Suggestive, not proof. Never promoted to <code>used</code>.</li>
+      <li><b style="color:var(--red)">ignored</b> - predicates applied but none fired (rule was relevant but skipped)</li>
+      <li><b style="color:var(--text-dim)">dormant</b> - rule was loaded but no precondition was met (couldn't have fired)</li>
+      <li><b style="color:var(--text-dim)">unused</b> - no predicate derivable, and the run's prose carries no lexical trace of the block (or the block has too little distinctive wording to score)</li>
+      <li><b style="color:var(--gray)">not-loaded</b> - file wasn't in context this run (skill/command not invoked)</li>
+      <li><b style="color:var(--purple)">undelivered</b> - the file was loaded but this block sat outside the delivered line range, so the model never saw it. Not the same as being ignored.</li>
     </ul>
+    <h5>The lexical chip</h5>
+    <div>When nothing else has anything to say, the block's wording is scored against the run's prose and the result is shown as a chip beside the verdict. It names the <em>evidence</em>, never a cause: <code>echoed</code> (the run reused this block's wording), <code>topical-overlap</code> (shared subject matter), <code>no-lexical-trace</code>, and <code>not-lexically-scorable</code> (the block has fewer than three distinctive terms - a table of column headers has none of its own). Terms are weighted against three backgrounds first: how many loaded blocks use the word, how ordinary it is in English, and how often this session says it anyway - which is what stops "React" in a React repo matching everything. None of these can reach a green verdict, and <code>no-lexical-trace</code> is not evidence the rule was broken: a rule can be followed in complete silence.</div>
     <h5>How to use it</h5>
     <div>The reason line tells you which predicates drove the verdict. If it surprises you, scroll to <em>How the agent ended up here</em> for the literal evidence.</div>
     <h5>Example</h5>
-    <div>A rule marked <code>dormant</code> with reason <em>"No predicate's preconditions were met"</em> suggests dead context — the rule sat in your CLAUDE.md but couldn't fire this run. If it's <code>dormant</code> across many sessions, consider scoping it differently or deleting it.</div>
+    <div>A rule marked <code>dormant</code> with reason <em>"No predicate's preconditions were met"</em> suggests dead context - the rule sat in your CLAUDE.md but couldn't fire this run. If it's <code>dormant</code> across many sessions, consider scoping it differently or deleting it.</div>
   `,
   'evidence': `
     <h5>Predicate evidence</h5>
     <div>Each card is one predicate we derived from the block's content, with a one-line summary of what we found in the trace. Predicates include:</div>
     <ul>
-      <li><b>Command mention</b> — backticked commands like <code>\`gh\`</code>, <code>\`pbcopy\`</code></li>
-      <li><b>Trigger phrase</b> — <code>Trigger: /foo</code> or <code>"When the user types /foo"</code></li>
-      <li><b>Path table</b> — markdown tables routing by cwd</li>
-      <li><b>End-of-message</b> — rules about how the final response should look</li>
-      <li><b>Negative rule</b> — <code>"never X"</code> phrasing</li>
-      <li><b>Keyword overlap</b> — fallback when no other predicate fits</li>
+      <li><b>Command mention</b> - backticked commands like <code>\`gh\`</code>, <code>\`pbcopy\`</code></li>
+      <li><b>Trigger phrase</b> - <code>Trigger: /foo</code> or <code>"When the user types /foo"</code></li>
+      <li><b>Path table</b> - markdown tables routing by cwd</li>
+      <li><b>End-of-message</b> - rules about how the final response should look</li>
+      <li><b>Negative rule</b> - <code>"never X"</code> phrasing</li>
+      <li><b>Keyword overlap</b> - fallback when no other predicate fits</li>
     </ul>
     <h5>How to use it</h5>
     <div>Skim this for a quick read of all the angles we considered. If one looks wrong (false positive), look at the timeline below to see the literal text/command that drove it.</div>
     <h5>Example</h5>
-    <div>Card says <em>"<code>echo</code> ran 3× this session"</em> — that's a command-mention predicate firing. The next section will quote the actual three bash commands so you can verify they were really clipboard-related (or not).</div>
+    <div>Card says <em>"<code>echo</code> ran 3× this session"</em> - that's a command-mention predicate firing. The next section will quote the actual three bash commands so you can verify they were really clipboard-related (or not).</div>
   `,
   'thinking-gap': `
     <h5>Why is the thinking content empty?</h5>
-    <div>This marker means the agent ran one or more <em>extended thinking</em> blocks at this point — Claude's internal chain-of-thought reasoning. The agent did reason, but the content is not readable.</div>
+    <div>This marker means the agent ran one or more <em>extended thinking</em> blocks at this point - Claude's internal chain-of-thought reasoning. The agent did reason, but the content is not readable.</div>
     <h5>Where the content went</h5>
-    <div>For Claude 4.x models (Opus 4.x, Sonnet 4.x, Haiku 4.x), Anthropic encrypts the thinking trace server-side. The transcript only stores an opaque <code>signature</code> — a tamper-proof token used to round-trip the reasoning back to the API on the next turn. The plaintext never leaves Anthropic's servers.</div>
+    <div>For Claude 4.x models (Opus 4.x, Sonnet 4.x, Haiku 4.x), Anthropic encrypts the thinking trace server-side. The transcript only stores an opaque <code>signature</code> - a tamper-proof token used to round-trip the reasoning back to the API on the next turn. The plaintext never leaves Anthropic's servers.</div>
     <h5>Why encrypted</h5>
     <ul>
       <li>Prevents distillation / scraping of reasoning traces (Anthropic IP).</li>
       <li>Tamper-detection: if you modified the signature, the API would refuse to resume.</li>
     </ul>
     <h5>Older transcripts</h5>
-    <div>Claude 3.7 Sonnet and earlier returned full plaintext thinking. Claude Code stopped persisting the summary in v2.1.69+. So unless you have very old logs, every thinking block from your sessions will look like this — empty content, signature only.</div>
+    <div>Claude 3.7 Sonnet and earlier returned full plaintext thinking. Claude Code stopped persisting the summary in v2.1.69+. So unless you have very old logs, every thinking block from your sessions will look like this - empty content, signature only.</div>
     <h5>What this card tells you anyway</h5>
     <div>The presence + count + duration of thinking blocks. If you see "1 encrypted thinking block, ~2s" between the prompt and the Read, it means: <em>the agent paused for ~2 seconds to reason, then went straight to the action.</em> A long thinking gap (e.g. 10+s) suggests substantial reasoning. We can't read it, but we can see it happened.</div>
     <h5>Sources</h5>
-    <div><a href="https://docs.claude.com/en/docs/build-with-claude/extended-thinking" target="_blank" style="color:var(--accent)">Anthropic — Building with extended thinking</a></div>
+    <div><a href="https://docs.claude.com/en/docs/build-with-claude/extended-thinking" target="_blank" style="color:var(--accent)">Anthropic - Building with extended thinking</a></div>
   `,
   'duplicates-section': `
     <h5>Near-duplicate detection</h5>
-    <div>This block shares substantial phrasing with one or more blocks in other files. Each card shows the partner block, similarity (containment on 3-word shingles — robust to paraphrasing and asymmetric block sizes), an estimated token cost, and a session-aware classification.</div>
+    <div>This block shares substantial phrasing with one or more blocks in other files. Each card shows the partner block, similarity (containment on 3-word shingles - robust to paraphrasing and asymmetric block sizes), an estimated token cost, and a session-aware classification.</div>
     <h5>Status</h5>
     <ul>
-      <li><b style="color:var(--red)">confirmed redundant</b> — both files were loaded but neither block was topically referenced in the trace, and no predicate fired. Tokens spent twice for nothing.</li>
-      <li><b style="color:var(--amber)">topic referenced</b> — at least one of the two blocks had topical activity in the session. We don't claim which copy mattered — both were live in the model's context.</li>
-      <li><b style="color:var(--gray)">partner not loaded</b> — the other block exists on disk but wasn't loaded this session (e.g. an inactive skill).</li>
+      <li><b style="color:var(--red)">confirmed redundant</b> - both files were loaded but neither block was topically referenced in the trace, and no predicate fired. Tokens spent twice for nothing.</li>
+      <li><b style="color:var(--amber)">topic referenced</b> - at least one of the two blocks had topical activity in the session. We don't claim which copy mattered - both were live in the model's context.</li>
+      <li><b style="color:var(--gray)">partner not loaded</b> - the other block exists on disk but wasn't loaded this session (e.g. an inactive skill).</li>
     </ul>
     <h5>Why some pairs aren't shown</h5>
     <div>We filter: pairs from the same file, blocks under 15 words (likely registrations/headers), code-only overlap, and pairs where one file <code>@</code>-references the other.</div>
     <h5>How to use it</h5>
-    <div>Click <em>Open partner block →</em> to jump to the partner. Look at both blocks' content — if they really say the same thing, consolidate. <code>confirmed redundant</code> across many sessions is the strongest signal that a duplicate is dead weight.</div>
+    <div>Click <em>Open partner block →</em> to jump to the partner. Look at both blocks' content - if they really say the same thing, consolidate. <code>confirmed redundant</code> across many sessions is the strongest signal that a duplicate is dead weight.</div>
   `,
   'duplicates-tab': `
     <h5>The Duplications tab</h5>
-    <div>Project-wide list of near-duplicate block pairs across the loaded context surface for this session. Sorted by duplicated cost, then similarity — a 100% match between two files that were never sent cost nothing.</div>
+    <div>Project-wide list of near-duplicate block pairs across the loaded context surface for this session. Sorted by duplicated cost, then similarity - a 100% match between two files that were never sent cost nothing.</div>
     <h5>Columns</h5>
     <ul>
-      <li><b>Similarity</b> — containment coefficient on 3-word shingles (0–100%). Threshold 30%. Higher means more of the shorter block's distinctive phrases appear in the longer one.</li>
-      <li><b>Status</b> — see the inline help on a duplicate card for the session-aware classification.</li>
-      <li><b>Duplicated</b> — the overlapping share of the cheaper side's real token cost. Each block's cost is its file's share of the tokens the API actually reported, across every request that carried it, split across the file's blocks by line count. The file total is real; the per-block split is an estimate.</li>
-      <li><b>Block A / B</b> — block title, its own attributed cost, and the source file path.</li>
+      <li><b>Similarity</b> - containment coefficient on 3-word shingles (0–100%). Threshold 30%. Higher means more of the shorter block's distinctive phrases appear in the longer one.</li>
+      <li><b>Status</b> - see the inline help on a duplicate card for the session-aware classification.</li>
+      <li><b>Duplicated</b> - the overlapping share of the cheaper side's real token cost. Each block's cost is its file's share of the tokens the API actually reported, across every request that carried it, split across the file's blocks by line count. The file total is real; the per-block split is an estimate.</li>
+      <li><b>Block A / B</b> - block title, its own attributed cost, and the source file path.</li>
     </ul>
     <h5>Empty list = useful info</h5>
     <div>"No near-duplicates" tells you the loaded context surface for this session is clean of obvious redundancy at the threshold we use. Lowering the threshold or expanding the corpus would surface more, but with more noise.</div>
@@ -6478,18 +9389,20 @@ const HELP_CONTENT = {
     <div>Chronological narrative of <em>what actually happened</em> with respect to this block this run. Each card is one moment with timestamp, kind, ✓/✗ verdict, and the literal trace text underneath.</div>
     <h5>Moment kinds</h5>
     <ul>
-      <li><b style="color:var(--accent)">TRIGGER</b> — precondition: did the user invoke <code>/skill</code>, did cwd match the path-table, was a subagent called?</li>
-      <li><b style="color:var(--amber)">CONDITION / APPLICABILITY</b> — does the rule's domain even apply this run?</li>
-      <li><b style="color:var(--purple)">INTENT</b> — a sentence from the agent's text where it expresses a related decision (with causal language like "Let me…", "I'll…", "since…")</li>
-      <li><b style="color:var(--green)">ACTION ✓</b> — the actual tool call that enacted the rule, with timestamp + bash description</li>
-      <li><b style="color:var(--green)">COMPLIANCE ✓</b> — the outcome matches what the rule asks</li>
-      <li><b style="color:var(--red)">VIOLATION ✗</b> — the rule was broken; literal violating command/text shown</li>
-      <li><b style="color:var(--text-dim)">NON-EVENT</b> — nothing happened that was relevant; the popover explains <em>what would have made this fire</em></li>
+      <li><b style="color:var(--accent)">TRIGGER</b> - precondition: did the user invoke <code>/skill</code>, was a subagent called?</li>
+      <li><b style="color:var(--amber)">CONDITION / APPLICABILITY</b> - does the rule's domain even apply this run?</li>
+      <li><b style="color:var(--purple)">INTENT</b> - a harness record that put this block in front of the model: the <code>Read</code> that delivered the file, or the agent's own narration immediately before it. Never the most on-topic paragraph in the run - that was a motive invented after the fact.</li>
+      <li><b style="color:var(--green)">ACTION ✓</b> - the actual tool call that enacted the rule, with timestamp + bash description</li>
+      <li><b style="color:var(--green)">COMPLIANCE ✓</b> - the outcome matches what the rule asks</li>
+      <li><b style="color:var(--red)">VIOLATION ✗</b> - the rule was broken; literal violating command/text shown</li>
+      <li><b style="color:var(--text-dim)">NON-EVENT</b> - nothing happened that was relevant; the popover explains <em>what would have made this fire</em></li>
+      <li><b style="color:var(--text-dim)">CO-OCCURRENCE</b> - the block and the run mention the same word or command, and that is <em>all</em> the trace says. Not a step in the chain above: a design-system block and a rate-limiting review both containing "design" is a coincidence, so a block whose only evidence is shared wording gets this card and nothing else.</li>
+      <li><b style="color:var(--text-dim)">CORROBORATION</b> - the agent's own readable extended thinking mentions this block. Self-report, so it can support a verdict reached elsewhere and never set one; most transcripts encrypt it, and its absence means nothing.</li>
     </ul>
     <h5>How to use it</h5>
     <div>This is the receipts. When the verdict surprises you, walk down the timeline to see the actual passages and tool calls that drove it. Timestamps are offsets from session start (also visible in the Run Timeline view).</div>
     <h5>Example</h5>
-    <div>The <code>/graphify</code> block in CLAUDE.md shows a single <b>NON-EVENT</b>: <em>"<code>/graphify</code> not invoked this run — User prompt: 'explore files…'"</em> — that directly answers "why didn't this fire?". Whereas the <code>Copy to clipboard</code> rule shows real <b>VIOLATION</b> cards with the literal <code>echo</code> commands at exact timestamps.</div>
+    <div>The <code>/graphify</code> block in CLAUDE.md shows a single <b>NON-EVENT</b>: <em>"<code>/graphify</code> not invoked this run - User prompt: 'explore files…'"</em> - that directly answers "why didn't this fire?". The <code>Copy to clipboard</code> rule, by contrast, shows <b>CO-OCCURRENCE</b> cards: <code>printf</code> ran, the rule names <code>printf</code>, and the timeline says exactly that much rather than claiming the rule is why.</div>
   `,
 };
 
@@ -6544,35 +9457,121 @@ function dismissHelpPopover(e) {
 
 const RULECHECK_LABEL = {
   'violated': 'rule violated',
-  'acknowledged': 'violation acknowledged in the code',
-  'unclear': 'unclear — could not be confirmed',
+  'acknowledged': 'violation acknowledged',
+  'unclear': 'unclear - could not be confirmed',
   'clear': 'checked, no violation found',
-  'not-exercised': 'checked nothing — the session wrote none of the code this rule governs',
+  'not-exercised': 'checked nothing - the session never did the kind of thing this rule governs',
   'not-checkable': 'not mechanically checkable'
+};
+
+// Which half of a conditional rule the finding is about. The distinction is the
+// finding: a trigger that never came up and an obligation that went unmet are
+// different facts, and one label for both is how a session that never exercised
+// a rule gets read as one that followed it.
+const RULECHECK_STAGE = {
+  'antecedent-not-fired': 'never triggered - nothing in this session met the rule’s condition',
+  'consequent-missed': 'triggered, and what it asks for did not happen',
+  'satisfied': 'triggered, and satisfied'
 };
 
 // A rule's verdict comes from a checks file authored beside the rule document
 // and re-validated against its own self-tests at build time. Anything that is
 // not a confirmed, citable violation must read as exactly that: a rule we
 // could not check is never shown as one that was followed.
+// Named off the baked `evidenceLabel`, never re-derived here: the CLI prints
+// the same field, and a label the browser invented would let the two disagree.
+// The wording names what was observed - a block with no trace may simply have
+// been obeyed in silence, and one nobody could score is not one nobody used.
+const LEXICAL_CHIP = {
+  'echoed': 'echoed - the run reused this wording',
+  'topical-overlap': 'topical overlap - shared subject matter only',
+  'no-lexical-trace': 'no lexical trace - not evidence of non-use',
+  'not-lexically-scorable': 'not lexically scorable - too few distinctive terms',
+};
+
+// Which text the verdict is about, baked as `textSource`. `disk` is a caveat,
+// not a detail: the file may have been edited after the session, so a verdict
+// about its wording may be about wording the model never saw.
+const TEXT_SOURCE_CHIP = {
+  'transcript': 'text as delivered',
+  'disk': 'text from disk - may postdate the session',
+  'stale': 'text from disk - provably not what was loaded',
+};
+
+function textSourceChip(b) {
+  const src = b.textSource || 'disk';
+  const text = TEXT_SOURCE_CHIP[src] || src;
+  return `<span class="lex-chip src-${src}" title="Where the block text this verdict is about came from.">${escapeHtml(text)}</span>`;
+}
+
+function contestedChip(b) {
+  if (!b.contested) return '';
+  const title = `The judge, asked without seeing this verdict, read this block as used. `
+    + `It quoted: ${b.contested.quote}`
+    + (b.contested.reason ? ` - ${b.contested.reason}` : '');
+  return `<span class="lex-chip contested-chip" title="${escapeHtml(title)}">contested by the judge</span>`;
+}
+
+function lexicalChip(b) {
+  if (!b.evidenceLabel) return '';
+  const text = LEXICAL_CHIP[b.evidenceLabel] || b.evidenceLabel;
+  return `<span class="lex-chip lex-${b.evidenceLabel}" title="Lexical evidence only - never a causal claim">${escapeHtml(text)}</span>`;
+}
+
 function renderRuleCheck(rc) {
   const label = RULECHECK_LABEL[rc.state] || rc.state;
   const conf = `<span class="rc-conf" title="Confidence of the check that produced this.">${escapeHtml(rc.confidence)} confidence</span>`;
   let inner = `<div class="rc-state">${escapeHtml(label)}${rc.state === 'not-checkable' ? '' : conf}</div>`;
   if (rc.source === 'fallback') {
-    inner += `<div class="rc-note">No checks file beside this document — these patterns were extracted mechanically from the rule's own backticked identifiers, so they are low confidence and never mark the block as violated.</div>`;
+    inner += `<div class="rc-note">No checks file beside this document - these patterns were extracted mechanically from the rule's own backticked identifiers, so every finding below is a candidate reported as unclear, never a violation.</div>`;
   }
   (rc.findings || []).forEach(f => {
-    const verb = f.state === 'violated' ? 'fired' : f.state === 'acknowledged' ? 'fired, suppressed at the site' : 'candidate, not confirmed';
-    inner += `<div class="rc-note"><code>${escapeHtml(f.checkId)}</code> ${escapeHtml(verb)}${f.message ? ' — ' + escapeHtml(f.message) : ''}</div>
-      <div class="rc-span"><span class="rc-path">${escapeHtml(f.path)}:${f.line}</span>  ${escapeHtml(f.match)}</div>`;
+    const verb = RULECHECK_STAGE[f.stage]
+      || (f.state === 'violated' ? 'fired' : f.state === 'acknowledged' ? 'fired, acknowledged' : f.state === 'note' ? 'noted' : 'candidate, not confirmed');
+    // Who answered is part of the claim. A model's verdict reads differently
+    // from a fixture-gated pattern's, and an advisory one cannot set the badge
+    // at all, so saying so beside the finding is the only place a reader could
+    // learn it.
+    const who = f.advisory ? ' <span class="rc-judge">judge · advisory</span>'
+      : f.judge ? ' <span class="rc-judge">judge</span>' : '';
+    inner += `<div class="rc-note"><code>${escapeHtml(f.checkId)}</code> ${escapeHtml(verb)}${who}${f.message ? ' - ' + escapeHtml(f.message) : ''}</div>`;
+    // A stage report with no call behind it has nothing to quote, and an empty
+    // span row reads as a citation the reader can go and check.
+    if (f.match) {
+      inner += `<div class="rc-span"><span class="rc-path">${escapeHtml(f.path)}:${f.line}</span>  ${escapeHtml(f.match)}</div>`;
+    }
+    // The prompt of the turn the cited call falls in, verbatim and
+    // uninterpreted. The reader settles authorisation in one glance; nothing
+    // here reads the words, in any language.
+    if (f.governingPrompt) {
+      inner += `<div class="rc-note">the user's prompt for turn ${f.governingPrompt.turnIndex} (call ${f.governingPrompt.callIndex}):</div>`;
+      inner += `<div class="rc-span">${escapeHtml(f.governingPrompt.text)}</div>`;
+    }
+    if (f.authorisation) {
+      inner += `<div class="rc-note">${escapeHtml(f.authorisation.note || '')}${f.authorisation.reason ? ' - ' + escapeHtml(f.authorisation.reason) : ''}</div>`;
+    }
   });
   (rc.notCheckable || []).forEach(nc => {
-    inner += `<div class="rc-note">${escapeHtml(nc.ruleRef || '')}${nc.ruleRef ? ' — ' : ''}${escapeHtml(nc.why || '')}</div>`;
+    inner += `<div class="rc-note">${escapeHtml(nc.ruleRef || '')}${nc.ruleRef ? ' - ' : ''}${escapeHtml(nc.why || '')}</div>`;
   });
   (rc.stale || []).forEach(st => {
-    inner += `<div class="rc-note"><code>${escapeHtml(st.id)}</code> skipped — ${escapeHtml(st.why)}</div>`;
+    inner += `<div class="rc-note"><code>${escapeHtml(st.id)}</code> skipped - ${escapeHtml(st.why)}</div>`;
   });
+  // A check whose fixtures stopped reproducing here is a broken check, not an
+  // inexpressible rule, and a bucket that needs a judge is neither. Each says
+  // which it is: a reader who cannot tell them apart cannot tell what to fix.
+  (rc.demoted || []).forEach(d => {
+    inner += `<div class="rc-note"><code>${escapeHtml(d.id)}</code> demoted to the <code>${escapeHtml(d.bucket || 'judged')}</code> bucket - ${escapeHtml(d.why || '')}</div>`;
+  });
+  (rc.judged || []).forEach(j => {
+    inner += `<div class="rc-note"><code>${escapeHtml(j.id)}</code> - ${escapeHtml(j.why || '')}</div>`;
+  });
+  // Baked in Python, printed verbatim: a rule nobody compiled is honestly
+  // unchecked, and the command that closes the gap is what stops that reading
+  // as a limit of the tool.
+  if (rc.hint) {
+    inner += `<div class="rc-note rc-todo">No check ran for this rule - ${escapeHtml(rc.hint)}</div>`;
+  }
   return `<div class="detail-section">
     <h4 style="display:flex;align-items:center">
       <span>Rule check</span>
@@ -6608,7 +9607,7 @@ function renderBlocks() {
     html += `
       <div class="run-bar">
         <div class="label">User prompt ${scopeBadgeHtml()}</div>
-        <div class="prompt">${escapeHtml(A.session.userPrompt || '(no user prompt — likely a /clear or system-init session)')}</div>
+        <div class="prompt">${escapeHtml(A.session.userPrompt || '(no user prompt - likely a /clear or system-init session)')}</div>
         <div class="meta">
           <span>📁 ${escapeHtml(A.session.cwd)}</span>
           <span>🌿 ${escapeHtml(A.session.branch || 'no branch')}</span>
@@ -6632,9 +9631,23 @@ function renderBlocks() {
       </div>
     `;
   }
+  html += renderCompileBar();
   html += renderLevel();
   el.innerHTML = html;
   attachHelpTriggers(el);
+}
+
+// Baked in Python (`ruleCompile`), printed verbatim, so `--query` and this
+// pane name the same count and the same command.
+function renderCompileBar() {
+  const roll = (active() || {}).ruleCompile || {};
+  if (!roll.rules) return '';
+  const docs = (roll.docs || []).filter(d => d.uncompiled || d.stale)
+    .map(d => `${escapeHtml(d.path)} (${d.compiled}/${d.rules})`).join(', ');
+  const tail = roll.hint
+    ? `<strong>${escapeHtml(roll.hint)}</strong>${docs ? ' - ' + docs : ''}`
+    : 'Every rule here is either compiled or reviewed as not mechanically checkable.';
+  return `<div class="compile-bar">${roll.compiled} of ${roll.rules} rules compiled into reviewed checks. ${tail}</div>`;
 }
 
 function renderDetail(blockId) {
@@ -6652,12 +9665,12 @@ function renderDetail(blockId) {
   const statusLabel = {
     'used': 'Followed by the agent',
     'used-partial': 'Followed in spirit, not to the letter',
-    'possibly-referenced': 'Possibly referenced — weak evidence only',
+    'possibly-referenced': 'Possibly referenced - weak evidence only',
     'ignored': 'Rule applied but agent did not follow it',
     'unused': 'Never triggered (precondition not met)',
-    'dormant': 'Dormant — could not have fired this run',
-    'not-loaded': 'Skill block — not loaded into context this run',
-    'undelivered': 'Never reached the model — outside the delivered range'
+    'dormant': 'Dormant - could not have fired this run',
+    'not-loaded': 'Skill block - not loaded into context this run',
+    'undelivered': 'Never reached the model - outside the delivered range'
   }[b.status] || b.status;
 
   let html = `
@@ -6674,9 +9687,13 @@ function renderDetail(blockId) {
         <span class="help-trigger" data-help="verdict" title="How is the verdict computed?">?</span>
       </h4>
       <div class="block-status status-${b.status}" style="font-size:13px;margin-bottom:8px">
-        <span class="status-dot"></span>${statusLabel}
+        <span class="status-dot"></span>${statusLabel}${lexicalChip(b)}${textSourceChip(b)}${contestedChip(b)}
       </div>
       <div class="reason ${b.status}">${escapeHtml(b.reason)}</div>
+      ${b.contested ? `<div class="reason" style="border-left-color:var(--border)">The judge,
+        asked without seeing this verdict, read this block as used. It quoted
+        <code>${escapeHtml(b.contested.quote)}</code>${b.contested.reason ? ' - ' + escapeHtml(b.contested.reason) : ''}.
+        That is a reason to go and look, not evidence the verdict above is wrong.</div>` : ''}
     </div>
   `;
 
@@ -6759,7 +9776,7 @@ function renderDetail(blockId) {
     b.moments.forEach(mt => {
       const verdict = mt.verdict === 'yes' ? '✓' : mt.verdict === 'no' ? '✗' : '';
       const verdictCls = mt.verdict ? ('verdict-' + mt.verdict) : '';
-      let timeLabel = '—';
+      let timeLabel = '-';
       if (mt.t && sessStart) {
         const off = Math.max(0, Math.floor((new Date(mt.t).getTime() - sessStart) / 1000));
         if (off < 60) timeLabel = `+${off}s`;
@@ -6894,7 +9911,7 @@ function renderDuplications() {
   // scope is in play.
   const ignored = activeTurnId === 'all' ? '' : ` · ignores ${escapeHtml(scopeLabel() || '')}`;
   const sessionScopeBadge = (A.turnCount || 0) > 1
-    ? `<span class="scope-badge" title="Duplicate detection runs across the whole session — the turn picker doesn't apply here.">session-scope${ignored}</span>`
+    ? `<span class="scope-badge" title="Duplicate detection runs across the whole session - the turn picker doesn't apply here.">session-scope${ignored}</span>`
     : '';
   let html = `
     <div class="pane-header">
@@ -6903,7 +9920,7 @@ function renderDuplications() {
         ${sessionScopeBadge}
         <span class="help-trigger" data-help="duplicates-tab" title="What is this tab?">?</span>
       </h2>
-      <div class="subtitle">Pairs of blocks across files that share substantial phrasing — these may cost tokens twice for the same instruction. Costs are each block's share of the real tokens its file was billed, across every request that carried it.</div>
+      <div class="subtitle">Pairs of blocks across files that share substantial phrasing - these may cost tokens twice for the same instruction. Costs are each block's share of the real tokens its file was billed, across every request that carried it.</div>
     </div>
   `;
 
@@ -6987,7 +10004,40 @@ function renderFiles() {
     html += `<div class="file-row"><div class="count">×${n}</div><div class="path">${fmt(fp)}</div></div>`;
   });
   html += `</div>`;
+  html += renderWastedContext();
   el.innerHTML = html;
+}
+
+// Rendered from the baked `wastedContext`, row for row, so this list and
+// `--query <session> waste` name the same file at the same price. Session
+// scope always: relevance is judged against what the whole session did, and
+// re-ordering it per turn would show a figure the payload does not carry.
+function renderWastedContext() {
+  const roll = (active() || {}).wastedContext || {};
+  const rows = roll.files || [];
+  if (!rows.length) return '';
+  let head = `Wasted context <span style="font-weight:400;color:var(--text-dim);text-transform:none;letter-spacing:0">(whole session)</span>`;
+  let html = `<h3 style="font-size:11px;text-transform:uppercase;color:var(--text-dim);letter-spacing:0.5px;margin:18px 0 8px">${head}</h3>`;
+  // Counts come from the baked roll-up, never from a tally over the rows here:
+  // recomputing them in the browser is how the page and `--query waste` would
+  // start reporting different numbers off the same list.
+  html += roll.judged
+    ? `<div class="waste-note">${roll.notPertinent} of the ${roll.asked} file${roll.asked===1?'':'s'} asked about pertained to nothing this session did, costing ${fmtTokens(roll.tokens)}. Relevance is a model judgment: it orders this list, it never marks a rule followed or broken.</div>`
+    : `<div class="waste-note">Ordered by what each file cost. ${roll.note ? escapeHtml(roll.note) + '.' : `Whether it earned that was not asked - the mode in the header says why no model was asked.`}</div>`;
+  html += `<div class="file-list">`;
+  rows.slice(0, 40).forEach(r => {
+    const tag = r.relevance
+      ? `<span class="waste-tag ${r.relevance === 'not-pertinent' ? 'bad' : ''}">${escapeHtml(r.relevanceLabel)}</span>`
+      : '';
+    // Both figures on every row: a token count alone does not say the file sat
+    // there for the whole run, and a turn count alone does not say what it cost.
+    html += `<div class="waste-row">
+      <div><div class="path">${tag}${escapeHtml(r.path)}</div>${r.reason ? `<div class="why">${escapeHtml(r.reason)}</div>` : ''}</div>
+      <div class="figures">${fmtTokens(r.tokens)} · ${r.turns} turn${r.turns === 1 ? '' : 's'}</div>
+    </div>`;
+  });
+  if (rows.length > 40) html += `<div class="waste-note" style="margin:8px 0 0">… ${rows.length - 40} more files - see <code>--query &lt;session&gt; waste --all</code>.</div>`;
+  return html + `</div>`;
 }
 
 // The compare payload is baked only when --compare was passed, so the tab
@@ -7026,9 +10076,9 @@ function renderCompare() {
   let stepRows = '';
   C.steps.forEach(s => {
     const cell = (x) => {
-      if (!x) return `<td class="cmp-empty">—</td>`;
+      if (!x) return `<td class="cmp-empty">-</td>`;
       // A session with no real user prompt produces no turns, so its actions
-      // carry a null turn — show the detail regardless, it's the only context.
+      // carry a null turn - show the detail regardless, it's the only context.
       const where = (x.turn === null || x.turn === undefined) ? '' : `turn ${x.turn + 1} · `;
       return `<td class="cmp-cell">${escapeHtml(x.name)} <span class="cmp-detail">${where}${escapeHtml(x.detail || '')}</span></td>`;
     };
@@ -7037,7 +10087,7 @@ function renderCompare() {
 
   let turnRows = '';
   C.turns.forEach(t => {
-    const label = (x) => x ? escapeHtml(x.promptPreview.slice(0, 60)) : '—';
+    const label = (x) => x ? escapeHtml(x.promptPreview.slice(0, 60)) : '-';
     const kind = !t.b ? 'removed' : (!t.a ? 'added' : (t.promptMatch ? 'match' : 'changed'));
     turnRows += `
       <tr class="cmp-row kind-${kind}">
@@ -7071,19 +10121,19 @@ function renderCompare() {
   html += `
     <div class="cmp-cols">
       <div>
-        <h3>Behaviour — aligned steps</h3>
+        <h3>Behaviour - aligned steps</h3>
         <table class="cmp-table">
           <thead><tr><th></th><th>A</th><th>B</th></tr></thead>
           <tbody>${stepRows || `<tr><td colspan="3" class="cmp-empty">Neither run made a tool call.</td></tr>`}</tbody>
         </table>
-        <h3 style="margin-top:18px">Behaviour — per turn</h3>
+        <h3 style="margin-top:18px">Behaviour - per turn</h3>
         <table class="cmp-table">
           <thead><tr><th></th><th>A prompt</th><th>B prompt</th><th>B − A</th></tr></thead>
           <tbody>${turnRows || `<tr><td colspan="4" class="cmp-empty">No turns.</td></tr>`}</tbody>
         </table>
       </div>
       <div>
-        <h3>Context — block diff</h3>
+        <h3>Context - block diff</h3>
         ${fileHtml}
       </div>
     </div>

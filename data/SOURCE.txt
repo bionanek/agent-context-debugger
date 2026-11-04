@@ -1,0 +1,14 @@
+wordfreq-en.json — English word frequencies on the Zipf scale (log10 of occurrences
+per billion words), used by lexical.py as the D2 general-English background.
+
+Source: https://github.com/aparrish/wordfreq-en-25000 (wordfreq-en-25000-log.json),
+itself derived from rspeer/wordfreq (https://github.com/rspeer/wordfreq).
+
+Transform applied once, at authoring time: the source stores natural log of the
+word's frequency as a fraction of the corpus, so zipf = ln_frequency / ln(10) + 9.
+Non-alphabetic entries are dropped and the rest lower-cased. 24,352 words remain,
+all with zipf >= 3.09 — below that the term already carries full weight, so nothing
+useful is lost by the list ending where it does.
+
+The file is optional. Absent, lexical.py falls back to D1 x D3 (block-collection
+IDF and the session's own background), which is what keeps the core language-neutral.

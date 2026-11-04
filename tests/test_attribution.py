@@ -227,9 +227,7 @@ def test_duplicate_pairs_report_attributed_costs():
          "blocks": [{"id": "b-0-rule", "title": "Rule", "content": shared,
                      "cost": {"tokens": 100, "estimated": True}}]},
     ]
-    trace = {"user_prompt": "", "segs": [], "all_assistant_text": "",
-             "calls": [], "cwd": ""}
-    pairs = brv.compute_duplicates(files_out, trace)
+    pairs = brv.compute_duplicates(files_out)
     assert len(pairs) == 1
     d = pairs[0]
     assert d["tokensA"] == 400

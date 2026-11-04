@@ -1,0 +1,93 @@
+{
+  "source": "tests/fixtures/global_rules.md",
+  "checks": [
+    {
+      "id": "gh-auth-before-gh",
+      "rule_ref": "GitHub account per project",
+      "rule_text": "Before running any `gh` command, check the active GitHub account with `gh auth status` and switch if needed.",
+      "statement": "Did a gh command other than `gh auth` run without a `gh auth status` or `gh auth switch` before it?",
+      "scope": "process",
+      "evidence": "transcript",
+      "bucket": "deterministic",
+      "domain": "tool",
+      "kind": "tool_never_without_prior",
+      "pattern": "\\bgh\\s+(?!auth\\b)\\S+",
+      "prior_pattern": "\\bgh\\s+auth\\s+(?:status|switch)\\b",
+      "applies_to": [],
+      "confidence": "high",
+      "message": "A `gh` command ran without checking the active account first.",
+      "examples_positive": [
+        "Bash gh pr create --fill"
+      ],
+      "examples_negative": [
+        "Bash gh auth status\nBash gh pr create --fill"
+      ],
+      "fixtures": {
+        "should_match": [
+          "Bash gh pr create --fill"
+        ],
+        "should_not_match": [
+          "Bash gh auth status\nBash gh pr create --fill",
+          "Bash gh auth switch -u bionanek\nBash gh pr list",
+          "Bash gh auth status; gh pr list",
+          "Bash git log --author=\"bionanek-x\"",
+          "Bash gh auth status"
+        ]
+      }
+    },
+    {
+      "id": "no-echo-into-clipboard",
+      "rule_ref": "Copy to clipboard",
+      "rule_text": "When copying any text to the clipboard, always pipe it through `printf` - never `echo`.",
+      "statement": "Was a clipboard command fed from `echo` rather than `printf`?",
+      "scope": "process",
+      "evidence": "transcript",
+      "bucket": "deterministic",
+      "domain": "shell",
+      "kind": "forbidden_command",
+      "pattern": "\\becho\\b[^|]*\\|\\s*(?:pbcopy|xclip|xsel)",
+      "applies_to": [],
+      "confidence": "high",
+      "message": "`echo` appends a newline; the rule asks for `printf`.",
+      "examples_positive": [
+        "echo \"$content\" | pbcopy"
+      ],
+      "examples_negative": [
+        "printf '%s' \"$content\" | pbcopy"
+      ],
+      "fixtures": {
+        "should_match": [
+          "echo \"$content\" | pbcopy"
+        ],
+        "should_not_match": [
+          "printf '%s' \"$content\" | pbcopy",
+          "echo done",
+          "pbpaste | wc -l"
+        ]
+      }
+    },
+    {
+      "id": "closing-summary-shape",
+      "rule_ref": "End-of-implementation summary",
+      "rule_text": "After implementing any code change, always end your response with a brief user-facing summary: what changed from the user's perspective. Keep it to 1-3 sentences. Focus on observable behavior, not technical details.",
+      "statement": "After changing code, does the response's closing paragraph describe the change in 1-3 sentences of observable behaviour rather than implementation detail?",
+      "scope": "communication",
+      "bucket": "judged",
+      "confidence": "medium",
+      "examples_positive": [
+        "You can now sign in with a magic link instead of a password. The old password form still works for existing accounts."
+      ],
+      "examples_negative": [
+        "Refactored AuthController to delegate to MagicLinkService and moved the token schema into a new migration."
+      ]
+    }
+  ],
+  "not_checkable": [
+    {
+      "id": "answer-first",
+      "rule_ref": "How to talk to me",
+      "rule_text": "ANSWER FIRST. Open every response with one plain-language sentence that answers the question.",
+      "why": "Whether a sentence answers the question is a judgement about meaning; no pattern over the transcript decides it."
+    }
+  ]
+}
