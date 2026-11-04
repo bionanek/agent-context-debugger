@@ -156,3 +156,33 @@ produces no false reds" is measured against authorised actions only, and the
 scorecard header says so. Subagent and workflow runs, where no human authorised
 each step, are the candidate hunting ground.
 
+
+### What the `authorised` corpus actually is
+
+The plan this class came from asked for seven frozen sessions, all carrying
+`authorised` truth. What exists is **six frozen, four of them `authorised`, and
+one named session deliberately not frozen**. Stating it as met would be the one
+thing this file exists to prevent, so it is stated as unmet, on both axes.
+
+**Four of six, not six.** Deriving the truth from the frozen transcripts found
+that only four of the six sessions ever push to master. In the other two the
+only pushes are to a branch, and the red comes from the record's pattern meeting
+a later command on the same compound line. Their truth is `no-hard-verdict`: the
+rule's action never happened, so there was nothing for the user to authorise. A
+red there is still a false red, but of a kind the authorisation mechanism does
+not address.
+
+**One session not frozen.** The seventh named session loads no compiled rule at
+all, so no `ignored` verdict is reachable in it - only a reviewed compiled check
+can call a rule violated. A ground-truth row over it could confirm nothing but
+the absence of an accusation that was never available, which is the case the
+scorecard's own coverage warning is about. It also sits in the external audit
+list, which is required to be disjoint from the anchors, so freezing it would
+have shrunk the one gate that keeps this measurement from being self-graded.
+
+**A disclosure that argues the other way.** Ruling 4 above was derived from that
+very session, and this file is handed to every external auditor. An auditor of
+it therefore reads a ruling drawn from it - a real, pre-existing dent in the
+independence claim, and the strongest argument for freezing it. It still loses,
+because a ruling about how to read evidence is not a ground-truth row about a
+session, but it is recorded here rather than left for a reader to notice.
