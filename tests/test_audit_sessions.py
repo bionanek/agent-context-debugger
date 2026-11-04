@@ -123,3 +123,25 @@ def test_the_withheld_list_names_every_answer_sheet():
     output rather than the transcript."""
     assert set(aud.WITHHELD) == {"snapshots/SCORECARD.md", "snapshots/expected/",
                                  "snapshots/after/", "snapshots/baseline/"}
+
+
+def test_the_printed_query_command_never_reaches_the_judge():
+    """An external auditor runs the command this file prints, verbatim.
+
+    `--query` bakes through the same path a build does, so with the judge on
+    by default that command sends a client's frozen session content to a
+    model - the one thing the snapshot harness already refuses to do. The
+    one-time notice is a notice, not a consent gate. Asserted through the real
+    argv rather than a flag name, so a renamed flag fails here.
+    """
+    import build_real_view as brv
+
+    cmd = aud.query_command("/somewhere/project", "abc12345")
+    tail = cmd.split("build_real_view.py", 1)[1].split()
+    old = sys.argv
+    try:
+        sys.argv = ["build_real_view.py"] + tail
+        args = brv.parse_args()
+    finally:
+        sys.argv = old
+    assert brv.make_judge(args) is None

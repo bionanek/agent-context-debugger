@@ -759,3 +759,27 @@ def test_the_missed_compliance_line_names_the_direction_it_moved(tmp_path):
     word = "unchanged" if missed == base else ("down" if missed < base else "up")
     assert compare.missed_direction(missed) == word
     assert word in text
+
+
+def test_the_judge_row_names_the_tier_it_was_measured_against(tmp_path):
+    """The judge row cannot be re-run from this repo, so the one thing the
+    scorecard can do is say whether the tier it describes is still the tier in
+    the tree. Unpinned, a later change that makes the judge worse leaves the
+    table unchanged and still green."""
+    root = _authorised_files(tmp_path, "ignored", "ignored")
+    report = compare.compare_all(root / "baseline", root / "after", root / "expected")
+    text = "\n".join(compare.render(report))
+    assert compare.judge_tier_pin_line() in text
+    assert compare.JUDGE_TIER_PIN["sha256"][:12] in text
+
+
+def test_a_changed_judge_tier_marks_the_judge_row_stale(tmp_path, monkeypatch):
+    """The pin only earns its place if it goes red. With the tier edited under
+    it the row is a measurement of code that is no longer here, and the
+    scorecard has to say so rather than print the old numbers plainly."""
+    root = _authorised_files(tmp_path, "ignored", "ignored")
+    report = compare.compare_all(root / "baseline", root / "after", root / "expected")
+    monkeypatch.setitem(compare.JUDGE_TIER_PIN, "sha256", "0" * 64)
+    line = compare.judge_tier_pin_line()
+    assert "stale" in line.lower()
+    assert line in "\n".join(compare.render(report))

@@ -24,6 +24,7 @@ limit. A session missing either half fails the run unless `--allow-partial`.
 """
 import argparse
 import gzip
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -556,6 +557,33 @@ BLIND_JUDGE_PROVENANCE = (
     "the other.")
 
 
+# The judge tier as it stood when the experiment above was run. The row cannot
+# be re-measured from this repo, so the one falsifiable thing left is whether
+# the code it describes is still the code in the tree: without this pin a later
+# change that makes the judge worse leaves the table unchanged and still green.
+# Bump it only together with a fresh measurement.
+JUDGE_TIER_PIN = {"path": "judge_tier.py",
+                  "sha256": "8f3ef667b8b7a231015a0ddf0f6ff6fef3d0f016b54eac24d5cd75ac5f877147"}
+
+
+def judge_tier_pin_line(root=None):
+    """Whether the judge row still describes the tier in the tree."""
+    root = Path(root) if root else Path(__file__).resolve().parent.parent
+    pinned = JUDGE_TIER_PIN["sha256"]
+    try:
+        now = hashlib.sha256((root / JUDGE_TIER_PIN["path"]).read_bytes()).hexdigest()
+    except OSError:
+        now = ""
+    if now == pinned:
+        return (f"`{JUDGE_TIER_PIN['path']}` is byte-identical to the copy that "
+                f"experiment measured (sha256 `{pinned[:12]}`), so the row still "
+                "describes the tier in this tree.")
+    return (f"**The judge row is stale**: `{JUDGE_TIER_PIN['path']}` has changed "
+            f"since the experiment (pinned sha256 `{pinned[:12]}`, now "
+            f"`{now[:12] or 'unreadable'}`), so these numbers describe code that is "
+            "no longer here. Re-measure, or treat the row as history only.")
+
+
 def _four_way_lines():
     """The experiment's four-way split, which is what the architecture rests on."""
     j = BLIND_JUDGE
@@ -634,7 +662,7 @@ def _tier_lines(report):
             f"{t['falseRedAfter']} | {t['missedAfter']} |",
             f"| blind judge ({j['when']}, {j['blocks']} blocks) | {j['falseGreen']} | "
             f"{j['falseRed']} | {j['missed']} |",
-            "", BLIND_JUDGE_PROVENANCE, ""] + _four_way_lines() + [
+            "", BLIND_JUDGE_PROVENANCE, "", judge_tier_pin_line(), ""] + _four_way_lines() + [
             "", CONTESTED_RATE, "",
             f"Missed compliance in the after column is {t['missedAfter']} over all "
             f"scored blocks, {report['byHalf']['skill']['missedAfter']} in the skill "

@@ -144,8 +144,17 @@ def rows(sessions_file=DEFAULT_SESSIONS_FILE):
 
 
 def query_command(cwd, session):
+    """The command an external auditor runs, verbatim.
+
+    `--no-judge` is not a preference. `--query` bakes through the same path a
+    build does, so with the judge on by default this command would send the
+    audited session's own content - a client's, in several of these projects -
+    to a model, and would make the audited verdicts depend on an answer the
+    auditor cannot see. The one-time notice the tool prints is a notice, not a
+    consent gate.
+    """
     script = REPO_ROOT / "build_real_view.py"
-    return (f"cd {cwd} && python3 {script} "
+    return (f"cd {cwd} && python3 {script} --no-judge "
             f"--query {session} blocks --all --no-all-sessions")
 
 
