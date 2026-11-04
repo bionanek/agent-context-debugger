@@ -8,10 +8,14 @@ without destroying what they measure - which leaves exactly one control, that
 they are never committed. This module is that control, expressed as a test
 rather than as a line in a README nobody re-reads.
 """
+import json
 import subprocess
 from pathlib import Path
 
 import pytest
+
+import build_real_view as brv
+import judge_tier
 
 REPO = Path(__file__).resolve().parent.parent
 # Named with the trailing slash the ignore rules carry: without it `git
@@ -75,3 +79,24 @@ def test_no_committed_snapshot_file_carries_a_home_path():
     assert proc.returncode in (0, 1), proc.stderr
     assert proc.stdout.strip() == "", (
         f"a committed file under snapshots/ carries a home path:\n{proc.stdout}")
+
+
+# ---------- the default sends session content, so the first run says so ----------
+
+def test_the_first_run_says_what_is_sent_and_says_it_once(tmp_path, monkeypatch, capsys):
+    """A notice, not a gate.
+
+    The judge runs without a flag, so the default path sends prompts, code and
+    rule documents to a model. Nobody reads a README before their first run, so
+    the tool says it itself - once per machine, on stderr, where it cannot land
+    in a `--query` answer.
+    """
+    monkeypatch.setenv("CTXIDE_CONFIG", str(tmp_path / "config.json"))
+    assert brv.judge_notice() is True
+    said = capsys.readouterr().err
+    for part in ("--no-judge", "Anthropic", "cache", judge_tier.DEFAULT_MODEL):
+        assert part in said, said
+
+    assert brv.judge_notice() is False, "a notice nobody can silence is a nag"
+    assert capsys.readouterr().err == ""
+    assert json.loads((tmp_path / "config.json").read_text())["judgeNoticeShown"]

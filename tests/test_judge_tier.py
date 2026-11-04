@@ -2,9 +2,11 @@
 
 Four claims, each one a way the tier could quietly make the tool worse:
 
-* **Off is off.** With no flag, no judge is constructed, nothing is asked, and
-  the report is the one the offline path produced. The whole trust contract of
-  this tool rests on that default holding.
+* **The offline path survives the default changing.** The tier runs without a
+  flag since 2026-11-04, so what has to hold is the other direction:
+  `--no-judge` produces the offline payload, a judge that cannot be reached
+  costs the report a note and not a verdict, and no judge answer awards a
+  badge.
 * **One rule, one candidate, one call**, and a verdict the reader cannot go and
   check is not reportable as a violation.
 * **Reproducibility.** The same session plus the same rules must give the same
@@ -17,13 +19,13 @@ Four claims, each one a way the tier could quietly make the tool worse:
 The model is stubbed everywhere: no test in this repo may make a call.
 """
 import json
-from pathlib import Path
+import sys
 
 import build_real_view as brv
 import judge_tier
 import rule_checks as rc
 
-from tests.test_turns import user_text
+from tests.test_turns import _Args, _write_jsonl, user_text
 from tests.test_rule_checks import (bash, corpus_for, doc, rule_file, trace_for,
                                     write_call)
 
@@ -104,45 +106,144 @@ def wrote_catch(path="/repo/src/a.ts"):
     return [user_text("add the handler", 1), write_call(path, CATCH_SRC, 2)]
 
 
-# ---------- the default: off, and offline ----------
+# ---------- the default: on, and degradation as a feature ----------
+#
+# Superseded on 2026-11-04: the tier used to be opt-in and its guarantee was
+# that the default path never imported this module. A tier nobody switches on
+# is a tier that does not exist, so the judge now runs without a flag and the
+# retired guarantee is replaced by three the reader can still rely on -
+# `--no-judge` is the offline path and is unchanged by the tier existing, a
+# judge that cannot be reached costs the report nothing but a note, and no
+# judge answer awards a badge in either direction.
 
-def test_the_tier_is_off_by_default_and_asks_nothing(tmp_path):
-    """No flag, no judge, no call - and the same report as before the tier existed."""
-    src = tmp_path / "RULES.md"
-    src.write_text("## Error handling\n\nAlways implement the catch body.\n")
-    (tmp_path / "RULES.md.checks.json").write_text(json.dumps(doc(checks=[hybrid()])))
+
+def _bake(tmp_path, monkeypatch, judge_runner):
+    """One session whose project rules carry a record parked for the judge."""
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    (tmp_path / "CLAUDE.md").write_text(
+        "# Rules\n\n## Error handling\n\nAlways implement the catch body.\n")
+    (tmp_path / "CLAUDE.md.checks.json").write_text(
+        json.dumps(doc(checks=[hybrid()], source=str(tmp_path / "CLAUDE.md"))))
     rc.checks_for_doc.cache_clear()
-    events = wrote_catch()
-    block = brv.parse_claude_md(src.read_text())[0]
-
-    trace = trace_for(events)
-    assert trace.get("judge") is None
-    v = brv.assess_block(block, rule_file(src), trace)
-    parked = v["ruleCheck"]["judged"]
-    assert [p["id"] for p in parked] == ["catch-must-handle"]
-    assert "judge tier is off" in parked[0]["why"]
-    assert v["ruleCheck"]["findings"] == []
-    assert v["ruleCheck"]["state"] == "not-checkable"
+    events = [user_text("add the handler", 1),
+              write_call(str(tmp_path / "a.ts"), CATCH_SRC, 2)]
+    p = _write_jsonl(tmp_path, events)
+    monkeypatch.chdir(tmp_path)
+    args = _Args()
+    args.judge_runner = judge_runner
+    summary, per = brv.process_session(p, args)
+    return brv.build_data(str(tmp_path), [summary], {summary["id"]: per},
+                          summary["id"], judge=judge_runner)
 
 
-def test_no_flag_builds_no_runner():
+def _statuses(data):
+    """Every block's verdict and rule-check state, keyed by block id."""
+    out = {}
+    for sd in (data.get("perSession") or {}).values():
+        for f in sd["contextFiles"]:
+            for b in f["blocks"]:
+                out[b["id"]] = (b["status"], (b.get("ruleCheck") or {}).get("state"))
+    return out
+
+
+COMPLIANT = json.dumps({"verdict": "compliant", "evidence": "catch (e) {",
+                        "reason": "the body reports the error"})
+
+
+def test_a_default_run_asks_the_judge_with_no_flag(tmp_path, monkeypatch):
+    monkeypatch.setattr(brv.sys, "argv",
+                        ["build_real_view.py", "--judge-cache", str(tmp_path / "c.json")])
+    args = brv.parse_args()
+    runner = brv.make_judge(args)
+    assert runner is not None and runner.model == judge_tier.DEFAULT_MODEL
+    asked = []
+
+    def invoke(prompt, model):
+        asked.append(prompt)
+        return COMPLIANT
+
+    monkeypatch.setattr(judge_tier, "invoke_claude", invoke)
+    data = _bake(tmp_path, monkeypatch, runner)
+    assert asked, "a run with no flag has to ask the judge"
+    assert data["judgeMode"] == "judged"
+
+
+def test_no_judge_builds_no_runner():
     class Args:
-        judge = False
+        no_judge = True
+
     assert brv.make_judge(Args()) is None
 
 
-def test_the_default_path_never_imports_the_tier():
-    """The offline guarantee is a property of the import graph, not of a branch.
+def test_no_judge_is_byte_identical_to_the_offline_build(tmp_path, monkeypatch):
+    """The replacement for the retired import-graph test.
 
-    `build_real_view` and `rule_checks` may only reach the module that can send
-    session content to a model from inside a function, so an audit with the flag
-    off cannot load it by accident.
+    It asserts what that test was really protecting: with `--no-judge` the
+    payload is the offline one, and it is produced without the tier being
+    loadable at all - so the offline path cannot quietly start depending on a
+    module whose absence it is supposed to survive.
     """
-    for name in ("build_real_view.py", "rule_checks.py", "ctxlog_facts.py", "lexical.py"):
-        src = Path(__file__).resolve().parents[1] / name
-        for line in src.read_text().splitlines():
-            if line.startswith(("import judge_tier", "from judge_tier")):
-                raise AssertionError(f"{name} imports judge_tier at module level")
+    monkeypatch.setattr(brv.sys, "argv", ["build_real_view.py", "--no-judge"])
+    assert brv.make_judge(brv.parse_args()) is None
+
+    with_tier = _bake(tmp_path, monkeypatch, None)
+    monkeypatch.setitem(sys.modules, "judge_tier", None)
+    without_tier = _bake(tmp_path, monkeypatch, None)
+
+    assert (json.dumps(with_tier, sort_keys=True)
+            == json.dumps(without_tier, sort_keys=True))
+    assert with_tier["judgeMode"] == "offline (--no-judge)"
+
+
+class LoggedOut:
+    """The real 2026-11-04 failure: a CLI that is installed and not logged in."""
+
+    def __call__(self, prompt, model):
+        raise judge_tier.JudgeError("the judge exited 1: no output")
+
+
+def test_an_unauthenticated_cli_degrades_to_the_offline_report(tmp_path, monkeypatch):
+    runner = judge(LoggedOut(), tmp_path)
+    on = _bake(tmp_path, monkeypatch, runner)
+    off = _bake(tmp_path, monkeypatch, None)
+
+    assert _statuses(on) == _statuses(off), "a dead judge may not move a verdict"
+    assert on["judgeMode"] == "offline (judge unavailable: the judge exited 1: no output)"
+    assert "exited 1" in on["judgeUnavailable"]
+    assert "judgeUnavailable" not in off
+
+
+def test_a_timeout_mid_bake_keeps_the_answers_already_paid_for(tmp_path):
+    class OnceThenTimeout:
+        def __init__(self):
+            self.n = 0
+
+        def __call__(self, prompt, model):
+            self.n += 1
+            if self.n == 1:
+                return COMPLIANT
+            raise judge_tier.JudgeError("the judge did not answer within 180s")
+
+    j = judge(OnceThenTimeout(), tmp_path)
+    first = judge_tier.judge_request("k1", "s", [], [], [("a", "one")], "test-model")
+    second = judge_tier.judge_request("k2", "s", [], [], [("b", "two")], "test-model")
+    answered, lost = j.ask(first), j.ask(second)
+
+    cached = json.loads((tmp_path / "judge-cache.json").read_text())["verdicts"]
+    assert first["cacheKey"] in cached, "an answer already paid for must survive"
+    assert second["cacheKey"] not in cached, "a failed call must never be cached"
+    assert answered["verdict"] == "compliant"
+    # Unasked, not doubted: the question nobody got an answer to must not read
+    # as "there might be something here".
+    assert lost["unavailable"] and "could not be reached" in lost["reason"]
+
+
+def test_every_report_names_the_mode_it_was_produced_in(tmp_path, monkeypatch):
+    data = _bake(tmp_path, monkeypatch, None)
+    out = brv.run_query(data, ["sessions"])
+    assert any(line == "mode: offline (--no-judge)" for line in out), out
 
 
 # ---------- bucket B: one candidate, one call, citation or downgrade ----------
@@ -513,16 +614,18 @@ def test_evidence_is_clipped_so_one_huge_file_cannot_fill_the_prompt():
 
 # ---------- the CLI surface ----------
 
-def test_the_flags_default_to_off(monkeypatch):
+def test_the_judge_is_on_unless_the_offline_flag_is_passed(monkeypatch):
     monkeypatch.setattr(brv.sys, "argv", ["build_real_view.py"])
     args = brv.parse_args()
-    assert args.judge is False
+    assert args.no_judge is False
     assert args.judge_model is None and args.judge_cache is None
+    monkeypatch.setattr(brv.sys, "argv", ["build_real_view.py", "--no-judge"])
+    assert brv.parse_args().no_judge is True
 
 
-def test_the_flag_builds_a_runner_on_the_documented_defaults(monkeypatch, tmp_path):
+def test_the_default_builds_a_runner_on_the_documented_defaults(monkeypatch, tmp_path):
     monkeypatch.setattr(brv.sys, "argv",
-                        ["build_real_view.py", "--judge",
+                        ["build_real_view.py",
                          "--judge-cache", str(tmp_path / "c.json")])
     args = brv.parse_args()
     j = brv.make_judge(args)

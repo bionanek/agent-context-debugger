@@ -409,7 +409,7 @@ class _AlwaysViolated:
 
 
 def test_the_judge_tier_off_never_worsens_a_verdict(tmp_path):
-    """Off is the default, so its answer is the one almost everyone sees.
+    """`--no-judge` is a supported mode, so its answer has to stand on its own.
 
     A hybrid record parked for the judge must report as unchecked with the
     bucket named. The trap is the opposite of the usual one: the enumeration
@@ -533,4 +533,46 @@ def test_the_judge_tier_off_never_contests_a_block(tmp_path):
     assert on["contested"], "the judge read this block as used; the flag has to say so"
     assert "contested" not in off
     assert on["status"] == off["status"], "the flag must never move a verdict"
+    assert_not_worse(on, off, "judge-tier")
+
+
+def test_the_default_report_does_not_depend_on_the_judge(tmp_path):
+    """Default-on must not mean the report is only right when a judge answers.
+
+    The judge runs without a flag since 2026-11-04, so the degradation question
+    gained a second direction: a judge that is installed and cannot be reached
+    - no auth, no network - has to leave every verdict exactly where the
+    offline run left it, and pay for its absence in a note rather than in a
+    status.
+    """
+    class Unreachable:
+        def __call__(self, prompt, model):
+            raise judge_tier.JudgeError("the judge exited 1: no output")
+
+    doc = tmp_path / "RULES.md"
+    doc.write_text("# Rules\n\n## Error handling\n\nAlways implement the catch body.\n")
+    (tmp_path / "RULES.md.checks.json").write_text(
+        json.dumps({"source": str(doc), "checks": [HYBRID_CHECK]}))
+    rc.checks_for_doc.cache_clear()
+    events = [user_text("add the handler", 1),
+              assistant_tool_use("Write", {"file_path": str(tmp_path / "a.ts"),
+                                           "content": EMPTY_CATCH_SRC}, 2, tool_id="w1")]
+    file = {"loaded": True, "kind": "project", "path": str(doc),
+            "abs_path": str(doc), "name": None}
+    block = next(b for b in brv.parse_claude_md(doc.read_text())
+                 if b["title"] == "Error handling")
+
+    def verdict(judge):
+        trace = brv.build_trace(events, brv.tool_calls(events),
+                                brv.assistant_text_segments(events), "add the handler")
+        trace["judge"] = judge
+        return brv.assess_block(block, file, trace)
+
+    dead = judge_tier.Judge(model="test-model", cache=tmp_path / "judge-cache.json",
+                            invoke=Unreachable())
+    on, off = verdict(dead), verdict(None)
+
+    assert on["status"] == off["status"], (on["reason"], off["reason"])
+    assert on["ruleCheck"]["state"] == off["ruleCheck"]["state"]
+    assert brv.judge_mode(dead)[0].startswith("offline (judge unavailable:")
     assert_not_worse(on, off, "judge-tier")
