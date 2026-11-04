@@ -507,6 +507,17 @@ def _command_joins(text):
     return [m.start() for m in _COMMAND_JOIN.finditer(masked)]
 
 
+def _command_spans(text):
+    """(start, end) of each command in a call, split on the joins above."""
+    masked = _QUOTED_ARG.sub(lambda m: "_" * (m.end() - m.start()), text)
+    spans, at = [], 0
+    for m in _COMMAND_JOIN.finditer(masked):
+        spans.append((at, m.start()))
+        at = m.end()
+    spans.append((at, len(text)))
+    return spans
+
+
 def _command_search(pattern, text):
     """The first match that stays inside a single command.
 
@@ -517,10 +528,19 @@ def _command_search(pattern, text):
     the one action it did not take, which is the worst failure this tool has. A
     pipe is deliberately not a join, because it composes a single command out
     of stages rather than prescribing each one.
+
+    Each command is searched within its own bounds rather than the whole line
+    being searched and spanning matches discarded: a greedy run produces
+    exactly one match and it is the spanning one, so the shorter match sitting
+    wholly inside the offending command would never be offered and a real
+    violation inside a compound call would go unreported. Bounding the search
+    is what keeps both errors off the report. Offsets stay absolute, because
+    every caller cites them against the full line.
     """
-    joins = _command_joins(text)
-    for m in re.finditer(pattern, text, re.MULTILINE):
-        if not any(m.start() <= j < m.end() for j in joins):
+    rx = re.compile(pattern, re.MULTILINE)
+    for start, end in _command_spans(text):
+        m = rx.search(text, start, end)
+        if m:
             return m
     return None
 

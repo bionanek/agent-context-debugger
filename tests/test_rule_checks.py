@@ -967,6 +967,39 @@ def test_a_shell_pattern_may_not_span_two_commands_either(tmp_path):
     assert red["ruleCheck"]["findings"][0]["state"] == "violated"
 
 
+def test_a_real_violation_inside_a_compound_call_still_reds(tmp_path):
+    """The bound on a pattern is a bound, not an exemption for compound calls.
+
+    The join guard rejects a match that spans two commands, but a greedy run
+    produces exactly one match and it is the spanning one, so the shorter
+    match sitting wholly inside the offending command was never offered and a
+    real push to master went unreported. A missed red is the mirror of the
+    false red the guard exists to prevent: both leave the reader with a
+    verdict the trace does not support.
+    """
+    src, block = push_block(tmp_path)
+    for compound in ("git push origin master && gh pr create --base master",
+                     "git commit -m x && git push origin master "
+                     "&& gh pr create --base master"):
+        v = brv.assess_block(block, rule_file(src),
+                             trace_for([user_text("ship it", 1), bash(compound, 2)]))
+        states = [f["state"] for f in v["ruleCheck"]["findings"]]
+        assert "violated" in states, (compound, states)
+
+
+def test_a_real_shell_violation_inside_a_compound_call_still_reds(tmp_path):
+    """The shell kinds read the same compound line and need the same repair."""
+    shell = push_check(id="no-push-shell", domain="shell", kind="forbidden_command",
+                       pattern=r"\bgit\s+push\b[^\n]*\bmaster\b",
+                       self_test={"should_match": ["git push origin master"],
+                                  "should_not_match": ["git push -u origin feat/posts"]})
+    src, block = push_block(tmp_path, checks=[shell])
+    compound = "git push origin master && gh pr create --base master"
+    v = brv.assess_block(block, rule_file(src),
+                         trace_for([user_text("ship it", 1), bash(compound, 2)]))
+    assert [f["state"] for f in v["ruleCheck"]["findings"]] == ["violated"]
+
+
 # ---------- the join reads the same turns the rest of the payload does ----------
 
 class _SessionArgs:
