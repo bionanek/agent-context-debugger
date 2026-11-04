@@ -6,8 +6,8 @@ between "expensive" and "wasted". The one genuine model addition here is that
 second half - a scoped, cached relevance question per loaded file - and these
 tests pin the four ways it could make the tool worse:
 
-* **Off is off.** With no flag the waste list is the cost-ordered list the
-  offline path already produced, and no context-file record grows a key.
+* **Offline is offline.** Under `--no-judge` the waste list is the cost-ordered
+  list the offline path already produced, and no context-file record grows a key.
 * **Both figures, always.** A file the judge calls not pertinent is only a
   finding next to what it cost and how long it sat there; either number alone
   is unactionable.
@@ -43,11 +43,10 @@ class Stub:
 
 
 def judge(stub, tmp_path, **over):
-    # `ask_relevance` is the flag that turns this question on: the rule
-    # questions run without one, this one is a call per loaded file per
-    # session and is asked only when it was asked for.
+    # No flag of its own: since 2026-11-04 the judge runs by default and the
+    # relevance question runs with it, under the same degradation rules.
     kw = {"model": "test-model", "cache": tmp_path / "judge-cache.json",
-          "invoke": stub, "ask_relevance": True}
+          "invoke": stub}
     kw.update(over)
     return judge_tier.Judge(**kw)
 

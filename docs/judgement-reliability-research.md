@@ -835,10 +835,11 @@ replace the retired one, each with a test: `--no-judge` produces the offline rep
 imports the tier's module; a judge that cannot be reached degrades to exactly the offline
 report plus a note, exiting 0; and no judge answer awards a green or a red badge in either
 direction (which is §9.1's citation rule plus the blind-judge measurement of 2026-11-04 - 53
-false greens to the deterministic tier's 2). The relevance judgment of the last bullet is the
-one judged question that stays behind a flag, `--judge-relevance`: it is a call per loaded
-file per session, where the rule questions are a handful per project, so a default bake would
-spend the whole call budget on it before a rule was asked.
+false greens to the deterministic tier's 2). The relevance judgment of the last bullet runs
+with the rest of the tier and has no flag of its own: it is a call per loaded file per
+session, where the rule questions are a handful per project, so it is the part of a default
+bake most likely to meet the `--judge-max-calls` ceiling - which is why it is asked
+most-expensive-file first and degrades, like everything else here, to "not asked".
 
 ### 9.2 ast-grep - ACCEPTED, as a pinned optional enhancer
 

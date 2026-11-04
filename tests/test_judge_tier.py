@@ -20,6 +20,7 @@ The model is stubbed everywhere: no test in this repo may make a call.
 """
 import json
 import sys
+from pathlib import Path
 
 import build_real_view as brv
 import judge_tier
@@ -177,24 +178,36 @@ def test_no_judge_builds_no_runner():
     assert brv.make_judge(Args()) is None
 
 
-def test_no_judge_is_byte_identical_to_the_offline_build(tmp_path, monkeypatch):
+def test_no_judge_adds_only_the_mode_key_to_the_offline_payload(tmp_path, monkeypatch):
     """The replacement for the retired import-graph test.
 
-    It asserts what that test was really protecting: with `--no-judge` the
-    payload is the offline one, and it is produced without the tier being
-    loadable at all - so the offline path cannot quietly start depending on a
-    module whose absence it is supposed to survive.
+    The phase asked for a `--no-judge` payload byte-identical to the pre-change
+    offline build, and that criterion cannot be met as written: the same phase
+    requires every report to name its mode, so the offline payload carries one
+    appended key. What is asserted instead is the exact deviation - `judgeMode`
+    is the only top-level key the offline payload gained over the pre-change
+    one, whose keys are the committed golden payload's, and every value under
+    them is held by `test_payload_is_purely_additive`.
+
+    The other half is what the import test was really protecting: `--no-judge`
+    builds its runner, and bakes, with `judge_tier` not importable at all.
     """
+    pre_change = set(json.loads(
+        (Path(__file__).parent / "fixtures" / "rollup_payload_golden.json")
+        .read_text()))
+
     monkeypatch.setattr(brv.sys, "argv", ["build_real_view.py", "--no-judge"])
-    assert brv.make_judge(brv.parse_args()) is None
-
-    with_tier = _bake(tmp_path, monkeypatch, None)
+    args = brv.parse_args()
+    # None, not an ImportError: the offline path must not load the module even
+    # to decide that it is not going to use it.
     monkeypatch.setitem(sys.modules, "judge_tier", None)
-    without_tier = _bake(tmp_path, monkeypatch, None)
+    runner = brv.make_judge(args)
+    assert runner is None
+    data = _bake(tmp_path, monkeypatch, runner)
 
-    assert (json.dumps(with_tier, sort_keys=True)
-            == json.dumps(without_tier, sort_keys=True))
-    assert with_tier["judgeMode"] == "offline (--no-judge)"
+    assert data["judgeMode"] == "offline (--no-judge)"
+    assert "judgeUnavailable" not in data
+    assert set(data) - pre_change == {"judgeMode"}
 
 
 class LoggedOut:
@@ -238,6 +251,32 @@ def test_a_timeout_mid_bake_keeps_the_answers_already_paid_for(tmp_path):
     # Unasked, not doubted: the question nobody got an answer to must not read
     # as "there might be something here".
     assert lost["unavailable"] and "could not be reached" in lost["reason"]
+
+
+def test_a_budget_spent_before_any_answer_is_not_a_judged_run(tmp_path):
+    """`--judge-max-calls 0` is a free dry run, so no model was behind anything.
+
+    Reporting it as `judged` would tell the reader a model stood behind every
+    verdict on the page when zero questions were asked - the one thing the mode
+    line exists to stop them having to guess about.
+    """
+    j = judge(Stub(COMPLIANT), tmp_path, max_calls=0)
+    answer = j.ask(judge_tier.judge_request("k1", "s", [], [], [("a", "one")],
+                                            "test-model"))
+    assert answer["unavailable"] and j.calls == 0
+
+    mode, reason = brv.judge_mode(j)
+    assert mode == f"offline (judge unavailable: {reason})"
+    assert "budget" in reason
+
+
+def test_a_judged_run_that_also_ran_out_of_budget_is_still_judged(tmp_path):
+    """One answer given is a judged report with a gap, not an offline one."""
+    j = judge(Stub(COMPLIANT), tmp_path, max_calls=1)
+    j.ask(judge_tier.judge_request("k1", "s", [], [], [("a", "one")], "test-model"))
+    j.ask(judge_tier.judge_request("k2", "s", [], [], [("b", "two")], "test-model"))
+    assert j.exhausted
+    assert brv.judge_mode(j) == ("judged", None)
 
 
 def test_every_report_names_the_mode_it_was_produced_in(tmp_path, monkeypatch):

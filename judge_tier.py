@@ -518,14 +518,13 @@ class Judge:
     """
 
     def __init__(self, model=DEFAULT_MODEL, cache=None, invoke=None,
-                 max_calls=DEFAULT_MAX_CALLS, ask_relevance=False):
+                 max_calls=DEFAULT_MAX_CALLS):
         self.model = model or DEFAULT_MODEL
         # The rule questions are a handful per project - one per parked record,
         # cached - which is what makes them affordable without a flag. The
         # relevance question is one call per loaded file per session, so a
         # default bake of twenty sessions would spend the whole call budget on
         # it before a single rule was asked. It stays behind its own flag.
-        self.ask_relevance = ask_relevance
         self.cache_file = cache_path(cache)
         # Resolved at call time, never bound as a default: a test that patches
         # the module function has to be able to stop a real call from going out.
@@ -597,8 +596,21 @@ class Judge:
         that failed once and answered twenty times produced a judged report
         with a gap in it, and reporting that as "the judge is missing" would
         tell the reader to discount verdicts a model really did give.
+
+        A spent budget counts as unavailable for the same reason an unreachable
+        backend does. `--judge-max-calls 0` is a free dry run, and a large bake
+        can spend its budget before the first answer; either way no model was
+        behind anything on the page, which is exactly what the mode line exists
+        to tell the reader.
         """
-        return None if self.answered else self.unreachable
+        if self.answered:
+            return None
+        if self.unreachable:
+            return self.unreachable
+        if self.exhausted:
+            return (f"the call budget of {self.max_calls} was spent before any "
+                    "question was answered")
+        return None
 
     def save(self):
         """Write the cache through after each answer.

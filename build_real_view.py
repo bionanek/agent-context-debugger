@@ -5388,11 +5388,6 @@ def parse_args():
     p.add_argument("--judge-cache", type=Path, default=None,
                    help="The verdict cache file "
                         "(default: $CTXIDE_JUDGE_CACHE, else ~/.claude/ctxide/judge-cache.json).")
-    p.add_argument("--judge-relevance", action="store_true",
-                   help="Also ask the model whether each loaded file pertained to the "
-                        "session's task. Off by default: that is one call per loaded "
-                        "file per session, where the rule questions are a handful per "
-                        "project.")
     p.add_argument("--judge-max-calls", type=int, default=200,
                    help="Cap on model calls in one run (default: 200). "
                         "Cached verdicts are free and do not count.")
@@ -7053,8 +7048,6 @@ def process_session(transcript_path, args):
     # doc pertain to turn 7?").
     digest = task_digest(turn_payloads, aggregate["userPrompt"])
     judge = aggregate["trace"].get("judge")
-    if judge is not None and not judge.ask_relevance:
-        judge = None
     note = ""
     if judge is not None and digest:
         judge_relevance(aggregate["contextFiles"], digest, judge)
@@ -7314,8 +7307,7 @@ def make_judge(args):
     return judge_tier.Judge(model=getattr(args, "judge_model", None),
                             cache=getattr(args, "judge_cache", None),
                             max_calls=judge_tier.DEFAULT_MAX_CALLS
-                            if budget is None else budget,
-                            ask_relevance=getattr(args, "judge_relevance", False))
+                            if budget is None else budget)
 
 
 def bake_sessions(all_paths, active_path, args):

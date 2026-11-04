@@ -95,7 +95,7 @@ For every session, per turn (one real user prompt to the next):
   context files that were resident for it, cached vs fresh, plus cache-break markers.
 - Duplicated/overlapping content across context files, priced in attributed tokens.
 - Wasted context: every loaded file listed by what it cost and how many turns it sat
-  there. That ordering is cost alone; with `--judge-relevance` each file also gets
+  there. Offline that ordering is cost alone; with the judge on each file also gets
   a relevance judgment against what the session actually did, so the list becomes
   cost x relevance - an expensive file that earned its place drops below a cheaper
   one that pertained to nothing. A file nobody could place is `undecidable`, which
@@ -219,7 +219,6 @@ python3 hooks/ctxlog.py report [SID]  # timeline + coverage check for a session
 | `--judge-model ID` | `sonnet` | The model to ask. Part of the verdict cache key. |
 | `--judge-cache PATH` | `~/.claude/ctxide/judge-cache.json` | Where verdicts are cached. `$CTXIDE_JUDGE_CACHE` overrides the default. |
 | `--judge-max-calls N` | 200 | Cap on model calls in one run. Cached verdicts are free and do not count. |
-| `--judge-relevance` | **off** | Also ask whether each loaded file pertained to the session's task. One call per loaded file per session, where the rule questions are a handful per project. |
 
 ## Query mode
 
@@ -298,7 +297,7 @@ Five tabs, all rendering the same baked JSON:
   marker rows.
 - **File Activity** - reads/edits per file across the scope, plus **Wasted
   context**: every loaded file by cost and turns resident, session-wide. Cost
-  cost ordering by default; cost x relevance with `--judge-relevance`.
+  ordering alone under `--no-judge`; cost x relevance with the judge on.
 - **Duplications** - overlapping context content, classified
   `redundant` / `overlap` / `related`, priced by attributed tokens (the share
   that could have been deleted).
@@ -634,6 +633,8 @@ What did **not** change when the default did, and each of these has a test:
 
 1. `--no-judge` produces the offline payload, and produces it without
    `judge_tier` being importable at all - the import lives inside `make_judge`.
+   One key is new: `judgeMode`, because every report names its mode. That is the
+   whole difference from the pre-change offline payload, and a test pins it.
 2. A judge that cannot be reached - logged out, offline, no CLI - degrades to
    exactly the offline report plus a note. The bake succeeds and exits 0.
 3. **No judge answer awards a badge**, green or red. A semantic verdict is
@@ -647,7 +648,7 @@ whether a model was behind a verdict.
 
 ```bash
 python3 build_real_view.py                      # the judge runs; the header says `judged`
-python3 build_real_view.py --no-judge           # offline, byte for byte
+python3 build_real_view.py --no-judge           # offline; `judgeMode` is the one key it adds
 python3 build_real_view.py --query <id>         # same modes, named on the last line
 ```
 
@@ -681,16 +682,15 @@ report carries a file, a line and the snippet.
 **The third question: was this context wasted?** Beside the rule verdicts, the
 tier can answer one question per loaded file - *did this file pertain to
 anything this session did?* - from the file's own summary plus a digest of every
-prompt the user typed. This one stays behind a flag, `--judge-relevance`, when
-the rule questions do not: it is a call per loaded file per session, so a
-default bake of twenty sessions would spend the whole budget on it before a
-rule was asked. The structural half of waste (delivery, residency, token
-attribution, duplicates) stays Python-computed and is unchanged without the
-flag; the judgment only reorders the list, and it is asked most-expensive-file
-first so a finite budget is spent where the money went - it shares the one
-`--judge-max-calls` budget with the rule questions, so bake a single session
-(`--session <id> --judge-relevance`) rather than the default twenty when you
-want every file asked about. Answers are
+prompt the user typed. It runs with the rest of the tier, without a flag of its
+own. It is a call per loaded file per session where the rule questions are a
+handful per project, so it is the part of a default bake most likely to meet the
+`--judge-max-calls` ceiling: it is asked most-expensive-file first, so a finite
+budget is spent where the money went, and bake a single session
+(`--session <id>`) rather than the default twenty when you want every file
+asked about. The structural half of waste (delivery, residency, token
+attribution, duplicates) stays Python-computed and is unchanged under
+`--no-judge`; the judgment only reorders the list. Answers are
 `pertinent` / `not-pertinent` / `undecidable`, cached on `(file content hash,
 task digest hash, model id)`. A file whose summary tries to instruct the auditor
 has its answer thrown away and reported as `undecidable` - the file picked its
@@ -723,7 +723,7 @@ one changes:**
 |---|---|---|
 | `hooks/ctxlog.py` | Records which instruction files Claude Code actually loaded, so a rule that was never delivered reads `not-loaded` instead of being assumed present. | Nothing. It writes a local JSON-lines log. |
 | `install_ast_grep.py` | Adds the `ast_forbidden` check kind, which asks a structural question a regex only approximates. | One download, from a URL and checksum printed before you consent, into the tool's own `vendor/` directory. Never your `PATH`. |
-| the judge tier (**on**; `--no-judge` turns it off) | Sends one narrow question per rule per candidate site to a model through your existing `claude` CLI. `--judge-relevance` adds one question per loaded file about whether it pertained to the task. | The rule statement, its two examples, and the specific snippet or file summary the question is about. Never the session, never a second rule. |
+| the judge tier (**on**; `--no-judge` turns it off) | Sends one narrow question per rule per candidate site to a model through your existing `claude` CLI. It also asks one question per loaded file about whether it pertained to the task. | The rule statement, its two examples, and the specific snippet or file summary the question is about. Never the session, never a second rule. |
 
 **Every optional signal degrades to "signal unavailable", never to a worse
 verdict.** That includes the two above, readable extended thinking (which some
