@@ -139,6 +139,24 @@ def prompt_for(session, actions, joins, rulings, blocks):
     )
 
 
+def _unwrapped(text):
+    """The model's own text, out of the CLI's `--output-format json` envelope.
+
+    The envelope is JSON, so every answer line sits inside one string field and
+    a reader scanning the raw text finds none of them - which reports as a judge
+    that answered nothing while every call says it succeeded. Unwrapping here
+    rather than at the call site keeps it true whoever supplied the text.
+    """
+    text = text or ""
+    try:
+        env = json.loads(text)
+    except (ValueError, TypeError):
+        return text
+    if isinstance(env, dict) and isinstance(env.get("result"), str):
+        return env["result"]
+    return text
+
+
 def parse_answers(text, block_ids):
     """`{block id: status}` for the lines that name a block asked about and a
     status in the closed set. Anything else is dropped rather than coerced:
@@ -147,7 +165,7 @@ def parse_answers(text, block_ids):
     """
     wanted = set(block_ids)
     out = {}
-    for raw in (text or "").splitlines():
+    for raw in _unwrapped(text).splitlines():
         line = raw.strip().lstrip("-*# ").strip()
         if ":" not in line:
             continue
@@ -219,8 +237,13 @@ def measure(corpora, invoke=None, model=None, chunk=DEFAULT_CHUNK,
 
     def run(job):
         c, blocks = job
-        text = invoke(prompt_for(c["session"], c["actions"], c["joins"],
-                                 c["rulings"], blocks), model)
+        try:
+            text = invoke(prompt_for(c["session"], c["actions"], c["joins"],
+                                     c["rulings"], blocks), model)
+        except judge_tier.JudgeError:
+            # One unreachable call must not end the run: the corpus takes ~50
+            # calls, and a raise on the third would throw away the two before it.
+            text = None
         return job, text
 
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:

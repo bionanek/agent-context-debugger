@@ -80,6 +80,21 @@ def test_an_answer_outside_the_closed_set_is_dropped():
     assert got == {"block-1": "used", "block-3": "dormant"}
 
 
+def test_the_cli_json_envelope_is_unwrapped_before_the_answers_are_read():
+    """`claude -p --output-format json` wraps the model's text in `result`.
+
+    The envelope's own keys are JSON, so every answer line sits inside one
+    string field and a reader that scans the raw text finds none of them. The
+    whole corpus came back unanswered this way - 20 of 20 blocks, with every
+    call reporting success, which is the shape of a broken harness that looks
+    like a judge with nothing to say.
+    """
+    envelope = json.dumps({"type": "result", "total_cost_usd": 0.3,
+                           "result": "block-1: used\nblock-2: dormant"})
+    assert bj.parse_answers(envelope, ["block-1", "block-2"]) == {
+        "block-1": "used", "block-2": "dormant"}
+
+
 def test_an_answer_about_a_block_that_was_not_asked_is_dropped():
     got = bj.parse_answers("block-1: used\nblock-9: used", ["block-1"])
     assert got == {"block-1": "used"}
@@ -164,6 +179,19 @@ def test_measure_counts_a_failed_call_rather_than_dropping_it(tmp_path):
     rec = bj.measure([_fake_corpus(tmp_path)], invoke=invoke, model="m", chunk=2)
     assert rec["calls"] == 1 and rec["callsFailed"] == 1
     assert rec["blocks"] == 0 and rec["unanswered"] == 2
+
+
+def test_a_backend_that_raises_is_a_failed_call_not_a_crashed_run(tmp_path):
+    """`invoke_claude` raises `JudgeError`; one unreachable call must not end
+    the measurement, or a corpus-wide run throws away every answer before it."""
+    import judge_tier
+
+    def invoke(prompt, model):
+        raise judge_tier.JudgeError("the judge exited 1: no output")
+
+    rec = bj.measure([_fake_corpus(tmp_path)], invoke=invoke, model="m", chunk=2)
+    assert rec["calls"] == 1 and rec["callsFailed"] == 1
+    assert rec["unanswered"] == 2
 
 
 def test_measure_scores_the_answers_it_got(tmp_path):
