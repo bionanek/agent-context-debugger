@@ -347,3 +347,98 @@ def test_the_authoring_prompt_documents_what_the_loader_enforces():
         assert f"`{kind}`" in prompt, f"the prompt never names the kind `{kind}`"
     # The review gate is the whole point of a reviewable artifact.
     assert "review" in prompt.lower()
+
+
+# ---------- the onboarding line counts documents, and the compile-status screen ----------
+
+def _judged_flow_record(**over):
+    """A complete v2 record in the `judged` bucket, as the flow emits one."""
+    base = {
+        "id": "no-reaction-judged",
+        "rule_ref": "Reactions",
+        "rule_text": "Never call `reaction()` in a component.",
+        "statement": "Does any component call reaction()?",
+        "scope": "code",
+        "evidence": "diff",
+        "bucket": "judged",
+        "examples_positive": ["reaction(() => store.value, run);"],
+        "examples_negative": ["autorun(() => store.value);"],
+    }
+    base.update(over)
+    return base
+
+
+def test_the_sessions_listing_counts_uncompiled_documents_not_rules(tmp_path, monkeypatch):
+    """The reader's next action is "compile a document", so that is the unit.
+
+    A count of rules tells them how much prose is unchecked; a count of
+    documents tells them how many times to run the command.
+    """
+    summary, per_session = _session(tmp_path, monkeypatch)
+    out = _query(summary, per_session, ["sessions"])
+    assert "1 rule document not compiled" in out
+    assert rc.COMPILE_COMMAND in out and "CLAUDE.md" in out
+    rc.checks_for_doc.cache_clear()
+
+
+def test_the_sessions_listing_is_silent_once_nothing_is_left_to_compile(tmp_path, monkeypatch):
+    checks = doc(checks=[_flow_record(rule_ref="Copy to clipboard")],
+                 not_checkable=[{"rule_ref": "Reactions", "rule_text": "…",
+                                 "why": "needs cross-file resolution"},
+                                {"rule_ref": "Commits", "rule_text": "…",
+                                 "why": "order is not expressible here"}])
+    summary, per_session = _session(tmp_path, monkeypatch, checks=checks)
+    out = _query(summary, per_session, ["sessions"])
+    assert rc.COMPILE_COMMAND not in out
+    rc.checks_for_doc.cache_clear()
+
+
+def test_the_per_document_breakdown_names_the_bucket_mix(tmp_path, monkeypatch):
+    """A document compiled entirely into `judged` is not offline-decidable.
+
+    Counting it as "compiled" would report progress toward a decidable report
+    that the checks file cannot deliver without the opt-in tier switched on.
+    """
+    checks = doc(checks=[_flow_record(rule_ref="Copy to clipboard"),
+                         _judged_flow_record()],
+                 not_checkable=[{"rule_ref": "Commits", "rule_text": "…",
+                                 "why": "order is not expressible here"}])
+    summary, per_session = _session(tmp_path, monkeypatch, checks=checks)
+    d = _project_doc(per_session)
+    assert (d["deterministic"], d["judged"], d["notCheckable"]) == (1, 1, 1)
+    assert d["state"] == "compiled"
+    roll = per_session["ruleCompile"]
+    assert roll["deterministic"] == 1 and roll["judged"] == 1
+    rc.checks_for_doc.cache_clear()
+
+
+def test_compile_status_lists_every_document_its_state_and_its_bucket_mix(tmp_path, monkeypatch):
+    checks = doc(checks=[_flow_record(rule_ref="Copy to clipboard"),
+                         _judged_flow_record()],
+                 not_checkable=[{"rule_ref": "Commits", "rule_text": "…",
+                                 "why": "order is not expressible here"}])
+    summary, per_session = _session(tmp_path, monkeypatch, checks=checks)
+    out = _query(summary, per_session, ["sessions"], compile_status=True)
+    assert "CLAUDE.md" in out
+    assert "1 deterministic" in out and "1 judged" in out
+    assert "1 reviewed as not checkable" in out
+    rc.checks_for_doc.cache_clear()
+
+
+def test_compile_status_round_trips_when_a_document_is_compiled(tmp_path, monkeypatch):
+    """The acceptance criterion: compile a document, re-run, the line moves."""
+    summary, per_session = _session(tmp_path, monkeypatch)
+    before = _query(summary, per_session, ["sessions"], compile_status=True)
+    assert "uncompiled" in before
+    assert rc.COMPILE_COMMAND in before and "CLAUDE.md" in before
+
+    checks = doc(checks=[_flow_record(rule_ref="Copy to clipboard")],
+                 not_checkable=[{"rule_ref": "Reactions", "rule_text": "…",
+                                 "why": "needs cross-file resolution"},
+                                {"rule_ref": "Commits", "rule_text": "…",
+                                 "why": "order is not expressible here"}])
+    summary, per_session = _session(tmp_path, monkeypatch, checks=checks)
+    after = _query(summary, per_session, ["sessions"], compile_status=True)
+    assert "uncompiled" not in after
+    assert rc.COMPILE_COMMAND not in after
+    rc.checks_for_doc.cache_clear()

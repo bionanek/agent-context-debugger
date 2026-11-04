@@ -1070,3 +1070,54 @@ def test_a_compaction_carved_turn_still_names_the_prompt_in_flight(tmp_path, mon
     assert len(findings) == 1
     assert findings[0]["governingPrompt"] == {
         "text": "/commit and push to master", "turnIndex": 1, "callIndex": 0}
+
+
+# ---------- the document's own compile state ----------
+
+JUDGED_ONLY_DOC = "## How to talk to me\n\nAlways answer first, with zero fluff.\n"
+
+
+def judged_record(**over):
+    """A record the compiler parked for the judge, as the flow emits one."""
+    base = {
+        "id": "be-direct", "rule_ref": "How to talk to me",
+        "rule_text": "Answer first, zero fluff.",
+        "bucket": "judged",
+        "scope": "communication",
+        "evidence": "transcript",
+        "statement": "Does the reply open with a one-sentence answer?",
+        "examples_positive": ["Yes - the cache was never invalidated."],
+        "examples_negative": ["Great question! Let me walk you through the layers."],
+    }
+    base.update(over)
+    return base
+
+
+def test_a_document_compiled_entirely_into_judged_reports_refused(tmp_path):
+    """"Compiled" must not be read as "decidable".
+
+    A checks file whose every record is parked for the judge produces no
+    offline answer about any rule in the document, so the document's state is
+    the answer the compiler actually gave: refused.
+    """
+    blocks = brv.parse_claude_md(JUDGED_ONLY_DOC)
+    loaded = rc.load_checks(doc(checks=[judged_record()]))
+    status = rc.compile_status(blocks, loaded)
+    assert status["state"] == "refused"
+    assert status["compiled"] == 0 and status["deterministic"] == 0
+    assert status["judged"] == 1 and status["notCheckable"] == 0
+
+
+def test_a_document_with_one_deterministic_record_reports_compiled(tmp_path):
+    blocks = brv.parse_claude_md(
+        "## Reactions\n\nNever call `reaction()` in a component.\n")
+    loaded = rc.load_checks(doc(checks=[check()]))
+    status = rc.compile_status(blocks, loaded)
+    assert status["state"] == "compiled" and status["deterministic"] == 1
+
+
+def test_a_document_nobody_compiled_reports_uncompiled():
+    blocks = brv.parse_claude_md(JUDGED_ONLY_DOC)
+    status = rc.compile_status(blocks, None)
+    assert status["state"] == "uncompiled"
+    assert status["deterministic"] == 0 and status["judged"] == 0

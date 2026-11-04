@@ -19,6 +19,7 @@ nothing and the affected rules report honestly, *and* the same rules still
 resolve correctly once their compiled equivalents are present - the migration
 preserves coverage rather than dropping it.
 """
+import json
 from pathlib import Path
 
 import build_real_view as brv
@@ -614,3 +615,76 @@ def test_a_foreign_language_prompt_is_joined_to_its_call_the_same_way(tmp_path):
         assert finding["governingPrompt"]["callIndex"] == 0
         # Offline both stay violations: the prompt is shown, not interpreted.
         assert finding["state"] == "violated"
+
+
+# ---------- the two rule shapes characters cannot decide ----------
+
+IMPORT_RULE_MD = """## Store imports
+
+Never import another store's singleton: use `legacy/rootStore` nowhere.
+"""
+
+UI_TEXT_RULE_MD = """## UI copy
+
+Never hardcode user-facing copy - every string goes through `t()`.
+"""
+
+
+def _ast_only_doc(tmp_path, md, rule_ref, check_id, pattern, name, fixtures):
+    """A rule document whose one compiled record needs the syntax tree."""
+    src = tmp_path / name
+    src.write_text(md)
+    record = {
+        "id": check_id, "rule_ref": rule_ref, "rule_text": md.strip().splitlines()[-1],
+        "domain": "source", "kind": "ast_forbidden", "ast_pattern": pattern,
+        "applies_to": ["**/*.tsx"], "confidence": "high",
+        "message": "this is what the rule forbids",
+        "statement": "Does the code do the forbidden thing?",
+        "scope": "code", "evidence": "diff", "bucket": "deterministic",
+        "examples_positive": ["the forbidden shape"],
+        "examples_negative": ["the permitted shape"],
+        "self_test": fixtures,
+    }
+    (tmp_path / f"{name}.checks.json").write_text(
+        json.dumps({"source": name, "checks": [record], "not_checkable": []}))
+    rc.checks_for_doc.cache_clear()
+    block = brv.parse_claude_md(md)[0]
+    return rc.check_block(block, rc.checks_for_doc(str(src)),
+                          rc.build_corpus([]), doc_path=str(src))
+
+
+def test_an_import_path_rule_without_the_backend_is_not_checkable(tmp_path, monkeypatch):
+    """An import path lives inside a string literal, which the stripper blanks.
+
+    So there is no character for a regex to match, and the honest report is
+    that the backend the rule needs is not installed - never `clear`.
+    """
+    monkeypatch.setenv(rc.AST_GREP_ENV, str(tmp_path / "nothing-here"))
+    out = _ast_only_doc(tmp_path, IMPORT_RULE_MD, "Store imports", "no-cross-store",
+                        "import $A from 'legacy/rootStore'", "IMPORTS.md",
+                        {"should_match": ["import s from 'legacy/rootStore';\n"],
+                         "should_not_match": ["import s from './localStore';\n"]})
+    assert out["state"] == "not-checkable"
+    (entry,) = out["notCheckable"]
+    assert rc.AST_GREP_INSTALL in entry["why"]
+    # The reason it has to be structural: the path is gone before any pattern runs.
+    stripped = rc.strip_comments_and_strings(
+        "import { rootStore } from 'legacy/rootStore';", "src/a.tsx")
+    assert "legacy/rootStore" not in stripped
+    rc.checks_for_doc.cache_clear()
+
+
+def test_a_ui_string_rule_without_the_backend_is_not_checkable(tmp_path, monkeypatch):
+    """Same trap from the other side: UI copy is a string literal too."""
+    monkeypatch.setenv(rc.AST_GREP_ENV, str(tmp_path / "nothing-here"))
+    out = _ast_only_doc(tmp_path, UI_TEXT_RULE_MD, "UI copy", "no-raw-copy",
+                        "<Text>$A</Text>", "UICOPY.md",
+                        {"should_match": ["<Text>Save changes</Text>\n"],
+                         "should_not_match": ["<Text>{t('save')}</Text>\n"]})
+    assert out["state"] == "not-checkable"
+    (entry,) = out["notCheckable"]
+    assert rc.AST_GREP_INSTALL in entry["why"]
+    stripped = rc.strip_comments_and_strings(
+        'const label = "Save changes";', "src/a.tsx")
+    assert "Save changes" not in stripped
+    rc.checks_for_doc.cache_clear()
