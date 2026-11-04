@@ -708,10 +708,9 @@ def test_the_scorecard_puts_both_tiers_false_counts_side_by_side(tmp_path):
     assert "## Both tiers, side by side" in text
     assert (f"| compiled checks (this corpus, after) | {t['falseGreenAfter']} | "
             f"{t['falseRedAfter']} | {t['missedAfter']} |") in text
-    assert (f"| blind judge ({compare.BLIND_JUDGE['when']}, "
-            f"{compare.BLIND_JUDGE['blocks']} blocks) | "
-            f"{compare.BLIND_JUDGE['falseGreen']} | {compare.BLIND_JUDGE['falseRed']} | "
-            f"{compare.BLIND_JUDGE['missed']} |") in text
+    j = compare.load_blind_judge()
+    assert (f"| blind judge ({j['when']}, {j['blocks']} blocks) | "
+            f"{j['falseGreen']} | {j['falseRed']} | {j['missed']} |") in text
 
 
 def test_the_judge_tier_row_says_it_was_not_re_measured(tmp_path):
@@ -721,7 +720,7 @@ def test_the_judge_tier_row_says_it_was_not_re_measured(tmp_path):
     root = _authorised_files(tmp_path, "ignored", "ignored")
     report = compare.compare_all(root / "baseline", root / "after", root / "expected")
     text = "\n".join(compare.render(report))
-    assert compare.BLIND_JUDGE_PROVENANCE in text
+    assert compare.blind_judge_provenance(compare.load_blind_judge()) in text
 
 
 def test_the_scorecard_states_the_contested_rate_beside_the_judges_false_greens(tmp_path):
@@ -730,8 +729,9 @@ def test_the_scorecard_states_the_contested_rate_beside_the_judges_false_greens(
     root = _authorised_files(tmp_path, "ignored", "ignored")
     report = compare.compare_all(root / "baseline", root / "after", root / "expected")
     text = "\n".join(compare.render(report))
+    j = compare.load_blind_judge()
     assert compare.CONTESTED_RATE in text
-    assert str(compare.BLIND_JUDGE["falseGreen"]) in compare.CONTESTED_RATE
+    assert str(j["falseGreen"]) in compare.contested_rate_line(j)
 
 
 def test_the_scorecard_states_missed_compliance_against_the_pre_plan_baseline(tmp_path):
@@ -785,3 +785,73 @@ def test_the_scorecard_never_claims_the_judge_row_describes_this_tree(tmp_path):
     for claim in ("byte-identical", "that experiment measured",
                   "still describes the tier"):
         assert claim not in text, claim
+
+
+# ---------- the judge row is a recorded dataset, not a generator constant ----------
+
+def _judge_record(**over):
+    rec = {"when": "2020-01-02", "sessions": 5, "blocks": 10, "calls": 20,
+           "callsFailed": 3, "falseGreen": 7, "falseRed": 1, "missed": 2,
+           "agrees": 6, "codeAgrees": 5, "codeFalseGreen": 0, "codeFalseRed": 0,
+           "codeMissed": 4, "bothRight": 4, "judgeOnly": 2, "codeOnly": 1,
+           "neither": 3}
+    rec.update(over)
+    return rec
+
+
+def _write_record(tmp_path, rec):
+    path = tmp_path / "blind_judge.json"
+    path.write_text(json.dumps(rec), encoding="utf-8")
+    return path
+
+
+def test_the_judge_row_is_rendered_from_the_committed_record(tmp_path, monkeypatch):
+    """The row's numbers must come from a dated record this repo holds, not
+    from constants inside the generator. A generated file whose own header
+    says "do not edit by hand" cannot be the place its numbers are written
+    down: nothing then relates the published row to any artifact, so editing
+    the record is the only way the row can be made to change."""
+    rec = _judge_record()
+    monkeypatch.setattr(compare, "BLIND_JUDGE_RECORD", _write_record(tmp_path, rec))
+    root = _authorised_files(tmp_path, "ignored", "ignored")
+    report = compare.compare_all(root / "baseline", root / "after", root / "expected")
+    text = "\n".join(compare.render(report))
+    assert (f"| blind judge ({rec['when']}, {rec['blocks']} blocks) | "
+            f"{rec['falseGreen']} | {rec['falseRed']} | {rec['missed']} |") in text
+    assert "both right 4, judge right and code wrong 2" in text
+
+
+def test_a_judge_record_whose_four_way_split_does_not_add_up_is_refused(tmp_path):
+    """The split is the one thing in the record that can be checked here: its
+    four cells have to sum to the block count and to each tier's agreement
+    count. A transcription error that silently renders is a published number
+    with nothing behind it."""
+    path = _write_record(tmp_path, _judge_record(neither=99))
+    with pytest.raises(ValueError) as e:
+        compare.load_blind_judge(path)
+    assert "neither" in str(e.value) or "blocks" in str(e.value)
+
+
+def test_a_judge_record_that_contradicts_its_agreement_totals_is_refused(tmp_path):
+    path = _write_record(tmp_path, _judge_record(agrees=99))
+    with pytest.raises(ValueError):
+        compare.load_blind_judge(path)
+
+
+def test_without_the_record_the_scorecard_omits_the_judge_row_and_says_so(tmp_path,
+                                                                          monkeypatch):
+    """No record, no row. Printing the numbers anyway is what made them
+    unfalsifiable in the first place."""
+    monkeypatch.setattr(compare, "BLIND_JUDGE_RECORD", tmp_path / "absent.json")
+    root = _authorised_files(tmp_path, "ignored", "ignored")
+    report = compare.compare_all(root / "baseline", root / "after", root / "expected")
+    text = "\n".join(compare.render(report))
+    assert "| blind judge" not in text
+    assert "no blind-judge record" in text.lower()
+
+
+def test_the_committed_judge_record_loads_and_its_split_adds_up():
+    rec = compare.load_blind_judge()
+    assert rec is not None
+    assert rec["bothRight"] + rec["judgeOnly"] + rec["codeOnly"] + rec["neither"] \
+        == rec["blocks"]

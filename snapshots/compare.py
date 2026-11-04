@@ -526,34 +526,67 @@ def _coverage_lines(report):
     return out + [""]
 
 
-# The blind-judge experiment of 2026-11-04, recorded rather than re-run. A
-# judge was handed exactly what the ground-truth author was handed
-# (`snapshots/inventory.py`'s three views plus RULINGS.md), never the tool's
-# verdict, and scored against the same answer key on the same blocks. Its
-# numbers are the reason the judge informs a reader and never awards a badge,
-# so they belong beside the measured ones - labelled as a dated experiment,
-# because nothing in this repo can reproduce them offline.
-BLIND_JUDGE = {"when": "2026-11-04", "blocks": 399, "falseGreen": 53,
-               "falseRed": 11, "missed": 28, "agrees": 296,
-               "codeAgrees": 274, "codeFalseGreen": 2, "codeFalseRed": 0,
-               "codeMissed": 84,
-               # The four-way split, by whether each tier's answer fell inside
-               # the truth class: both right, judge only, code only, neither.
-               # Derived from the experiment's own totals, which is why it adds
-               # back to 399 and to each tier's agreement count.
-               "bothRight": 202, "judgeOnly": 94, "codeOnly": 72, "neither": 31}
+BLIND_JUDGE_RECORD = SNAPSHOTS_DIR / "blind_judge.json"
+
+BLIND_JUDGE_FIELDS = ("when", "sessions", "blocks", "calls", "callsFailed",
+                      "falseGreen", "falseRed", "missed", "agrees", "codeAgrees",
+                      "codeFalseGreen", "codeFalseRed", "codeMissed",
+                      "bothRight", "judgeOnly", "codeOnly", "neither")
 
 
-BLIND_JUDGE_PROVENANCE = (
-    "The judge row is **not a reading of this corpus**. It is the blind-judge "
-    "experiment of 2026-11-04 over 399 blocks from five sessions, and it was "
-    "not re-run for this scorecard: the harness was a one-off, 111 of its 532 "
-    "calls failed - taking three whole sessions out of the scored set, skewed "
-    "toward `used` truths - and re-running it would send a client's rule text "
-    "and transcripts to a model. The code row beside it is this corpus, baked "
-    "offline. Two different block sets, printed together because the pair of "
-    "false-green counts is the whole argument; neither row is a control for "
-    "the other.")
+def load_blind_judge(path=None):
+    """The dated blind-judge experiment, read from its own committed record.
+
+    The numbers deliberately do not live in this generator: the file it writes
+    says "do not edit by hand", so a row whose values were written down here
+    would be a published number related to no artifact at all. Read from a
+    record, editing that record is the only way the row can move, and a reader
+    can diff it.
+
+    The three sums are re-checked on every load. They are the only part of the
+    experiment this repo can falsify - no harness for it is committed - so a
+    transcription error raises here rather than rendering.
+    """
+    path = Path(path or BLIND_JUDGE_RECORD)
+    if not path.is_file():
+        return None
+    rec = json.loads(path.read_text(encoding="utf-8"))
+    missing = [f for f in BLIND_JUDGE_FIELDS if f not in rec]
+    if missing:
+        raise ValueError(f"{path}: blind-judge record is missing {', '.join(missing)}")
+    split = rec["bothRight"] + rec["judgeOnly"] + rec["codeOnly"] + rec["neither"]
+    for label, got, want in (
+            ("bothRight + judgeOnly + codeOnly + neither", split, rec["blocks"]),
+            ("bothRight + judgeOnly", rec["bothRight"] + rec["judgeOnly"], rec["agrees"]),
+            ("bothRight + codeOnly", rec["bothRight"] + rec["codeOnly"],
+             rec["codeAgrees"])):
+        if got != want:
+            raise ValueError(f"{path}: {label} is {got}, not {want} - the four-way "
+                             "split contradicts the totals it was derived from")
+    return rec
+
+
+NO_BLIND_JUDGE_RECORD = (
+    "**There is no blind-judge record in this tree, so no judge row is "
+    "printed.** The experiment's numbers are published only from "
+    "`snapshots/blind_judge.json`; with that file absent this scorecard has "
+    "nothing to say about the judge tier, and printing remembered figures "
+    "would be a number with no artifact behind it.")
+
+
+def blind_judge_provenance(j):
+    """Said at the row, because the table prints it in the measured row's shape."""
+    return (
+        "The judge row is **not a reading of this corpus**. It is the "
+        f"blind-judge experiment of {j['when']} over {j['blocks']} blocks from "
+        f"{j['sessions']} sessions, recorded in `snapshots/blind_judge.json` and "
+        f"not re-run for this scorecard: the harness was a one-off, "
+        f"{j['callsFailed']} of its {j['calls']} calls failed - taking three "
+        "whole sessions out of the scored set, skewed toward `used` truths - and "
+        "re-running it would send a client's rule text and transcripts to a "
+        "model. The code row beside it is this corpus, baked offline. Two "
+        "different block sets, printed together because the pair of false-green "
+        "counts is the whole argument; neither row is a control for the other.")
 
 
 # Said plainly because the table prints the judge row in the same shape as the
@@ -562,19 +595,19 @@ BLIND_JUDGE_PROVENANCE = (
 # below it can be reproduced or contradicted by anything in this repo.
 JUDGE_ROW_NOT_FALSIFIABLE = (
     "**Nothing in this repo can reproduce or falsify the judge row, or the "
-    "four-way split below it.** No harness for the experiment is committed "
-    "here and it was not re-run for this scorecard, so both are dated history: "
-    "a later change that makes the judge worse will leave these numbers "
-    "unchanged. Nor do they describe the tier in this tree - the repo records "
-    "no copy of `judge_tier.py` as the experiment measured it, and the file "
-    "has been edited since (the judge now runs by default), so no check here "
-    "can tell a reader when the row stopped applying. Re-measuring needs a "
-    "harness, and that is a phase of its own.")
+    "four-way split below it.** The record it is read from is a transcript of "
+    "a one-off run, no harness for that run is committed here, and it was not "
+    "re-run for this scorecard: both are dated history, and a later change "
+    "that makes the judge worse will leave these numbers unchanged. Nor do "
+    "they describe the tier in this tree - the repo records no copy of "
+    "`judge_tier.py` as the experiment measured it, and the file has been "
+    "edited since (the judge now runs by default), so no check here can tell a "
+    "reader when the row stopped applying. Re-measuring needs a harness, and "
+    "that is a phase of its own.")
 
 
-def _four_way_lines():
+def _four_way_lines(j):
     """The experiment's four-way split, which is what the architecture rests on."""
-    j = BLIND_JUDGE
     return [
         f"On that experiment's own {j['blocks']} blocks the two tiers split four "
         f"ways: both right {j['bothRight']}, judge right and code wrong "
@@ -599,8 +632,16 @@ CONTESTED_RATE = (
     "frozen corpus (0.2%) can carry the chip at all - a block is eligible only "
     "where its status is `unused` or `dormant` and its document parked a "
     "record for the judge, and only 48 blocks (0.4%) have a parked record of "
-    "any kind. Beside it stands the judge's own false-green count of 53: that "
-    "is why a contested block keeps its badge and gains a chip instead.")
+    "any kind.")
+
+
+def contested_rate_line(j):
+    """The contested ceiling, and - where the record is here - what it answers."""
+    if j is None:
+        return CONTESTED_RATE
+    return (CONTESTED_RATE + " Beside it stands the judge's own false-green count "
+            f"of {j['falseGreen']}: that is why a contested block keeps its badge "
+            "and gains a chip instead.")
 
 
 # The scorecard the plan's later phases are measured against, read off this
@@ -640,25 +681,30 @@ MISSED_UNCHANGED_NOTE = (
 def _tier_lines(report):
     """Both tiers' false counts in one table, and what each row is made of."""
     t = report["totals"]
-    j = BLIND_JUDGE
-    return ["## Both tiers, side by side", "",
-            "The compiled path may accuse and the judge may not. These two rows "
-            "are the reason.", "",
-            "| tier | false green | false red | missed compliance |",
-            "|---|---|---|---|",
-            f"| compiled checks (this corpus, after) | {t['falseGreenAfter']} | "
-            f"{t['falseRedAfter']} | {t['missedAfter']} |",
-            f"| blind judge ({j['when']}, {j['blocks']} blocks) | {j['falseGreen']} | "
-            f"{j['falseRed']} | {j['missed']} |",
-            "", BLIND_JUDGE_PROVENANCE, "", JUDGE_ROW_NOT_FALSIFIABLE, ""] + _four_way_lines() + [
-            "", CONTESTED_RATE, "",
-            f"Missed compliance in the after column is {t['missedAfter']} over all "
-            f"scored blocks, {report['byHalf']['skill']['missedAfter']} in the skill "
-            f"half and {report['byHalf']['rule-document']['missedAfter']} in the "
-            f"rule-document half, {missed_direction(t['missedAfter'])} against the "
-            f"baseline the criterion names. " + MISSED_BASELINE_NOTE
-            + (" " + MISSED_UNCHANGED_NOTE
-               if missed_direction(t["missedAfter"]) == "unchanged" else ""), ""]
+    j = load_blind_judge()
+    out = ["## Both tiers, side by side", "",
+           "The compiled path may accuse and the judge may not. These two rows "
+           "are the reason.", "",
+           "| tier | false green | false red | missed compliance |",
+           "|---|---|---|---|",
+           f"| compiled checks (this corpus, after) | {t['falseGreenAfter']} | "
+           f"{t['falseRedAfter']} | {t['missedAfter']} |"]
+    if j is None:
+        out += ["", NO_BLIND_JUDGE_RECORD, ""]
+    else:
+        out += [f"| blind judge ({j['when']}, {j['blocks']} blocks) | "
+                f"{j['falseGreen']} | {j['falseRed']} | {j['missed']} |",
+                "", blind_judge_provenance(j), "", JUDGE_ROW_NOT_FALSIFIABLE,
+                ""] + _four_way_lines(j) + [""]
+    return out + [
+        contested_rate_line(j), "",
+        f"Missed compliance in the after column is {t['missedAfter']} over all "
+        f"scored blocks, {report['byHalf']['skill']['missedAfter']} in the skill "
+        f"half and {report['byHalf']['rule-document']['missedAfter']} in the "
+        f"rule-document half, {missed_direction(t['missedAfter'])} against the "
+        f"baseline the criterion names. " + MISSED_BASELINE_NOTE
+        + (" " + MISSED_UNCHANGED_NOTE
+           if missed_direction(t["missedAfter"]) == "unchanged" else ""), ""]
 
 
 TABLE_HEAD = ("| {} | scored | agreed before | agreed after | fixed | regressed | still wrong "

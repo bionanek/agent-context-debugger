@@ -1,0 +1,20 @@
+{
+  "source": "Blind-judge experiment, one-off agent run. A judge was handed exactly what the ground-truth author was handed (snapshots/inventory.py's three views plus RULINGS.md), never the tool's verdict, and was scored against the same answer key on the same blocks. No harness for it is committed, so this file is the whole of the repo's record: the scorecard renders these numbers and invents none of its own. Editing this file is the only way the published judge row can change.",
+  "when": "2026-11-04",
+  "sessions": 5,
+  "blocks": 399,
+  "calls": 532,
+  "callsFailed": 111,
+  "falseGreen": 53,
+  "falseRed": 11,
+  "missed": 28,
+  "agrees": 296,
+  "codeAgrees": 274,
+  "codeFalseGreen": 2,
+  "codeFalseRed": 0,
+  "codeMissed": 84,
+  "bothRight": 202,
+  "judgeOnly": 94,
+  "codeOnly": 72,
+  "neither": 31
+}
