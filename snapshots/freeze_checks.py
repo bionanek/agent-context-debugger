@@ -14,6 +14,14 @@ records it in the manifest, so `verify` re-hashes it and `after` re-bakes
 against it. Committing the file here and the private tree nowhere is what lets
 a reader see the patterns that produced a red badge without the transcripts.
 
+The reverse direction is checked too: a checks file frozen into a baseline with
+no committed copy is reported UNREVIEWED and fails `--check`, because the gate
+enumerating only from the committed side is blind to exactly the file whose
+patterns nobody can review. The OZZ `CLAUDE.md.checks.json` behind the
+`authorised` rows is one today - it carries a client's rule prose, so the one
+record that produces those badges is quoted in `snapshots/expected/RULINGS.md`
+instead of the whole file being published here.
+
     python3 snapshots/freeze_checks.py            # freeze all, report what moved
     python3 snapshots/freeze_checks.py --check    # fail if any is missing or stale
 """
@@ -45,6 +53,26 @@ def pending(checks_dir=None, baseline_dir=None):
     return out
 
 
+def unreviewed(checks_dir=None, baseline_dir=None):
+    """(snapshot, storage key) per frozen checks file with no committed copy.
+
+    `pending` enumerates from the committed side, so a checks file that exists
+    only in the private tree is invisible to it and `--check` prints clean -
+    while every red badge that file produces rests on a pattern no reader of
+    the repo can review. Enumerating from the baselines as well is what turns
+    that silence into a line.
+    """
+    checks_dir = Path(checks_dir or DEFAULT_CHECKS_DIR)
+    baseline_dir = Path(baseline_dir or tb.DEFAULT_BASELINE_DIR)
+    out = []
+    for frozen in sorted(baseline_dir.glob("*/*/inputs/**/*.checks.json")):
+        project, prefix, _, *rest = frozen.relative_to(baseline_dir).parts
+        key = "/".join(rest)
+        if not (checks_dir / project / prefix / key).is_file():
+            out.append((f"{project}/{prefix}", key))
+    return out
+
+
 def freeze_one(src, snap, key):
     """Write one checks file into a snapshot's inputs and into its manifest."""
     raw = src.read_bytes()
@@ -71,6 +99,10 @@ def main():
                    help="report drift and exit non-zero instead of writing")
     args = p.parse_args()
     rows = pending(args.checks_dir, args.baseline_dir)
+    missing = unreviewed(args.checks_dir, args.baseline_dir)
+    for where, key in missing:
+        print(f"UNREVIEWED {where}  {key}: frozen into the private tree with no "
+              "committed copy under snapshots/checks/", file=sys.stderr)
     if not rows:
         sys.exit(f"error: no checks files under {args.checks_dir or DEFAULT_CHECKS_DIR}")
     stale = 0
@@ -87,9 +119,16 @@ def main():
             continue
         freeze_one(src, snap, key)
         print(f"froze {snap.parent.name}/{snap.name}  {key}")
-    if args.check and stale:
-        sys.exit(f"{stale} checks file(s) not frozen into the baseline; run "
-                 "python3 snapshots/freeze_checks.py")
+    if args.check and (stale or missing):
+        parts = []
+        if stale:
+            parts.append(f"{stale} checks file(s) not frozen into the baseline; run "
+                         "python3 snapshots/freeze_checks.py")
+        if missing:
+            parts.append(f"{len(missing)} frozen checks file(s) have no committed "
+                         "copy, so the patterns behind their badges are not "
+                         "reviewable from a clone")
+        sys.exit("; ".join(parts))
 
 
 if __name__ == "__main__":

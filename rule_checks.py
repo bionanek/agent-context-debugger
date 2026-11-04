@@ -1416,6 +1416,10 @@ def _judge_semantic(record, corpus, judge):
     return out, True
 
 
+AUTHORISATION_REFUSED_NOTE = (
+    "the cited call tries to instruct the auditor, so it was never asked about "
+    "and the violation stands")
+
 AUTHORISED_NOTE = ("the user instructed this action in the prompt that governs the "
                    "cited call, so it is acknowledged rather than reported as "
                    "misconduct")
@@ -1429,14 +1433,17 @@ def authorise_findings(findings, corpus, judge):
     of the same thing - the code path has `ctx-allow` and the transcript had
     nothing, so six real sessions were red-badged for obeying an instruction.
 
-    Three rules keep this from becoming a way to talk the tool out of a
+    Four rules keep this from becoming a way to talk the tool out of a
     verdict. Only a finding that already names its governing prompt is asked,
     so a turn with no prompt can never be excused by silence. Only an
     affirmative answer moves anything: a no, an unreadable reply and an
-    unreachable backend all leave the violation standing. And only the
+    unreachable backend all leave the violation standing. Only the
     deterministic tier's own findings are asked - a judge excusing another
     judge's accusation is two models agreeing with each other rather than with
-    the evidence.
+    the evidence. And a call that tries to address the judge is never asked at
+    all: the call line is agent-generated content, removing a red badge is the
+    one direction an attack would want, and the attempt is recorded on the very
+    finding it tried to move rather than passing silently.
     """
     if judge is None:
         return findings
@@ -1450,6 +1457,12 @@ def authorise_findings(findings, corpus, judge):
         call = (tools[idx]["text"] if isinstance(idx, int) and 0 <= idx < len(tools)
                 else f.get("match", ""))
         request = judge_tier.authorisation_request(governing["text"], call, judge.model)
+        if request["callInjections"]:
+            f["authorisation"] = {"verdict": judge_tier.AUTHORISATION_UNKNOWN,
+                                  "reason": judge_tier.INJECTION_NOTE,
+                                  "note": AUTHORISATION_REFUSED_NOTE,
+                                  "injection": True}
+            continue
         answer = judge.ask(request)
         if answer.get("unavailable") or answer.get("verdict") != "authorised":
             continue

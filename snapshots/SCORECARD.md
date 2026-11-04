@@ -48,6 +48,10 @@ Red-side coverage: 2 `violated` truths in the scored rows, and 8 sessions carry 
 
 4 `authorised` truths in the scored rows. The corpus holds no genuine unsupervised violation, so a false-red count of zero is measured against authorised actions only - the rule's action happened and the user asked for it in the prompt that caused it. Whether the tool accuses correctly when nobody authorised the action is still unmeasured; subagent and workflow runs are the candidate hunting ground.
 
+Of the six frozen push sessions only four carry `authorised` truth - in two the rule's action never happened, so their truth is `no-hard-verdict` - and one further session named in the plan was deliberately not frozen, because no rule it loads is compiled and a row over it could only confirm the absence of an accusation that was never reachable. See RULINGS.md 9.
+
+4 of the 6 red badges in the after column stand on an `authorised` row. Offline that is the design working rather than a regression: the finding stays `violated` and the report prints the governing prompt beside the cited call, and only the judged run may downgrade it to `acknowledged`. These payloads are baked offline, so the judged outcome is not in this table; the one judged run recorded over these sessions cleared five of the six.
+
 542 judged blocks scored, 26 excluded as `undecidable`.
 
 | | before | after |

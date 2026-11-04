@@ -382,18 +382,28 @@ def authorisation_request(prompt_text, call_text, model=DEFAULT_MODEL):
 
     Keyed on the two pieces alone, so the same prompt and the same command are
     answered once however many rules cite that call.
+
+    The two attempt scans are kept apart exactly as the relevance question's
+    are. `callInjections` is the one the caller acts on: the call line is
+    agent-generated content, and the only thing an affirmative answer does is
+    remove a red badge. A hit in the prompt is the user's own words, and a
+    session whose subject happens to be prompt injection would otherwise lose
+    every authorisation in it.
     """
-    pieces = [("user-prompt", _clip(str(prompt_text or ""), MAX_PIECE_CHARS)),
-              ("the-call", _clip(str(call_text or ""), MAX_PIECE_CHARS))]
+    prompt_piece = _clip(str(prompt_text or ""), MAX_PIECE_CHARS)
+    call_piece = _clip(str(call_text or ""), MAX_PIECE_CHARS)
+    pieces = [("user-prompt", prompt_piece), ("the-call", call_piece)]
     body = "\n".join(f"{n}\n{t}" for n, t in pieces)
     digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    call_injections = scan_for_injection(call_piece)
     return {
         "kind": "authorisation",
         "model": model,
         "cacheKey": f"authorisation|{digest}|{model}",
         "ruleKey": "authorisation",
         "evidence": pieces,
-        "injections": scan_for_injection(body),
+        "callInjections": call_injections,
+        "injections": call_injections + scan_for_injection(prompt_piece),
         "prompt": build_authorisation_prompt(digest[:12], pieces),
         "verdicts": AUTHORISATION_VERDICTS,
         "unknownVerdict": AUTHORISATION_UNKNOWN,

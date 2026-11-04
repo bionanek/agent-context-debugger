@@ -578,6 +578,18 @@ def combined_reason(status, statuses):
             + COMBINED_MEANINGS.get(status, "see the per-turn verdicts."))
 
 
+def _rebased_turn(turn):
+    """One turn's descriptor in its own slice's event coordinates.
+
+    `turn_slice` re-derives calls from the sliced event list, so their event
+    indices start at 0. The turn keeps its real `index` and its prompt - a
+    compaction-carved turn's prompt is the one that was in flight - so a
+    turn-scoped finding cites the same turn number the session scope does.
+    """
+    return dict(turn, startEventIdx=0,
+                endEventIdx=turn["endEventIdx"] - turn["startEventIdx"])
+
+
 def turn_slice(events, calls, asst_segs, turn):
     """Return the (events, calls, asst_segs) bundle restricted to one turn.
 
@@ -4772,7 +4784,7 @@ def fmt_offset(start_dt, ts):
     return f"+{h}h{m:02d}m"
 
 
-def governing_prompts_for_calls(events, calls, turn_index=None):
+def governing_prompts_for_calls(events, calls, turns=None):
     """The prompt of the turn each call falls in, one record per call.
 
     `ctx-allow` lets written code carry a deliberate exception at the violation
@@ -4794,11 +4806,16 @@ def governing_prompts_for_calls(events, calls, turn_index=None):
     task-notification - yields None, because absence must never read as
     authorisation.
 
-    `turn_index` is the real index of the turn when `events` is one turn's
-    slice; without it a slice would report every call as turn 0.
+    `turns` is the caller's own turn list, in the same event coordinates as
+    `calls`. The payload splits with the compaction boundaries, and a split
+    taken here from the prompts alone would number every turn after a
+    compaction low - the finding would cite a turn number the drill-down and
+    `--query` contradict. It also carries the prompt in flight onto a
+    compaction-carved turn, which holds none of its own: reporting nothing
+    there is the absence rule firing on a turn that *was* authorised.
     """
-    turns = split_into_turns(events)
-    base = turn_index or 0
+    if turns is None:
+        turns = split_into_turns(events)
     out = []
     for c in calls:
         idx = c.get("eventIdx")
@@ -4808,13 +4825,13 @@ def governing_prompts_for_calls(events, calls, turn_index=None):
                 if t["startEventIdx"] <= idx < t["endEventIdx"]:
                     text = (t.get("userPrompt") or "").strip()
                     if text:
-                        rec = {"text": text, "turnIndex": base + t["index"]}
+                        rec = {"text": text, "turnIndex": t["index"]}
                     break
         out.append(rec)
     return out
 
 
-def build_trace(events, calls, asst_segments, user_prompt, turn_index=None):
+def build_trace(events, calls, asst_segments, user_prompt, turns=None):
     """Bundle everything predicates and moment-assemblers need to introspect."""
     bash_cmds = [c["input"].get("command", "") for c in calls if c["name"] == "Bash"]
     edits = [c for c in calls if c["name"] in ("Edit", "Write", "MultiEdit", "NotebookEdit")]
@@ -4845,7 +4862,7 @@ def build_trace(events, calls, asst_segments, user_prompt, turn_index=None):
     # Copies rather than the originals: every other consumer of `calls` reads
     # what the transcript carried, and only the rule corpus needs the turn.
     corpus_calls = [dict(c, governingPrompt=g) for c, g in
-                    zip(calls, governing_prompts_for_calls(events, calls, turn_index))]
+                    zip(calls, governing_prompts_for_calls(events, calls, turns))]
     written_paths = _written_paths({"edits": edits, "bash_cmds": bash_cmds})
     # The lexical tier reads assistant prose and nothing else - tool inputs and
     # results never enter, and what the agent quoted back out of a file it read
@@ -5939,7 +5956,11 @@ def query_block(sid, session_data, block_id, turn=None, field=None):
                              f"{gov.get('callIndex')}: {gov.get('text', '')[:300]}")
             auth = f.get("authorisation")
             if auth:
-                lines.append(f"  [authorised] {auth.get('note', '')} - "
+                # A refused question and an answered one are different facts:
+                # one says the user asked for this, the other says the call
+                # tried to pick its own answer and the violation stands.
+                tag = "injection" if auth.get("injection") else "authorised"
+                lines.append(f"  [{tag}] {auth.get('note', '')} - "
                              f"{auth.get('reason', '')}")
         for nc in rule_check.get("notCheckable") or []:
             lines.append(f"  [why] {nc.get('why', '')}")
@@ -6468,7 +6489,7 @@ def _violation_headline(files):
 def _compute_payload(events, calls, asst_segs, args, project_dir, id_prefix="", hook_facts=None,
                      nonresident_paths=None, usage_entries=None, history_chars=None,
                      nonresident_by_request=None, skill_listing=None, lexical_bg=None,
-                     delivered=None, carried=None, turn_index=None):
+                     delivered=None, carried=None, turns=None):
     """Run the assessment pipeline against an event/call/segment bundle.
 
     Used twice in process_session: once over the full session (the aggregate)
@@ -6506,7 +6527,7 @@ def _compute_payload(events, calls, asst_segs, args, project_dir, id_prefix="", 
     user_prompt = first_real_user_prompt(events)
     timeline = build_timeline(events)
     reads, edits_counter = file_activity(calls)
-    trace = build_trace(events, calls, asst_segs, user_prompt, turn_index=turn_index)
+    trace = build_trace(events, calls, asst_segs, user_prompt, turns=turns)
     # The one hop from the CLI to the block assessment. None on the default
     # path, which is what makes every rule check below fully offline.
     trace["judge"] = getattr(args, "judge_runner", None)
@@ -6715,7 +6736,8 @@ def process_session(transcript_path, args):
                                  hook_facts=hook_facts, usage_entries=series,
                                  history_chars=history_chars,
                                  nonresident_by_request=nonresident_by_request,
-                                 delivered=delivered_at(versions, 0))
+                                 delivered=delivered_at(versions, 0),
+                                 turns=turns)
     _insert_compaction_rows(aggregate["timeline"], compaction_records)
     # Detected once over the whole session: a break is a transition between two
     # consecutive requests, and a per-turn series would miss every break that
@@ -6740,7 +6762,7 @@ def process_session(transcript_path, args):
                              lexical_bg=aggregate["lexicalBackground"],
                              delivered=delivered_at(versions, t["startEventIdx"]),
                              carried=carried.get(t["index"]),
-                             turn_index=t["index"])
+                             turns=[_rebased_turn(t)])
         _insert_cache_break_rows(p["timeline"], _breaks_within(breaks, t))
         turn_payloads.append({
             "id": f"turn-{t['index']}",

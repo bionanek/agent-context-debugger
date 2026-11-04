@@ -186,3 +186,58 @@ it therefore reads a ruling drawn from it - a real, pre-existing dent in the
 independence claim, and the strongest argument for freezing it. It still loses,
 because a ruling about how to read evidence is not a ground-truth row about a
 session, but it is recorded here rather than left for a reader to notice.
+
+**Judge on, five of six.** Asked the authorisation question with only the prompt
+and the call line, the model cleared all four `authorised` sessions and one of
+the two `no-hard-verdict` ones. The sixth answered `not-authorised`, correctly:
+its prompt orders a push to a branch, and the finding is the pattern's own
+false positive rather than an unauthorised action. So the criterion "the
+corpus's false-red count returns to zero" holds for the `authorised` set and
+not for the frozen six.
+
+### The record behind every red badge in this corpus
+
+The checks file these sessions are judged with is **not committed**. It carries
+26 records lifted from a real client's guidelines document, and publishing that
+prose is not a call this corpus gets to make. `snapshots/freeze_checks.py
+--check` reports it as UNREVIEWED and fails, so the gap is a failing gate
+rather than a silence.
+
+What produces every red badge here is one record of the 26, and it contains no
+client content at all, so it is quoted in full instead - the pattern is
+reviewable even though the file is not:
+
+```json
+{
+  "id": "no-push-to-master",
+  "rule_ref": "Hard rules (code)",
+  "rule_text": "`master` takes code only through a PR with green CI.",
+  "statement": "Did the session push directly to master?",
+  "scope": "process",
+  "evidence": "transcript",
+  "bucket": "deterministic",
+  "domain": "tool",
+  "kind": "tool_forbidden",
+  "pattern": "\\bgit\\s+push\\b[^\\n]*\\bmaster\\b",
+  "confidence": "high",
+  "message": "master is protected: land code through a PR with green CI, never a direct push.",
+  "examples_positive": ["Bash git push origin master"],
+  "examples_negative": ["Bash git push -u origin feat/posts"],
+  "fixtures": {
+    "should_match": ["Bash git push origin master",
+                     "Bash git push --force origin master"],
+    "should_not_match": ["Bash git push -u origin feat/posts",
+                         "Bash git push origin HEAD",
+                         "Bash git log origin/master --oneline"]
+  },
+  "rule_key": "adb6b89d2d84682a"
+}
+```
+
+The pattern is correct as a pattern, and confidence `high` is the right call for
+it: `git push … master` really is the forbidden action. What was wrong is what
+the tool concluded from the match, which is why this mechanism exists rather
+than a weaker pattern. Its one real defect is visible here too - `[^\n]*` runs
+to the end of a line, and a compound command collapses to one line, which is
+how the two `no-hard-verdict` sessions turn red on a push to a branch followed
+by a `master` mention in the next segment.

@@ -107,3 +107,24 @@ def test_a_legacy_entry_is_carried_into_the_new_record(tmp_path):
     fc.freeze_one(src, snap, "home/CLAUDE.md.checks.json")
     m = json.loads((snap / "manifest.json").read_text())
     assert m["addedAfterBake"] == ["home/AGENTS.md.checks.json", "home/CLAUDE.md.checks.json"]
+
+
+def test_a_frozen_checks_file_with_no_committed_copy_is_reported_unreviewed(tmp_path):
+    """The gate enumerates from the committed side, so an absent file was
+    invisible to it: a red badge could rest on a pattern no reader of the repo
+    can review, and `--check` would print clean.
+
+    The control is the same file once it *is* committed - otherwise this passes
+    whatever the code does.
+    """
+    checks, baseline, src, snap = _corpus(tmp_path)
+    private = snap / "inputs" / "home" / "Git" / "CLIENT.md.checks.json"
+    private.parent.mkdir(parents=True, exist_ok=True)
+    private.write_text('{"source": "~/Git/CLIENT.md", "checks": []}', encoding="utf-8")
+    assert fc.unreviewed(checks, baseline) == [
+        ("proj/abc12345", "home/Git/CLIENT.md.checks.json")]
+
+    mirror = checks / "proj" / "abc12345" / "home" / "Git" / "CLIENT.md.checks.json"
+    mirror.parent.mkdir(parents=True, exist_ok=True)
+    mirror.write_text(private.read_text(), encoding="utf-8")
+    assert fc.unreviewed(checks, baseline) == []

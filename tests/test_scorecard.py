@@ -664,3 +664,16 @@ def test_the_header_says_the_red_side_is_measured_against_authorised_rows(tmp_pa
     text = "\n".join(compare.render(report))
     assert "authorised" in text
     assert compare.NO_UNSUPERVISED_VIOLATION in text
+
+
+def test_the_header_says_how_many_reds_stand_on_authorised_rows(tmp_path):
+    """The headline a reader quotes went 0 -> 6 false reds, and that number is
+    the offline design working: offline the finding stays `violated` and only
+    the judged run downgrades it. A header that reports the count without
+    saying what it is made of reads as the tool having got worse."""
+    root = _authorised_files(tmp_path, "ignored", "ignored")
+    report = compare.compare_all(root / "baseline", root / "after", root / "expected")
+    assert report["totals"]["falseRedAuthorisedAfter"] == 1
+    text = "\n".join(compare.render(report))
+    assert compare.OFFLINE_RED_ON_AUTHORISED in text
+    assert "1 of the 1 red" in text

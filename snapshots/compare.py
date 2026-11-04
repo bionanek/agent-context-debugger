@@ -330,7 +330,8 @@ def _tally(rows):
                         "new-agreed", "new-wrong", "nonBlindCredited", "agreedBefore", "agreedAfter", "falseGreenBefore", "falseGreenAfter",
                         "falseRedBefore", "falseRedAfter", "missedBefore", "missedAfter",
                         "absentBefore", "absentAfter", "violatedTruths",
-                        "authorisedTruths", "nowUndelivered")}
+                        "authorisedTruths", "falseRedAuthorisedAfter",
+                        "nowUndelivered")}
     for r in rows:
         t[r["outcome"]] += 1
         if r["outcome"] == "excluded":
@@ -342,6 +343,12 @@ def _tally(rows):
             t["violatedTruths"] += 1
         if r["truth"] == "authorised":
             t["authorisedTruths"] += 1
+            # Offline a red on an authorised row is the design working, not a
+            # regression: the finding stays `violated` and the reader is shown
+            # the prompt. Counting these apart is what keeps the headline from
+            # reading as the tool having started accusing the innocent.
+            if r["afterError"] == "false-red":
+                t["falseRedAuthorisedAfter"] += 1
         if (r["after"] in tb.DELIVERY_STATUSES
                 and r["before"] not in tb.DELIVERY_STATUSES and r["before"] != ABSENT):
             t["nowUndelivered"] += 1
@@ -452,6 +459,23 @@ NO_UNSUPERVISED_VIOLATION = (
     "unmeasured; subagent and workflow runs are the candidate hunting ground.")
 
 
+OFFLINE_RED_ON_AUTHORISED = (
+    "Offline that is the design working rather than a regression: the finding "
+    "stays `violated` and the report prints the governing prompt beside the "
+    "cited call, and only the judged run may downgrade it to `acknowledged`. "
+    "These payloads are baked offline, so the judged outcome is not in this "
+    "table; the one judged run recorded over these sessions cleared five of "
+    "the six.")
+
+
+FROZEN_SET_SHORTFALL = (
+    "Of the six frozen push sessions only four carry `authorised` truth - in "
+    "two the rule's action never happened, so their truth is `no-hard-verdict` "
+    "- and one further session named in the plan was deliberately not frozen, "
+    "because no rule it loads is compiled and a row over it could only confirm "
+    "the absence of an accusation that was never reachable. See RULINGS.md 9.")
+
+
 def _coverage_lines(report):
     """What the corpus can and cannot measure, said before any number is read."""
     t = report["totals"]
@@ -464,7 +488,15 @@ def _coverage_lines(report):
     if t["authorisedTruths"]:
         out += ["", f"{t['authorisedTruths']} `authorised` truth"
                     f"{'' if t['authorisedTruths'] == 1 else 's'} in the scored rows. "
-                + NO_UNSUPERVISED_VIOLATION]
+                + NO_UNSUPERVISED_VIOLATION,
+                "", FROZEN_SET_SHORTFALL]
+        if t["falseRedAuthorisedAfter"]:
+            out += ["", f"{t['falseRedAuthorisedAfter']} of the "
+                        f"{t['falseRedAfter']} red badge"
+                        f"{'' if t['falseRedAfter'] == 1 else 's'} in the after "
+                        "column stand"
+                        f"{'s' if t['falseRedAuthorisedAfter'] == 1 else ''} on an "
+                        "`authorised` row. " + OFFLINE_RED_ON_AUTHORISED]
     if (not t["violatedTruths"] and not t["authorisedTruths"]) or not files:
         out += ["",
                 "> **Warning: the red side of this corpus is unmeasured.** With no "

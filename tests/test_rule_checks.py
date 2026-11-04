@@ -919,3 +919,75 @@ def test_a_shell_finding_names_its_governing_prompt_too(tmp_path):
     governing = v["ruleCheck"]["findings"][0]["governingPrompt"]
     assert governing["text"] == "push to master"
     assert governing["turnIndex"] == 0 and governing["callIndex"] == 0
+
+
+# ---------- the join reads the same turns the rest of the payload does ----------
+
+class _SessionArgs:
+    claude_md = None
+    skills_dir = None
+    no_global = True
+    no_skills = True
+    no_project = False
+
+
+def _compaction_session(tmp_path, monkeypatch):
+    """A real session with a compaction between two pushes and a later prompt.
+
+    A compaction carves an extra turn boundary, so the turn a call falls in is
+    not the one a prompt-only split reports. The payload splits with the
+    compaction; a join that splits without it numbers every later turn low and
+    reports a turn number the drill-down and `--query` contradict.
+    """
+    (tmp_path / "CLAUDE.md").write_text(PUSH_RULE)
+    (tmp_path / "CLAUDE.md.checks.json").write_text(
+        json.dumps(doc(checks=[push_check()], source="CLAUDE.md")))
+    rc.checks_for_doc.cache_clear()
+    events = [user_text("/commit and push to master", 1),
+              assistant_text("on it", 2),
+              bash("git push origin master", 3, tool_id="b0"),
+              assistant_text("pushed", 5),
+              bash("git push origin master", 6, tool_id="b1"),
+              user_text("now tidy the branch", 7),
+              bash("git push --force origin master", 8, tool_id="b2")]
+    p = tmp_path / "t.jsonl"
+    p.write_text("".join(json.dumps(e) + "\n" for e in events))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(brv.ctxlog_facts, "load_facts", lambda *a, **k: {
+        "instructions": [],
+        "compactions": [{"event": "PreCompact", "ts": "2026-01-01T00:00:04+00:00",
+                         "trigger": "auto"}]})
+    return brv.process_session(p, _SessionArgs())
+
+
+def _push_findings(payload):
+    for f in payload["contextFiles"]:
+        for b in f.get("blocks") or []:
+            for finding in (b.get("ruleCheck") or {}).get("findings") or []:
+                yield finding
+
+
+def test_the_governing_turn_number_is_the_one_the_payload_splits(tmp_path, monkeypatch):
+    """The cited turn has to be the turn the drill-down shows, compaction and all."""
+    _, per_session = _compaction_session(tmp_path, monkeypatch)
+    # Four turns' worth of boundaries: two prompts plus the compaction.
+    assert [t["index"] for t in per_session["turns"]] == [0, 1, 2]
+    assert per_session["turns"][1]["afterCompaction"] is True
+    findings = list(_push_findings(per_session))
+    assert [f["governingPrompt"]["turnIndex"] for f in findings] == [0, 1, 2]
+
+
+def test_a_compaction_carved_turn_still_names_the_prompt_in_flight(tmp_path, monkeypatch):
+    """A carved turn holds no prompt of its own but is governed by one.
+
+    Reporting nothing there is the "absence must not read as authorisation"
+    case firing on a turn that *was* authorised - the prompt in flight is the
+    one the payload already shows on the turn.
+    """
+    _, per_session = _compaction_session(tmp_path, monkeypatch)
+    carved = per_session["turns"][1]
+    assert carved["userPrompt"] == "/commit and push to master"
+    findings = list(_push_findings(carved))
+    assert len(findings) == 1
+    assert findings[0]["governingPrompt"] == {
+        "text": "/commit and push to master", "turnIndex": 1, "callIndex": 0}

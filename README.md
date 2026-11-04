@@ -952,3 +952,11 @@ into are not: `snapshots/checks/<project>/<session>/<key>` holds them, and
 writing). A checks file is a judgement input, not a derived artifact - the same
 prose scores differently with and without it - so a reader can see the patterns
 behind a red badge without ever seeing a transcript.
+
+One is missing, and the gate says so rather than passing: the OZZ
+`CLAUDE.md.checks.json` behind every red badge in the `authorised` rows carries
+26 records lifted from a real client's guidelines document, so it is not
+published here. `--check` enumerates the baselines as well as the committed
+side and reports it UNREVIEWED, and the one record of the 26 that produces
+those badges - which contains no client content - is quoted in full in
+`snapshots/expected/RULINGS.md` instead.
