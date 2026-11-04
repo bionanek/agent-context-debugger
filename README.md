@@ -408,9 +408,14 @@ What it licenses you to conclude is: **go and look.** The judge is measurably
 better than the pattern tier at noticing that a rule was followed, so a
 contested block is the most likely place a real compliance went unrecorded.
 What it does not license is "the verdict is wrong". On the same measurement the
-judge invented compliance 53 times to the code's twice, so a model saying
-"followed" is the single least reliable signal this tool has, and the honest
-response to the chip is to read the quote and decide for yourself. Nothing
+judge invents compliance an order of magnitude more often than the compiled
+tier does - the two counts are printed side by side, over one block set, in
+the `Both tiers, side by side` table of `snapshots/SCORECARD.md`, and
+`python3 snapshots/blind_judge.py` is what re-measures them. The figures live
+there rather than here on purpose: a number copied into prose stops being a
+measurement the first time the measurement moves. A model saying "followed" is
+the single least reliable signal this tool has, and the honest response to the
+chip is to read the quote and decide for yourself. Nothing
 contested changes a status, a badge, a rollup verdict or a scorecard row; a
 judge answer of *violated* contests nothing at all, in either direction. The
 count per session is `contestedBlocks`, and `--query <block-id>` prints the

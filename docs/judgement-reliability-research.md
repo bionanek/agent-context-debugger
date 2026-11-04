@@ -834,8 +834,11 @@ notice per machine says so. Everything else in this section stands, and three pr
 replace the retired one, each with a test: `--no-judge` produces the offline report and never
 imports the tier's module; a judge that cannot be reached degrades to exactly the offline
 report plus a note, exiting 0; and no judge answer awards a green or a red badge in either
-direction (which is §9.1's citation rule plus the blind-judge measurement of 2026-11-04 - 53
-false greens to the deterministic tier's 2). The relevance judgment of the last bullet runs
+direction (which is §9.1's citation rule plus the blind-judge measurement, whose false-green
+gap is the evidence for it). That measurement is no longer a dated one-off: `snapshots/blind_judge.py`
+re-runs it and rewrites `snapshots/blind_judge.json`, and the scorecard prints both tiers'
+counts over one block set, so the figures are read there rather than quoted here - a number
+copied into prose stops being a measurement the first time the measurement moves. The relevance judgment of the last bullet runs
 with the rest of the tier and has no flag of its own: it is a call per loaded file per
 session, where the rule questions are a handful per project, so it is the part of a default
 bake most likely to meet the `--judge-max-calls` ceiling - which is why it is asked

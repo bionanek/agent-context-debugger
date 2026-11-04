@@ -209,6 +209,29 @@ def test_measure_scores_the_answers_it_got(tmp_path):
     assert rec["sessions"] == 1
 
 
+def test_an_oversized_block_is_clipped_and_says_so():
+    """A block large enough to swamp the prompt comes back as prose, not an answer.
+
+    The corpus holds a 287k-character block - a generated graph report, not a
+    rule - and asked about it on its own the judge wrote a paragraph instead of
+    its one line, which the harness can only count as unanswered. Clipping is
+    the honest trade: the judge sees less than the ground-truth author did, and
+    the prompt says so in the place the text was cut, so an answer given on a
+    clipped block is not passed off as one given on the whole.
+    """
+    big = _block("block-1")
+    big["content"] = "x" * (bj.BLOCK_CLIP + 5000)
+    section = bj._block_section([big])
+    assert len(section) < bj.BLOCK_CLIP + 2000
+    assert "not sent" in section
+
+
+def test_a_block_within_the_limit_is_sent_whole():
+    b = _block("block-1")
+    assert b["content"] in bj._block_section([b])
+    assert "not sent" not in bj._block_section([b])
+
+
 def test_a_block_the_judge_skipped_is_asked_again(tmp_path):
     """A silent omission is the failure mode a call count cannot see.
 
