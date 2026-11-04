@@ -82,10 +82,23 @@ Never `echo` into a clipboard command - the shell appends a trailing newline.
 
 
 def test_fired_trigger_still_scores_used():
-    events = [user_text("/graphify this repo", 1), assistant_text("On it.", 2)]
+    events = [user_slash("graphify", "this repo", 1), assistant_text("On it.", 2)]
     v = brv.assess_block(block_from(TRIGGER_MD), rule_file(),
-                         trace_for(events, "/graphify this repo"))
+                         trace_for(events, brv.first_real_user_prompt(events)))
     assert v["status"] == "used"
+
+
+def test_a_mentioned_but_uninvoked_trigger_is_dormant():
+    """A prompt naming the command is not a record of it running: one real
+    prompt offering a choice between two skills greened both of them."""
+    prompt = "either /grill-prd or /graphify - you choose"
+    events = [user_text(prompt, 1), assistant_text("I'll start.", 2)]
+    v = brv.assess_block(block_from(TRIGGER_MD), rule_file(),
+                         trace_for(events, prompt))
+    assert v["status"] == "dormant"
+    card = next(m for m in v["moments"] if m["kind"] == "co-occurrence")
+    assert "nothing shows it running" in card["label"]
+    assert not [m for m in v["moments"] if m["kind"] == "trigger"]
 
 
 def test_a_prose_negation_never_scores_ignored_on_its_own():
@@ -109,9 +122,9 @@ Trigger: `/graphify`. The skill shells out to `python3` for the parse step.
 
 
 def test_a_weak_mention_alongside_strong_evidence_does_not_soften_the_verdict():
-    events = [user_text("/graphify it", 1), bash("python3 parse.py", 2)]
+    events = [user_slash("graphify", "it", 1), bash("python3 parse.py", 2)]
     v = brv.assess_block(block_from(MIXED_MD), rule_file(),
-                         trace_for(events, "/graphify it"))
+                         trace_for(events, brv.first_real_user_prompt(events)))
     assert v["status"] == "used"
 
 
@@ -189,9 +202,9 @@ def test_weak_only_duplicate_pair_is_redundant():
 
 
 def test_duplicate_pair_with_a_fired_predicate_is_referenced():
-    events = [user_text("/graphify it", 1), bash("ls -la", 2)]
+    events = [user_slash("graphify", "it", 1), bash("ls -la", 2)]
     pairs = brv.compute_duplicates(dup_files(extra_a="Trigger: `/graphify`"),
-                                   trace_for(events, "/graphify it"))
+                                   trace_for(events, brv.first_real_user_prompt(events)))
     assert pairs and pairs[0]["classification"] == "referenced"
 
 
@@ -375,8 +388,12 @@ def test_a_longer_sibling_command_never_fires_the_shorter_trigger():
 
 
 def test_the_trigger_fires_on_every_record_of_a_real_invocation():
-    """Counter-anchor: the three evidence orders the moment card reads from."""
-    assert _trigger_fired([user_text("/implement-plan go", 1)], "/implement-plan go")
+    """Counter-anchor: the two invocation records the moment card reads from.
+
+    A bare `/name` in the prompt is deliberately not one of them - it is a
+    mention, and `skill-invocation` has always refused it.
+    """
+    assert not _trigger_fired([user_text("/implement-plan go", 1)], "/implement-plan go")
     wrapper = [user_slash("implement-plan", "the plan", 1)]
     assert _trigger_fired(wrapper, brv.first_real_user_prompt(wrapper))
     call = [user_text("run it", 1),
@@ -387,7 +404,12 @@ def test_the_trigger_fires_on_every_record_of_a_real_invocation():
 def test_trigger_verdict_and_its_moment_card_agree():
     """Two matchers for one question is how a green badge ended up above a
     "not invoked this run" card; assert they cannot disagree again - including
-    on the records only one of the two used to read."""
+    on the records only one of the two used to read.
+
+    The invariant is `used` exactly when a satisfied TRIGGER card is drawn: a
+    mention now draws neither, so counting only the denial card would let the
+    two disagree again in the direction this phase closed.
+    """
     cases = [
         ("/implement-plan-workflow with the plan below", []),
         ("/implement-plan go", []),
@@ -399,9 +421,12 @@ def test_trigger_verdict_and_its_moment_card_agree():
         events = [user_text(prompt, 1)] + extra + [assistant_text("Starting.", 3)]
         v = brv.assess_block(block_from(TRIGGER_POINTER_MD),
                              rule_file(), trace_for(events, prompt))
+        fired = any(m["kind"] == "trigger" and m["verdict"] == "yes"
+                    for m in v["moments"])
         denied = any(m["verdict"] == "no" and "not invoked" in m["label"]
                      for m in v["moments"])
-        assert (v["status"] == "used") is not denied, (prompt, extra)
+        assert (v["status"] == "used") is fired, (prompt, extra)
+        assert not (v["status"] == "used" and denied), (prompt, extra)
 
 
 # ---------- a compiled workflow check drives the scale ----------

@@ -16,6 +16,7 @@
   "minTerms": 3,
   "minPrecision": 0.9,
   "minTruePositives": 8,
+  "minTruePositivesInline": 3,
   "measured": {
    "precision": 1.0,
    "recall": 0.5,

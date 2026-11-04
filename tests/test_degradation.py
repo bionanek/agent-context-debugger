@@ -240,17 +240,22 @@ def no_wordlist(monkeypatch):
 
 
 def test_the_english_wordlist_absent_never_worsens_a_label(no_wordlist):
-    """Measured over the whole labelled set, not argued from the code.
+    """Measured over the labelled set, not argued from the code.
 
     Without D2 every English word looks as rare as a coined one, so more terms
     survive weighting and more pairs become scorable. That is allowed to cost
     recall and to cost precision - what it may not do is drop precision below
     the gate, which would mean the absence of a convenience file had started
     manufacturing claims.
+
+    The set is whatever this machine can resolve: without the author-private
+    corpus that is the inline pairs alone, so the resolved count is asserted
+    too rather than letting a shrunken set post the same green.
     """
     fixture = lf.load()
     metrics = lf.evaluate(fixture)
     floor = fixture["operatingPoint"]["minPrecision"]
+    assert metrics["resolved"] >= lf.inline_pair_count(fixture), lf.report(metrics)
     assert metrics["precision"] is not None, lf.report(metrics)
     assert metrics["precision"] >= floor, lf.report(metrics)
 
@@ -258,11 +263,13 @@ def test_the_english_wordlist_absent_never_worsens_a_label(no_wordlist):
 def test_the_english_wordlist_absent_invents_no_false_positive():
     """The same claim per pair rather than in aggregate.
 
-    A ratio over 245 pairs can absorb a new false positive; the pairs the run
-    provably never touched cannot.
+    A ratio over hundreds of pairs can absorb a new false positive; the pairs
+    the run provably never touched cannot.
     """
     fixture = lf.load()
-    with_list = {r["id"]: r["predicted"] for r in lf.evaluate(fixture)["rows"]}
+    baseline = lf.evaluate(fixture)
+    assert baseline["resolved"] >= lf.inline_pair_count(fixture), lf.report(baseline)
+    with_list = {r["id"]: r["predicted"] for r in baseline["rows"]}
     original = lexical.ZIPF_PATH
     lexical.ZIPF_PATH = Path("/nonexistent/wordfreq-en.json")
     lexical.english_zipf.cache_clear()

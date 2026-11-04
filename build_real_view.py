@@ -6,6 +6,7 @@ and emit a self-contained HTML view with the data baked in.
 import argparse
 import difflib
 import functools
+import hashlib
 import json
 import os
 import re
@@ -1198,7 +1199,7 @@ def _merge_intervals(intervals):
     return out
 
 
-def _delivery_range(abs_path, content, kind, source, read_ranges=None):
+def _delivery_range(abs_path, content, kind, source, read_ranges=None, base_text=None):
     """How much of a context file actually reached the model.
 
     Returns total_lines / delivered_from / delivered_to / delivered_ranges /
@@ -1211,13 +1212,21 @@ def _delivery_range(abs_path, content, kind, source, read_ranges=None):
     1900-2000) span everything in between without having delivered any of it,
     so collapsing them to a single min-to-max span scored the unread middle as
     though the model had seen it.
+
+    `base_text` is the file as the transcript delivered it, and it is what the
+    ranges are measured against when we have one: measuring a recovered text's
+    ranges against today's disk file would put the line numbers of one document
+    against the contents of another.
     """
     unknown = {"total_lines": None, "delivered_from": 1, "delivered_to": None,
                "delivered_ranges": [], "delivery": "unknown"}
-    try:
-        total_lines = len(Path(abs_path).read_text(errors="replace").splitlines())
-    except Exception:
-        return unknown
+    if base_text is not None:
+        total_lines = len(base_text.splitlines())
+    else:
+        try:
+            total_lines = len(Path(abs_path).read_text(errors="replace").splitlines())
+        except Exception:
+            return unknown
     full = {"total_lines": total_lines, "delivered_from": 1,
             "delivered_to": total_lines, "delivered_ranges": [(1, total_lines)],
             "delivery": "full"}
@@ -1334,6 +1343,164 @@ def extract_attachments(events):
                     out["user_attached_files"].append(entry)
                 else:
                     out["preloaded_files"].append(entry)
+    return out
+
+
+def _stale_against_hook(abs_path, hook):
+    """Did the harness record this file as something other than what is on disk?
+
+    The ctxlog hook writes the line count, the byte size and a truncated
+    sha256 of every instruction file at the moment it was loaded. Where those
+    disagree with the file today, the disk text is *provably* not the text the
+    model was given - a stronger fact than "we could not recover it", and the
+    one case where deriving a rule from the disk wording would be deriving it
+    from a document nobody read.
+    """
+    stats = (hook or {}).get("stats") or {}
+    want_sha, want_size = stats.get("sha256"), stats.get("size_bytes")
+    if not want_sha and not want_size:
+        return False
+    try:
+        data = Path(abs_path).read_bytes()
+    except Exception:
+        return False
+    if want_sha:
+        # The log stores a prefix of the digest, not the whole of it.
+        return not hashlib.sha256(data).hexdigest().startswith(want_sha)
+    return len(data) != want_size
+
+
+def _read_result_delivery(res):
+    """The whole file a `Read` tool result delivered: (path, text), or None.
+
+    Only a read that covers the file end to end counts. A slice is delivered
+    text too, but placing it back inside the rest of the file needs the rest,
+    and the only copy of that is the disk file this exists to stop trusting.
+    """
+    f = res.get("file")
+    if not isinstance(f, dict):
+        return None
+    path, text = f.get("filePath"), f.get("content")
+    if not path or not isinstance(text, str):
+        return None
+
+    def _int(v):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+
+    # A `startLine` that will not parse is not a `startLine` of 1: both come
+    # back as None from `_int`, so presence is checked separately.
+    raw_start = f.get("startLine")
+    if raw_start is not None and _int(raw_start) != 1:
+        return None
+    # Fails closed: a record that does not say how much of the file it carried
+    # cannot be shown to carry all of it, and the cost of refusing is the disk
+    # text with its marker, while the cost of guessing is a verdict about a
+    # document nobody read.
+    got, total = _int(f.get("numLines")), _int(f.get("totalLines"))
+    if got is None or total is None or got < total:
+        return None
+    return (path, text)
+
+
+def _write_result_deliveries(res):
+    """(path, [(text, origin), ...]) a write's own result record proves.
+
+    An `Edit` result carries the whole pre-edit file, which is the only record
+    of what a document said before the session rewrote it - and a session that
+    rewrites its own CLAUDE.md is exactly the one whose earlier turns must not
+    be judged against the new wording.
+    """
+    path = res.get("filePath")
+    if not path:
+        return None
+    versions = []
+    before = res.get("originalFile")
+    if isinstance(before, str):
+        versions.append((before, "pre-write"))
+    after = res.get("content")
+    if isinstance(after, str):
+        versions.append((after, "write"))
+    elif isinstance(before, str):
+        old, new = res.get("oldString"), res.get("newString")
+        # An `old_string` the recorded pre-edit text does not hold means the two
+        # halves of the record disagree; appending the hunk anyway would invent
+        # a file the model never saw.
+        if isinstance(old, str) and isinstance(new, str) and old and old in before:
+            versions.append(
+                (before.replace(old, new) if res.get("replaceAll")
+                 else before.replace(old, new, 1), "edit"))
+    if not versions:
+        return None
+    return (path, versions)
+
+
+def delivered_versions(events):
+    """Per resolved path, the file text the transcript shows the model holding.
+
+    Entries are (effective_from_event_idx, text, origin), oldest first. A
+    verdict about a rule has to be about the rule as the model received it:
+    this repo's own CLAUDE.md gained sentences hours after one audited session
+    ended, and judging that session against today's file credited the agent
+    with following text nobody had written yet.
+
+    The first version recorded for a path is effective from index 0. A file the
+    session read at turn 7 and never edited was the same file at turn 1, and
+    that read is the only record of what the harness injected.
+    """
+    versions = {}
+
+    def record(path, idx, text, origin):
+        try:
+            key = str(Path(path).resolve())
+        except Exception:
+            key = str(path)
+        versions.setdefault(key, []).append((idx, text, origin))
+
+    for idx, e in enumerate(events):
+        if e.get("type") == "attachment":
+            # Parsed through the one attachment reader rather than a second
+            # copy of its shape rules, which is how the two would drift.
+            a = extract_attachments([e])
+            for nm in a["nested_memories"]:
+                record(nm["path"], idx, nm["content"], "attachment")
+            for entry in a["preloaded_files"] + a["user_attached_files"]:
+                record(entry["path"], idx, entry["content"], "attachment")
+            continue
+        res = e.get("toolUseResult")
+        if not isinstance(res, dict):
+            continue
+        got = _read_result_delivery(res)
+        if got:
+            record(got[0], idx, got[1], "read")
+            continue
+        got = _write_result_deliveries(res)
+        if got:
+            for text, origin in got[1]:
+                record(got[0], idx, text, origin)
+    for entries in versions.values():
+        # A file whose earliest record is the write that created it did not
+        # exist before that write, so back-dating it would claim the model held
+        # text that had not been written yet. Every other earliest record is a
+        # state the file was already in.
+        if entries[0][2] != "write":
+            entries[0] = (0,) + entries[0][1:]
+    return versions
+
+
+def delivered_at(versions, event_idx):
+    """path -> {"text", "origin"} for the version in effect at `event_idx`."""
+    out = {}
+    for path, entries in versions.items():
+        chosen = None
+        for eff, text, origin in entries:
+            if eff > event_idx:
+                break
+            chosen = (text, origin)
+        if chosen:
+            out[path] = {"text": chosen[0], "origin": chosen[1]}
     return out
 
 
@@ -1464,7 +1631,8 @@ def _describe_trigger(cmd, trace):
     if source == "wrapper":
         return f"User typed `{cmd}` as a slash command"
     if source == "prompt":
-        return f"User prompt: `{(trace.get('user_prompt') or '')[:100]}` — contains `{cmd}`"
+        return (f"User prompt mentioned `{cmd}`, but nothing shows it running — "
+                f"`{(trace.get('user_prompt') or '')[:100]}`")
     return (f"`{cmd}` was not invoked this run — prompt: "
             f"`{(trace.get('user_prompt') or '')[:100]}`")
 
@@ -1563,7 +1731,7 @@ def _resolve_at_refs(blocks, search_roots):
 
 
 def load_context_files(events, calls, project_dir, args, user_prompt, hook_facts=None,
-                       skill_listing=None):
+                       skill_listing=None, delivered=None):
     """Transcript-first loader. Use harness-recorded attachments where present;
     fall back to filesystem path conventions otherwise.
 
@@ -1581,6 +1749,13 @@ def load_context_files(events, calls, project_dir, args, user_prompt, hook_facts
     predates the hooks). Where it names a file, it is ground truth and beats
     the path convention; where it is silent, the convention stands - except for
     .claude/rules/*.md, the one source whose whole point is conditional loading.
+
+    `delivered` is `delivered_at`'s answer for this scope: the text the
+    transcript shows the model holding, keyed by absolute path. Where it names
+    a file, that text is what the blocks are parsed from and the record says
+    `text_source: "transcript"`; where it is silent the disk file stands in and
+    the record says `disk`, which is a caveat the verdict has to carry rather
+    than a detail - the wording on disk today may postdate the session.
 
     Sources merged here (deduped by absolute path):
       - global ~/.claude/CLAUDE.md, ~/.claude/AGENTS.md
@@ -1632,14 +1807,25 @@ def load_context_files(events, calls, project_dir, args, user_prompt, hook_facts
             return
         if abs_path in seen_paths:
             return
+        # An attachment's content already *is* the delivered text; every other
+        # record has to be offered the transcript's copy before it falls back
+        # to disk.
+        text_source = "transcript" if source == "transcript" else "disk"
+        text_note = None
+        recovered = None
         if content is None:
-            p = Path(abs_path)
-            if not p.exists():
-                return
-            try:
-                content = p.read_text(errors="replace")
-            except Exception:
-                return
+            recovered = (delivered or {}).get(abs_path)
+            if recovered is not None:
+                content = recovered["text"]
+                text_source = "transcript"
+            else:
+                p = Path(abs_path)
+                if not p.exists():
+                    return
+                try:
+                    content = p.read_text(errors="replace")
+                except Exception:
+                    return
         # If content is provided but disk also exists and differs, mark drift
         actual_drift = drift
         if content is not None and source == "transcript":
@@ -1649,7 +1835,16 @@ def load_context_files(events, calls, project_dir, args, user_prompt, hook_facts
                     actual_drift = True
             except Exception:
                 pass
-        delivery = _delivery_range(abs_path, content, kind, source, read_ranges)
+        if text_source == "disk" and _stale_against_hook(abs_path, hook):
+            text_source = "stale"
+            st = (hook or {}).get("stats") or {}
+            text_note = (
+                f"The harness recorded this file as {st.get('lines')} lines / "
+                f"{st.get('size_bytes')} bytes when it loaded it, and the file on disk "
+                f"no longer matches — the wording shown here is not the wording the "
+                f"model was given, so nothing in it was read as a rule.")
+        delivery = _delivery_range(abs_path, content, kind, source, read_ranges,
+                                   base_text=content if recovered else None)
         blocks_text = content
         if delivery["delivery"] == "truncated" and source == "transcript":
             # The attachment is a prefix of the file. Parse the on-disk text instead
@@ -1674,6 +1869,10 @@ def load_context_files(events, calls, project_dir, args, user_prompt, hook_facts
             "blocks": parse_claude_md(blocks_text),
             **delivery,
             **extra,
+            "text_source": text_source,
+            # Same rule as `delivery` and `hook`: the key appears only when
+            # there is something to report.
+            **({"text_note": text_note} if text_note else {}),
             # Key omitted entirely when there is no fact, so hookless sessions
             # serialise exactly as they did before.
             **({"hook": hook} if hook else {}),
@@ -1776,6 +1975,9 @@ def load_context_files(events, calls, project_dir, args, user_prompt, hook_facts
                         # same units as every other item, and small either way.
                         "chars": len(phantom),
                         "blocks": parse_claude_md(phantom),
+                        # Nothing here came off disk: the description is the
+                        # listing attachment's own text.
+                        "text_source": "transcript",
                     })
     else:
         # Fallback: glob filesystem
@@ -1965,9 +2167,20 @@ def _example_spans(text):
     bound, an unbalanced quote three paragraphs above a `Trigger:` line deleted
     its predicate, which is a worse error than the one being fixed.
     """
-    quoted = [m.span() for m in _QUOTED_RE.finditer(text)
-              if "\n\n" not in m.group(0)]
-    return [m.span() for m in _INLINE_CODE_RE.finditer(text)] + quoted
+    return [m.span() for m in _INLINE_CODE_RE.finditer(text)] + _quoted_spans(text)
+
+
+def _quoted_spans(text):
+    """The quotation half of `_example_spans`, without the inline-code half.
+
+    A caller that is *reading* inline code - every path a block names is
+    backticked - cannot use the combined list, since it would delete the very
+    tokens it is looking for. What it still needs is the quotation bound: a
+    path inside a quoted sentence is an example of something to say, not a
+    file the block points at.
+    """
+    return [m.span() for m in _QUOTED_RE.finditer(text)
+            if "\n\n" not in m.group(0)]
 
 
 def _in_span(pos, spans):
@@ -1980,13 +2193,19 @@ def _extract_backtick_tokens(text):
     Fenced blocks are removed first; `_extract_fenced_commands` reads those,
     where a line's first word is a command by position rather than by shape.
     """
+    return [tok for tok, _pos in _extract_backtick_spans(text)]
+
+
+def _extract_backtick_spans(text):
+    """`_extract_backtick_tokens` with each token's offset in the stripped prose,
+    for the callers that need to know whether a token sits inside a quotation."""
     prose = _FENCE_RE.sub("\n", text)
     out = []
     for m in re.finditer(r"`([^`]+)`", prose):
         token = m.group(1).strip()
         if not token:
             continue
-        out.append(token)
+        out.append((token, m.start()))
     return out
 
 
@@ -2018,6 +2237,19 @@ def _looks_like_command_word(word):
             and word.lower() not in NON_CMDS)
 
 
+# One stage of a documented command, and a pipeline of them. Quoting is
+# admitted by neither, so a prescribed pipeline carrying a quoted argument
+# yields no candidate at all - the honest outcome, since the run's own quoted
+# arguments are masked before matching and could never be compared to it.
+_CMD_STAGE_RE = r"[a-z][\w.-]*(?:\s+[-\w./=:@,+]+)*"
+_CMD_SHAPE_RE = re.compile(rf"{_CMD_STAGE_RE}(?:\s*\|\s*{_CMD_STAGE_RE})*")
+
+
+def _normalize_pipeline(text):
+    """Collapse whitespace, and space every pipe the same way on both sides."""
+    return re.sub(r"\s*\|\s*", " | ", " ".join(text.split()))
+
+
 def _fenced_commands(text, langs):
     """Whole commands out of fenced examples, e.g. `yarn type-check`.
 
@@ -2044,9 +2276,20 @@ def _fenced_commands(text, langs):
             line = re.sub(r"\s+#.*$", "", line).strip()
             if not line or line.startswith("#"):
                 continue
-            for part in re.split(r"&&|\|\||[|;]", line):
-                cmd = " ".join(part.split())
-                if not re.fullmatch(r"[a-z][\w.-]*(?:\s+[-\w./=:@,+]+)*", cmd):
+            # A pipe is deliberately not a split point. `&&`, `||` and `;`
+            # join commands that each stand on their own - a gate documented as
+            # `yarn type-check && yarn lint && yarn test` prescribes three
+            # commands, and running one of them is running one of them. A pipe
+            # composes a *single* command out of stages, so a downstream stage
+            # is not itself prescribed: splitting `printf '%s' "$c" | pbcopy`
+            # made `pbcopy` the prescribed command, and the rule's own
+            # forbidden `echo "x" | pbcopy` then scored the rule as followed.
+            # The whole pipeline is the prescription, which is why the shape
+            # test below admits one and `_command_echo_count` matches one
+            # against a pipe-preserving segment.
+            for part in re.split(r"&&|\|\||;", line):
+                cmd = _normalize_pipeline(part)
+                if not _CMD_SHAPE_RE.fullmatch(cmd):
                     continue
                 if cmd.split()[0].lower() in NON_CMDS:
                     continue
@@ -2059,10 +2302,59 @@ def _extract_fenced_commands(text):
     return _fenced_commands(text, _SHELL_FENCE_LANGS)
 
 
-def _shell_write_targets(cmd):
-    """Files a bash command authors, through a heredoc redirect or `tee`.
+# A python heredoc that rewrites a file in place: `p = pathlib.Path('x.md')`
+# ... `p.write_text(s)`, the same call spelled out in one expression, or
+# `open('x.md', 'w')`. The binding is tracked rather than every `Path(...)`
+# literal harvested, because a script that reads one file and writes another
+# names both.
+_PY_INVOCATION_RE = re.compile(r"\bpython[\d.]*\b")
+_PY_WRITE_SHAPE_RE = re.compile(
+    r"(?:pathlib\.)?Path\(\s*['\"](?P<lit>[^'\"]+)['\"]\s*\)\s*\.write_text\("
+    r"|(?P<bind>\w+)\s*=\s*(?:pathlib\.)?Path\(\s*['\"](?P<bound>[^'\"]+)['\"]"
+    r"|(?P<writer>\w+)\.write_text\("
+    r"|\bopen\(\s*['\"](?P<opened>[^'\"]+)['\"]\s*,\s*['\"][wa]")
 
-    Only those two forms count. A session that shipped a three-commit feature
+
+def _python_write_targets(cmd):
+    """Files a python heredoc authors from inside the script it runs.
+
+    The famigo sessions edit markdown and source through `python3 - <<'PY'`
+    rather than the Edit tool, so a rule about the file they rewrote saw a
+    session that never touched it. Only the script's own write calls count: a
+    redirect on the closing line captures the script's *output*, which is a
+    different thing and is already excluded below. Matches are walked in
+    order, because one script routinely rebinds the same name to a second
+    file, and the value at the time of the write is the file that was
+    written.
+    """
+    out = []
+    for m in _HEREDOC_RE.finditer(cmd):
+        # A heredoc body is only a program when a python invocation opened it.
+        # Documentation written with `cat > README.md <<'EOF'` routinely
+        # carries a python snippet, and reading that as a write would credit
+        # every file the example names.
+        line = cmd[cmd.rfind("\n", 0, m.start()) + 1:m.start()]
+        if not _PY_INVOCATION_RE.search(line):
+            continue
+        bound = {}
+        for w in _PY_WRITE_SHAPE_RE.finditer(m.group(2)):
+            if w.group("lit"):
+                out.append(w.group("lit"))
+            elif w.group("bind"):
+                bound[w.group("bind")] = w.group("bound")
+            elif w.group("writer"):
+                if w.group("writer") in bound:
+                    out.append(bound[w.group("writer")])
+            elif w.group("opened"):
+                out.append(w.group("opened"))
+    return out
+
+
+def _shell_write_targets(cmd):
+    """Files a bash command authors: a heredoc redirect, `tee`, or a python
+    heredoc's own write calls.
+
+    Only those forms count. A session that shipped a three-commit feature
     through `cat > file <<'EOF'` was reported as having changed nothing at all,
     but treating every `>` as an edit would count captured command output as
     source, so two narrowings apply. A heredoc's redirect is read from the
@@ -2073,6 +2365,18 @@ def _shell_write_targets(cmd):
     like source (`CODE_EXT`), or `yarn build | tee build.log` registers as
     authoring code - and a rule about summarising a code change then judges the
     wording of a turn that only ran a build.
+    """
+    return _redirect_write_targets(cmd) + [
+        p for p in _python_write_targets(cmd)
+        if CODE_EXT.search(Path(p).name) and not p.startswith("/dev/")]
+
+
+def _redirect_write_targets(cmd):
+    """The redirect/`tee` half of `_shell_write_targets`.
+
+    `_written_chunks` pairs these with heredoc bodies, and only for these is
+    the body the text that landed in the file: a python heredoc's body is the
+    program, not the document it rewrote.
     """
     if not cmd:
         return []
@@ -2101,6 +2405,74 @@ def _written_paths(trace):
     return [p for p in out if p]
 
 
+# Shell programs whose non-option arguments are files being looked at. A short
+# closed list on purpose: a program not on it may be doing anything at all with
+# the path it carries, and this join has to mean "the run read this file" or
+# the evidence line claims something no record supports.
+_SHELL_READERS = frozenset({"cat", "sed", "grep", "head", "tail", "less"})
+
+# A redirection's path is not being read, and the program in front of it is
+# routinely a reader: `cat > README.md <<'EOF'` is how whole sessions author a
+# file. Redirections are removed before a segment's arguments are harvested,
+# or every heredoc write would also register as a read of its own target.
+_REDIRECT_RE = re.compile(r"\d?(?:>>|>|<)\s*&?\S+")
+
+
+def _shell_read_targets(cmd):
+    """Files a bash command reads.
+
+    Mirrors `_shell_write_targets`, over `_command_segments` for the reason
+    `_command_echo_count` uses it: the reader has to be the program a segment
+    runs, and quoted arguments are already masked there, so the pattern in
+    `grep -n "rateLimit" AGENT.md` cannot be mistaken for a path.
+    """
+    out = []
+    for seg in _command_segments(cmd):
+        parts = _REDIRECT_RE.sub(" ", seg).split()
+        if not parts or Path(parts[0]).name not in _SHELL_READERS:
+            continue
+        for tok in parts[1:]:
+            tok = tok.strip("'\"").rstrip(";")
+            # `\x00` is `_command_segments`'s mask for a quoted argument, so a
+            # token carrying it is content the command passed, not a path.
+            if not tok or tok.startswith("-") or "*" in tok or "\x00" in tok:
+                continue
+            if _looks_like_a_file(Path(tok).name):
+                out.append(tok)
+    return out
+
+
+def _first_read_time(path, trace):
+    """When this scope first read `path`, for the moment card's timestamp."""
+    for c in trace.get("calls") or ():
+        if c.get("name") == "Read":
+            if (c.get("input") or {}).get("file_path") == path:
+                return c.get("t")
+        elif c.get("name") == "Bash":
+            if path in _shell_read_targets((c.get("input") or {}).get("command", "")):
+                return c.get("t")
+    return None
+
+
+def _read_paths(trace):
+    """Every path this scope read: the `Read` tool, and the shell readers.
+
+    Shell reads are not an edge case. Whole audited sessions inspect files with
+    `cat`, `sed -n` and `grep` and never call `Read` once, so a join that knew
+    only about the tool would report those sessions as having read nothing and
+    credit the step that says "read these files" to whatever else it could
+    reach. Cached on the trace like `_written_paths`, for the same reason.
+    """
+    cached = trace.get("read_paths")
+    if cached is not None:
+        return cached
+    out = [(c.get("input") or {}).get("file_path") or ""
+           for c in (trace.get("calls") or ()) if c.get("name") == "Read"]
+    for bc in trace.get("bash_cmds") or ():
+        out += _shell_read_targets(bc)
+    return [p for p in out if p]
+
+
 # ----- structural evidence: what the run wrote, and where -----
 # The judging used to read the agent's prose and its bash commands and nothing
 # else, so a rule the agent demonstrably obeyed - appending to the file the
@@ -2117,10 +2489,39 @@ _PATH_TOKEN_RE = re.compile(r"[\w.~@/-]+")
 _EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 
 
+# Extensionless names that are still a file rather than a directory. The
+# extension test below is what keeps `docs/skills/` and `mobile/services/` out,
+# and these are the names that would be wrongly caught by it.
+_KNOWN_DOTFILES = frozenset({
+    ".gitignore", ".gitattributes", ".gitmodules", ".dockerignore",
+    ".editorconfig", ".env", ".npmrc", ".nvmrc", ".prettierrc", ".eslintrc",
+    ".babelrc",
+})
+
+def _looks_like_a_file(name):
+    return bool(_FILENAME_TOKEN.fullmatch(name)) or name in _KNOWN_DOTFILES
+
+
 def _named_paths(content):
-    """Paths this block names, as written."""
+    """Files this block names, as written.
+
+    A directory is deliberately not a named path, and neither is a slash
+    command (`/create-pr`) or a heading token - the same test rejects all
+    three, since only a file carries an extension. `docs/skills/`,
+    `mobile/services/` and `app/src/` are where work happens rather than
+    something a rule tells you to write, so joining them let any write
+    beneath them stand as evidence that the rule was followed - which is
+    where most of the audited false greens came from.
+    """
     out = []
-    for tok in _extract_backtick_tokens(content):
+    quoted = _quoted_spans(_FENCE_RE.sub("\n", content))
+    for tok, pos in _extract_backtick_spans(content):
+        # A path inside a quoted sentence is an example of a question to ask,
+        # not a file this block points at: one skill step whose whole content
+        # is "ask the user whether it belongs in `backend/AGENT.md`" was
+        # credited for every session that touched that file.
+        if _in_span(pos, quoted):
+            continue
         tok = tok.strip().rstrip("/")
         # A placeholder or a glob names no file, so there is nothing to join;
         # `<encoded-project-path>` would otherwise match on its literal text.
@@ -2128,7 +2529,7 @@ def _named_paths(content):
             continue
         if not _PATH_TOKEN_RE.fullmatch(tok):
             continue
-        if "/" not in tok and not _FILENAME_TOKEN.fullmatch(tok):
+        if not _looks_like_a_file(tok.rsplit("/", 1)[-1]):
             continue
         out.append(tok)
     return out
@@ -2165,28 +2566,147 @@ def _path_names_target(named, written):
     Containment is tested in both directions because either side can be the
     partial one - a relative tool input, or a path whose unresolvable
     segments `_path_components` dropped.
+
+    The final components have to be equal before any of that: containment
+    alone made `docs/skills/` meet every file written under it, so the run
+    that added one unrelated document proved the rule about that directory
+    had been followed.
     """
     if not named or not written:
         return False
     if _resolve_key(os.path.expanduser(named)) == _resolve_key(written):
         return True
     a, b = _path_components(named), _path_components(written)
+    if not a or not b or a[-1] != b[-1]:
+        return False
+    a, b = a[:-1], b[:-1]
+    # A bare filename on either side - the relative `cat >> DECISIONS.md`, or
+    # a rule that names nothing but the file - leaves no directory to
+    # contradict the other, and the name is all the evidence there is.
+    if not a or not b:
+        return True
     return _run_contains(b, a) or _run_contains(a, b)
 
 
-def _named_path_writes(named_paths, trace):
+def _named_path_writes(named_paths, trace, exclude_path=None, read_hits=None):
     """(named path, written path) pairs where the run wrote what a block named.
+
+    `exclude_path` is the block's own document, for the reason `template-echo`
+    excludes it: editing the rule file is not evidence of obeying the rule,
+    and a CLAUDE.md that names CLAUDE.md otherwise greened itself on any
+    session that touched it.
 
     Deduped: a file edited six times, or named twice by one block, is one
     piece of evidence, and the evidence line otherwise repeats the same path
     until it is unreadable.
     """
     written = _written_paths(trace)
+    if exclude_path:
+        written = [w for w in written if not _path_names_target(exclude_path, w)]
+    read = {n for n, _r in (read_hits or ())}
     out = []
     for n in named_paths:
+        # A path the run also read is cited by the read join instead. The two
+        # are one interaction with that file, and the read is the claim this
+        # tool can actually support: a step that says "read these files" was
+        # carried out by the reads, while the writes to the same files may be
+        # any other work the session happened to do - which is how one real
+        # session's documentation sweep stood in as proof that a review step
+        # had loaded its context. Nothing is lost from the verdict, since the
+        # read join credits the block either way.
+        if n in read:
+            continue
         for w in written:
             if _path_names_target(n, w) and (n, w) not in out:
                 out.append((n, w))
+    return out
+
+
+def _no_write_note(named_paths, file, trace):
+    """Why the write join cites nothing.
+
+    Saying "none of these was written" would be false where the run did write
+    one and the read join is citing it instead, and an evidence line has to be
+    true on its own terms.
+    """
+    if _credited_reads(named_paths, file, trace):
+        return ("the file(s) this block names were read rather than written "
+                "this run - see the read above")
+    if not _document_executed(file, trace):
+        return ("no record of this document running this run, so a write to a "
+                "file it names is not evidence either way")
+    return ("none of " + ", ".join(f"`{p}`" for p in named_paths)
+            + " was written while this document was running")
+
+
+def _writes_for(named_paths, file, trace, exclude_path):
+    """The write pairs the `writes-to-named-path` join cites for this block.
+
+    Gated on `_document_executed` for the reason the read join is: three
+    verified false greens came from a plain rule document whose named file the
+    session happened to write - a reband "Gotchas" note *warning* that
+    `app.json` does not propagate credited by an edit to `app.json`, and a
+    famigo "read `.cursor/PROJECT.md`" step credited by a commit turn that
+    edited that file and never read it.
+    """
+    if not _document_executed(file, trace):
+        return []
+    return _named_path_writes(named_paths, trace, exclude_path=exclude_path,
+                              read_hits=_credited_reads(named_paths, file, trace))
+
+
+def _document_executed(file, trace):
+    """Did the harness record this block's own document running in this scope?
+
+    The gate all three noun joins share. A filename lifted out of prose carries
+    no direction: the sentence that made it a target, a warning or an example
+    is gone by the time the token is compared against a path the run touched,
+    so "the block names it and the run wrote it" is a coincidence a rule
+    document supplies no context to resolve. Inside a procedure the harness
+    recorded as *running*, the surrounding invocation supplies that context -
+    the step's own file being touched is the step being carried out. For a
+    plain rule document (a CLAUDE.md, an AGENTS.md, anything the agent merely
+    read) nothing does, so the honest answer is that the rule is uncompiled and
+    `/compile-rules` is the mechanism for it: a reviewed compiled check is the
+    only path that can credit such a rule, and the only one that can also
+    report a violation of it.
+    """
+    f = file or {}
+    if f.get("kind") not in ("skill", "command") or not f.get("name"):
+        return False
+    return _trigger_evidence(f["name"], trace)[0] in ("skill", "wrapper")
+
+
+def _credited_reads(named_paths, file, trace):
+    """The read pairs the `reads-named-path` join credits for this block.
+
+    One helper, because the predicate, the write join's precedence and the
+    moment cards must not disagree about which reads counted. The gate is the
+    document having been executed in this scope: see `_document_executed` for
+    why a read outside a running procedure is coincidence.
+    """
+    if not _document_executed(file, trace):
+        return []
+    return _named_path_reads(named_paths, trace,
+                             exclude_path=(file or {}).get("abs_path"))
+
+
+def _named_path_reads(named_paths, trace, exclude_path=None):
+    """(named path, read path) pairs where the run read what a block named.
+
+    The read half of `_named_path_writes`, and deliberately identical in
+    shape: the same file-not-directory rule, the same component join, and the
+    same exclusion of the block's own document - reading CLAUDE.md is not
+    obeying CLAUDE.md any more than editing it is.
+    """
+    read = _read_paths(trace)
+    if exclude_path:
+        read = [r for r in read if not _path_names_target(exclude_path, r)]
+    out = []
+    for n in named_paths:
+        for r in read:
+            if _path_names_target(n, r) and (n, r) not in out:
+                out.append((n, r))
     return out
 
 
@@ -2211,7 +2731,7 @@ def _written_chunks(calls):
     for c in calls:
         if c["name"] == "Bash":
             cmd = c["input"].get("command", "")
-            targets = _shell_write_targets(cmd)
+            targets = _redirect_write_targets(cmd)
             if not targets:
                 continue
             bodies = [b for _marker, b in _HEREDOC_RE.findall(cmd) if b.strip()]
@@ -2267,6 +2787,23 @@ def _template_literals(content):
     return sorted(set(out))
 
 
+def _template_hits_for(block, file, trace):
+    """The template-echo hits this block is credited with.
+
+    Same `_document_executed` gate as the two path joins, and for the same
+    reason: a template's literals are prose until something says the document
+    was running. Without it, a global "Decision Memory" rule was credited by a
+    research document that *described* its template in a sentence, and a
+    `/prd-to-plan` command file was credited by the session that was editing a
+    second copy of the command file itself - the copy `exclude_path` cannot
+    recognise, since that comparison is over paths.
+    """
+    if not _document_executed(file, trace):
+        return []
+    return _template_echo_hits(_template_literals(block["content"]), trace,
+                               exclude_path=(file or {}).get("abs_path"))
+
+
 def _template_echo_hits(literals, trace, min_literals=2, exclude_path=None):
     """Files this scope wrote that reproduce the block's template.
 
@@ -2299,16 +2836,97 @@ def _template_echo_hits(literals, trace, min_literals=2, exclude_path=None):
     return [r for r in by_path.values() if len(r["literals"]) >= min_literals]
 
 
-def _command_echo_count(cmd, bash_cmds):
-    """How many bash commands contain this whole prescribed command verbatim.
+# A heredoc opener (`<<EOF`, `<<-'EOF'`) and the operators that end one
+# command and begin the next. `&&` is listed before the bare `&` so a chain is
+# split once rather than into two empty halves.
+_HEREDOC_OPEN_RE = re.compile(r"<<-?\s*(['\"]?)(\w+)\1")
+_SEGMENT_SPLIT_RE = re.compile(r"&&|\|\||[|;&\n]")
+_PIPELINE_SPLIT_RE = re.compile(r"&&|\|\||[;&\n]")
+_QUOTED_ARG_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
+# `CI=1 yarn test` runs `yarn test`; the assignments in front of it are not a
+# different command.
+_ENV_PREFIX_RE = re.compile(r"^(?:\w+=\S*\s+)+")
 
-    Bounded on the right so `yarn test` counts `yarn test --watch=false` (the
-    prescribed command did run) but not `yarn testing`.
+
+def _command_segments(bash_cmd, keep_pipes=False):
+    """The commands one Bash call actually runs, heredoc bodies excluded.
+
+    A heredoc body is content the command carries - a PR description, a file
+    being written - so the lines inside it are not commands. The opener line
+    itself is kept, because it is one.
+
+    `keep_pipes` stops splitting on a bare `|`, so a whole pipeline comes back
+    as one segment. That is the shape a *prescribed* pipeline has to be
+    compared against: with the pipe split away, any run whose last stage
+    happened to be the same program matched a rule about the whole pipeline.
+    """
+    lines = _strip_heredoc_bodies(bash_cmd)
+    masked = _QUOTED_ARG_RE.sub(
+        lambda m: m.group(0)[0] + "\x00" * (len(m.group(0)) - 2) + m.group(0)[0],
+        lines)
+    splitter = _PIPELINE_SPLIT_RE if keep_pipes else _SEGMENT_SPLIT_RE
+    out = []
+    for part in splitter.split(masked):
+        seg = part.strip().lstrip("({").strip()
+        seg = _ENV_PREFIX_RE.sub("", seg)
+        if keep_pipes:
+            seg = _normalize_pipeline(seg)
+        if seg:
+            out.append(seg)
+    return out
+
+
+def _strip_heredoc_bodies(bash_cmd):
+    lines = bash_cmd.splitlines()
+    kept, i = [], 0
+    while i < len(lines):
+        line = lines[i]
+        kept.append(line)
+        i += 1
+        m = _HEREDOC_OPEN_RE.search(line)
+        if not m:
+            continue
+        term = m.group(2)
+        while i < len(lines) and lines[i].strip() != term:
+            i += 1
+        i += 1  # the terminator line is not a command either
+    return "\n".join(kept)
+
+
+def _command_echo_count(cmd, bash_cmds):
+    """How many bash commands ran this whole prescribed command as a command.
+
+    Matched at the *start* of a command segment, so the block's command has to
+    be the program being run rather than a string some other command carried:
+    `just talos-hmi-lint` pasted into a `gh pr create` PR body was counted as a
+    lint run, which is a PR description read as evidence of a gate. Heredoc
+    bodies and quoted arguments are dropped for the same reason. Bounded on the
+    right so `yarn test` counts `yarn test --watch=false` (the prescribed
+    command did run) but not `yarn testing`.
     """
     if not cmd:
         return 0
-    pattern = r"\b" + re.escape(cmd) + r"(?![\w-])"
-    return sum(1 for bc in bash_cmds if re.search(pattern, bc))
+    piped = "|" in cmd
+    pattern = re.compile(re.escape(cmd) + r"(?![\w-])")
+    return sum(1 for bc in bash_cmds
+               if any(pattern.match(seg)
+                      for seg in _command_segments(bc, keep_pipes=piped)))
+
+
+def _command_mention_count(cmd, bash_cmds):
+    """Bash commands whose text carries this command's name anywhere at all."""
+    return sum(1 for bc in bash_cmds if re.search(rf"\b{re.escape(cmd)}\b", bc))
+
+
+def _describe_command_mention(cmd, trace, echo_candidate):
+    if echo_candidate and _command_echo_count(cmd, trace["bash_cmds"]):
+        # The strong row already cites these runs. Repeating the count here put
+        # one run in two evidence rows at two strengths, which reads as two
+        # separate things having happened.
+        return f"`{cmd}` ran as a command - cited above as `command-echo`"
+    n = _command_mention_count(cmd, trace["bash_cmds"])
+    return (f"`{cmd}` ran {n}× this session" if n
+            else f"`{cmd}` did not run this session")
 
 
 def _describe_skill_execution(name, trace):
@@ -2318,6 +2936,30 @@ def _describe_skill_execution(name, trace):
     if source == "wrapper":
         return f"User invoked `/{name}` as a slash command — this block was part of what ran"
     return f"No record of `/{name}` being invoked this run"
+
+
+def _is_identity_block(block, file):
+    """Is this the document's own first block - the one the invocation is about?
+
+    An invocation record says the *document* ran. It says nothing about
+    whether any particular instruction inside it was carried out: an audited
+    session invoked a `commit` skill three times while its "match the GitHub
+    account" step demonstrably never happened, and the invocation alone scored
+    that step green. Every other block has to earn its verdict from a record
+    of its own.
+
+    Identity is positional, never recognised from the heading's wording:
+    reading prose to decide which block is the title block is exactly the
+    single-user pattern-matching this tool retired.
+    """
+    blocks = (file or {}).get("blocks") or []
+    if not blocks:
+        return False
+    first = blocks[0]
+    if first is block:
+        return True
+    return (first.get("start_line") is not None
+            and first.get("start_line") == block.get("start_line"))
 
 
 def derive_predicates(block, file=None):
@@ -2341,9 +2983,9 @@ def derive_predicates(block, file=None):
     naming a command that ran anywhere in the session scored `used`. Weak
     evidence is capped at `possibly-referenced` by `assess_block`.
 
-    The structural kinds (`skill-invocation`, `writes-to-named-path`,
-    `template-echo`, `command-echo`) are *credit-only*: their `applicable` is
-    the signal itself and their `matches` is unconditionally true, so they can
+    The structural kinds (`skill-invocation`, `reads-named-path`,
+    `writes-to-named-path`, `template-echo`, `command-echo`) are *credit-only*:
+    their `applicable` is the signal itself and their `matches` is unconditionally true, so they can
     lift a block but never accuse one. That is the honest shape - a session
     that never appended to ERRORS.md may have had nothing worth logging, and
     reading that silence as a violation is the mirror of the blind spot they
@@ -2378,8 +3020,12 @@ def derive_predicates(block, file=None):
             "strength": "strong",
             "cmd": cmd,
             "label": f"trigger {cmd}",
-            "applicable": (lambda t, c=cmd: _trigger_evidence(c, t)[0] is not None),
-            "matches":    (lambda t, c=cmd: _trigger_evidence(c, t)[0] is not None),
+            # A `/name` the user merely mentioned is not a record of the
+            # command running, and this predicate is strong evidence: one
+            # prompt reading "either /grill-prd or /prd-to-plan - you choose"
+            # greened both skills. Same bar as `skill-invocation` below.
+            "applicable": (lambda t, c=cmd: _trigger_evidence(c, t)[0] in ("skill", "wrapper")),
+            "matches":    (lambda t, c=cmd: _trigger_evidence(c, t)[0] in ("skill", "wrapper")),
             "describe":   (lambda t, c=cmd: _describe_trigger(c, t)),
         })
 
@@ -2394,8 +3040,9 @@ def derive_predicates(block, file=None):
     # the ordering is decided over the tool log and every finding cites the
     # call that went wrong.
 
-    # ----- an executed skill or command: its own blocks were what ran
-    if file and file.get("kind") in ("skill", "command") and file.get("name"):
+    # ----- an executed skill or command: its identity block is what ran
+    if (file and file.get("kind") in ("skill", "command") and file.get("name")
+            and _is_identity_block(block, file)):
         name = file["name"]
         predicates.append({
             "kind": "skill-invocation",
@@ -2411,37 +3058,81 @@ def derive_predicates(block, file=None):
             "describe":   (lambda t, n=name: _describe_skill_execution(n, t)),
         })
 
-    # ----- writes to a path the block names
+    # ----- reads of a path the block names, inside a procedure that ran
+    #
+    # Reading is what a session does to everything, so "the block names a file
+    # and the run read it" is coincidence on its own: measured over the whole
+    # corpus a bare read join turned a tech-stack table green because the
+    # session opened one of the files it lists, and a repo tour green because
+    # something read the README. That is ruling 3's own argument - the file was
+    # going to be read whether or not the block named it.
+    #
+    # It stops being coincidence inside a document the run *executed*. The
+    # invocation is a harness record that this procedure ran; on its own it
+    # credits the identity block and nothing else, but a step of a running
+    # procedure whose own named file was read in the same scope has a second,
+    # independent record behind it, which is the read this tool never had.
     named_paths = _named_paths(content)
-    if named_paths:
+    skill_name = (file or {}).get("name") if (file or {}).get("kind") in ("skill", "command") else None
+    if named_paths and skill_name:
+        own_doc = (file or {}).get("abs_path")
+
+        def _read_hits(t, ps=named_paths, f=file):
+            return _credited_reads(ps, f, t)
+
+        predicates.append({
+            "kind": "reads-named-path",
+            "strength": "strong",
+            # The label says "read" rather than "used", because a reader has
+            # to be able to tell a read from a write without opening the card.
+            "label": "read a file the block names",
+            "applicable": (lambda t: bool(_read_hits(t))),
+            "matches":    (lambda t: True),
+            "describe":   (lambda t, ps=named_paths: (
+                              "read " + ", ".join(dict.fromkeys(
+                                  f"`{r}`" for _n, r in _read_hits(t)))
+                              if _read_hits(t)
+                              else "none of " + ", ".join(f"`{p}`" for p in ps)
+                                   + " was read while this document was running")),
+        })
+
+    # ----- writes to a path the block names, inside a procedure that ran
+    #
+    # Emitted only for an executable document, exactly like the read join: for
+    # a plain rule document this join has nothing to say, and a predicate that
+    # can never fire would still put a row in the evidence list denying a write
+    # that did happen. See `_document_executed` for why the token needs the
+    # invocation to carry any direction at all.
+    if named_paths and skill_name:
+        own_doc = (file or {}).get("abs_path")
         predicates.append({
             "kind": "writes-to-named-path",
             "strength": "strong",
             "label": "wrote a file the block names",
-            "applicable": (lambda t, ps=named_paths: bool(_named_path_writes(ps, t))),
+            "applicable": (lambda t, ps=named_paths, o=own_doc, f=file: bool(_writes_for(ps, f, t, o))),
             "matches":    (lambda t: True),
-            "describe":   (lambda t, ps=named_paths: (
+            "describe":   (lambda t, ps=named_paths, o=own_doc, f=file: (
                               "wrote " + ", ".join(dict.fromkeys(
-                                  f"`{w}`" for _n, w in _named_path_writes(ps, t)))
-                              if _named_path_writes(ps, t)
-                              else "none of " + ", ".join(f"`{p}`" for p in ps) + " was written this run")),
+                                  f"`{w}`" for _n, w in _writes_for(ps, f, t, o)))
+                              if _writes_for(ps, f, t, o)
+                              else _no_write_note(ps, f, t))),
         })
 
     # ----- template the block spells out, reproduced in a written file
     literals = _template_literals(content)
-    if len(literals) >= 2:
-        own = (file or {}).get("abs_path")
+    if len(literals) >= 2 and skill_name:
         predicates.append({
             "kind": "template-echo",
             "strength": "strong",
             "label": "template reproduced in a written file",
-            "applicable": (lambda t, ls=literals, o=own: bool(_template_echo_hits(ls, t, exclude_path=o))),
+            "applicable": (lambda t, b=block, f=file: bool(_template_hits_for(b, f, t))),
             "matches":    (lambda t: True),
-            "describe":   (lambda t, ls=literals, o=own: (
+            "describe":   (lambda t, b=block, f=file: (
                               "; ".join(f"`{h['path']}` carries "
                                         + ", ".join(f"`{lit}`" for lit in h["literals"][:4])
-                                        for h in _template_echo_hits(ls, t, exclude_path=o))
-                              or "no file written this run reproduces the template")),
+                                        for h in _template_hits_for(b, f, t))
+                              or "no file written while this document was running "
+                                 "reproduces the template")),
         })
 
     # ----- command mention: backtick'd command tokens, or known shell commands in prose
@@ -2464,7 +3155,12 @@ def derive_predicates(block, file=None):
     # the palletizer AGENTS.md anchor needs, its `just` recipes sitting in a
     # bare ``` fence while every one of them ran.
     cmd_tokens.update(c for c in _extract_fenced_commands(content) if " " not in c)
-    echo_cmds = sorted({c for c in _fenced_commands(content, None) if " " in c})
+    # Single-word fenced commands are echo candidates too: `pytest` alone in a
+    # fence is as prescribed as `yarn test`, and 18 real `pytest` runs credited
+    # nothing while echo demanded a space. What keeps that honest is the
+    # whole-segment rule in `_command_echo_count` - a bare word has to be the
+    # program a segment runs, not a word inside another command's arguments.
+    echo_cmds = sorted(set(_fenced_commands(content, None)))
     for cmd in echo_cmds:
         predicates.append({
             "kind": "command-echo",
@@ -2484,20 +3180,22 @@ def derive_predicates(block, file=None):
     # rule. A word list of "commands worth noticing" is the same
     # reverse-engineering the strong predicates were: it says nothing about the
     # next user's rules, and backtick-free prose naming a program is prose.
+    echoed = set(echo_cmds)
     for cmd in sorted(cmd_tokens):
         predicates.append({
             "kind": "command-mention",
             "strength": "weak",
             "cmd": cmd,
             "label": f"`{cmd}` in bash",
-            "applicable": (lambda t, c=cmd: any(re.search(rf"\b{re.escape(c)}\b", bc) for bc in t["bash_cmds"])),
+            # A run the echo tier already credited is not also a mention: the
+            # same command in a strong row and a weak one reads as two facts.
+            # The mention survives where echo found nothing, which is the case
+            # worth keeping - the command's name occurred, and that is all.
+            "applicable": (lambda t, c=cmd, e=(cmd in echoed): (
+                (not e or not _command_echo_count(c, t["bash_cmds"]))
+                and _command_mention_count(c, t["bash_cmds"]) > 0)),
             "matches":    (lambda t, c=cmd: True),  # if it ran at all, the rule about that command had a chance
-            "describe":   (lambda t, c=cmd: (
-                              f"`{c}` ran "
-                              + str(sum(1 for bc in t['bash_cmds'] if re.search(rf"\b{re.escape(c)}\b", bc)))
-                              + "× this session"
-                              if any(re.search(rf"\b{re.escape(c)}\b", bc) for bc in t['bash_cmds'])
-                              else f"`{c}` did not run this session")),
+            "describe":   (lambda t, c=cmd, e=(cmd in echoed): _describe_command_mention(c, t, e)),
         })
 
     # A rule about the *shape of the response* ("close with a short
@@ -2773,7 +3471,14 @@ def _moments_for_command_mention(block, file, trace, segs, predicates):
     which is the part a reader can check.
     """
     moments = []
+    # The predicate stands down where echo credited the same command; the card
+    # has to as well, or a "name overlap only" note sits beside the ACTION card
+    # that named the very runs it is disclaiming.
+    echoed = {p["cmd"] for p in predicates if p["kind"] == "command-echo"
+              and _command_echo_count(p["cmd"], trace["bash_cmds"])}
     for cmd in sorted({p["cmd"] for p in predicates if p["kind"] == "command-mention"}):
+        if cmd in echoed:
+            continue
         runs = [s for s in segs
                 if s["kind"] == "tool_use" and s.get("name") == "Bash"
                 and re.search(rf"\b{re.escape(cmd)}\b", s["input"].get("command", ""))]
@@ -2788,7 +3493,8 @@ def _moments_for_command_mention(block, file, trace, segs, predicates):
     return moments
 
 
-STRUCTURAL_KINDS = ("writes-to-named-path", "template-echo", "command-echo")
+STRUCTURAL_KINDS = ("reads-named-path", "writes-to-named-path",
+                    "template-echo", "command-echo")
 
 
 def _moments_for_structural(block, file, trace, segs, predicates):
@@ -2801,16 +3507,20 @@ def _moments_for_structural(block, file, trace, segs, predicates):
     """
     moments = []
     named = _named_paths(block["content"])
+    reads = list(dict.fromkeys(r for _n, r in _credited_reads(named, file, trace)))
+    for r in reads[:12]:
+        moments.append(_moment(_first_read_time(r, trace), "action", "yes",
+                               f"Read `{r}`, a path this block names"))
     # Capped like the command loop below: a block naming a directory can join
     # every file written under it, and a card per file buries the verdict.
-    writes = list(dict.fromkeys(w for _n, w in _named_path_writes(named, trace)))
+    writes = list(dict.fromkeys(
+        w for _n, w in _writes_for(named, file, trace, file.get("abs_path"))))
     for w in writes[:12]:
         ch = next((c for c in (trace.get("written_chunks") or ()) if c["path"] == w), None)
         moments.append(_moment(ch["t"] if ch else None, "action", "yes",
                                f"Wrote `{w}`, a path this block names",
                                text=((ch["text"][:400]) if ch else "")))
-    hits = _template_echo_hits(_template_literals(block["content"]), trace,
-                               exclude_path=file.get("abs_path"))
+    hits = _template_hits_for(block, file, trace)
     for hit in hits[:12]:
         moments.append(_moment(hit["t"], "action", "yes",
                                f"`{hit['path']}` reproduces this block's template",
@@ -2975,10 +3685,14 @@ def assemble_moments(block, file, trace, predicates):
                                     f"User prompt was: \"{(trace['user_prompt'] or '')[:160]}\"."))
         return moments
 
-    if file_kind == "skill":
-        moments.extend(_moments_for_skill_or_command(block, file, trace, segs, "skill"))
-    elif file_kind == "command":
-        moments.extend(_moments_for_skill_or_command(block, file, trace, segs, "command"))
+    if file_kind in ("skill", "command"):
+        moments.extend(_moments_for_skill_or_command(block, file, trace, segs, file_kind))
+        # The badge above these cards can be earned by a structural join - a
+        # step's named file being read while the skill ran, its prescribed
+        # command running - and the invocation cards alone would then say
+        # nothing about what earned it.
+        if any(p["kind"] in STRUCTURAL_KINDS for p in predicates):
+            moments.extend(_moments_for_structural(block, file, trace, segs, predicates))
     elif file_kind == "agent":
         moments.extend(_moments_for_subagent(block, file, trace, segs))
     elif file_kind in ("read", "preloaded", "attached"):
@@ -2996,10 +3710,18 @@ def assemble_moments(block, file, trace, predicates):
                 # The predicate's own matcher, so a CLAUDE.md pointer to
                 # `/foo`, foo's own SKILL.md and the badge above this card can
                 # never disagree about whether foo fired.
-                if _trigger_evidence(cmd, trace)[0]:
+                source = _trigger_evidence(cmd, trace)[0]
+                if source in ("skill", "wrapper"):
                     moments.append(_moment(None, "trigger", "yes",
                                            f"`{cmd}` was invoked",
-                                           text=trace["user_prompt"][:400]))
+                                           text=(trace["user_prompt"] or "")[:400]))
+                elif source == "prompt":
+                    # Same refusal as the predicate above: a mention shares a
+                    # name with the command and nothing more.
+                    moments.append(_moment(
+                        None, "co-occurrence", None,
+                        f"User prompt mentioned `{cmd}`, but nothing shows it running",
+                        text=f"{CO_OCCURRENCE_NOTE}\n{(trace['user_prompt'] or '')[:400]}"))
                 else:
                     moments.append(_moment(None, "non-event", "no",
                                            f"`{cmd}` not invoked this run",
@@ -3194,7 +3916,7 @@ def _is_exercised(predicate, trace):
     turn that ran no `gh` command at all was reported as a GitHub-account
     violation, which is how a dozen compliant turns ended up under a red
     session badge. Predicates whose precondition *is* the exercise (a trigger
-    that was typed, edits that were made) need no separate answer.
+    whose command was invoked, edits that were made) need no separate answer.
     """
     check = predicate.get("exercised")
     return check(trace) if check else predicate["applicable"](trace)
@@ -3272,12 +3994,24 @@ def _delivery_gap(start, ranges):
     return before, after
 
 
+# A block judged off the disk file carries this at the end of its reason. The
+# text a verdict is about has to be the text the model saw, and where the
+# transcript kept no copy the reader is owed the doubt rather than a verdict
+# that hides it: two greens in one audited session cited a sentence first
+# committed eight hours after the session ended.
+DISK_TEXT_CAVEAT = (" Judged against the file as it is on disk now — the transcript "
+                    "carries no copy of what was delivered, so this wording may "
+                    "postdate the session.")
+
+
 def assess_block(block, file, trace):
     """Evaluate a single block. Returns dict with status, reason, evidence, moments."""
     title = block["title"]
     content = block["content"]
     block_type = classify_block(title, content)
     file_loaded = file["loaded"]
+    text_source = file.get("text_source", "disk")
+    text_note = file.get("text_note")
 
     if not file_loaded:
         not_loaded_moments = [_moment(None, "non-event", "no",
@@ -3293,6 +4027,10 @@ def assess_block(block, file, trace):
             "reason": "Skill/command/agent was not invoked this run — its blocks were not loaded into context.",
             "evidence": [],
             "moments": not_loaded_moments,
+            # No caveat here or on `undelivered`: neither reason is a claim
+            # about what the block says, so where its text came from changes
+            # nothing about them.
+            "textSource": text_source,
         }
 
     if _block_undelivered(block, file):
@@ -3323,9 +4061,14 @@ def assess_block(block, file, trace):
             "evidence": [],
             "moments": [_moment(None, "non-event", "no",
                                 "Never reached the model", text=reason)],
+            "textSource": text_source,
         }
 
-    predicates = derive_predicates(block, file)
+    # Text the harness's own log proves is not what it loaded derives nothing.
+    # A predicate is a claim about a rule, and this is not the rule: `content`
+    # here is whatever the file says today, which may be a sentence the session
+    # itself never saw.
+    predicates = [] if text_source == "stale" else derive_predicates(block, file)
     # Set only by the branch that actually consults the lexical tier. Reading it
     # back off the trace's memo instead would attach a label to any block whose
     # content happens to match one that *was* scored.
@@ -3400,6 +4143,11 @@ def assess_block(block, file, trace):
         # lexical sentence on its own does not.
         reason = f"No predicate derivable, so only the wording could be compared. {lex['reason']}"
 
+    if text_note:
+        reason += " " + text_note
+    elif text_source == "disk":
+        reason += DISK_TEXT_CAVEAT
+
     moments = assemble_moments(block, file, trace, predicates)
 
     out = {
@@ -3411,7 +4159,14 @@ def assess_block(block, file, trace):
         "reason": reason,
         "evidence": evidence,
         "moments": moments,
+        "textSource": text_source,
     }
+    # Appended only where there is one: the aggregate rewrites a block's reason
+    # when the combine rule overrules it, and the caveat has to survive that or
+    # a session-scope verdict sits above a sentence that no longer says which
+    # text it is about.
+    if text_note:
+        out["textNote"] = text_note
     # Appended, not inserted, and only where the tier actually ran: a block
     # decided by a Skill call or a compiled check has no lexical claim to make,
     # and inventing a label for it would read as one.
@@ -3437,7 +4192,13 @@ def _rule_check_for(block, file, trace):
     loaded = rule_checks.checks_for_doc(file.get("abs_path") or "")
     # Mechanical extraction only makes sense on a guidelines document. Reading
     # a file does not make its prose a rule the agent agreed to follow.
-    fallback = file.get("kind") in GUIDELINE_KINDS
+    # Never on text the hook log proves is not what was loaded: the fallback
+    # derives its patterns from the block's own wording, and this wording is
+    # not the rule. A compiled check is unaffected - its patterns were authored
+    # against the rule, and one pinned with a `rule_key` refuses the mismatch
+    # itself.
+    fallback = (file.get("kind") in GUIDELINE_KINDS
+                and file.get("text_source") != "stale")
     return rule_checks.check_block(block, loaded, corpus, fallback=fallback,
                                    doc_path=file.get("path") or "",
                                    judge=trace.get("judge"))
@@ -3449,9 +4210,10 @@ def _apply_rule_check(verdict, rule_check):
     Only a violation an author signed off on turns the block red, and the
     confidence consulted is that of the violating finding itself - never the
     block's aggregate, which a bystander check could have raised. A mechanically
-    extracted fallback finding is low confidence by construction and stays a
-    note: a false red badge accuses the agent of misconduct it did not commit,
-    which is the failure this whole phase exists to prevent.
+    extracted fallback finding never reaches here as a violation at all - it is
+    reported `unclear` at source - and is low confidence besides: a false red
+    badge accuses the agent of misconduct it did not commit, which is the
+    failure this whole phase exists to prevent.
 
     A conditional check that reports its obligation *satisfied* is the other
     half of the same record, and it gives credit for the same reasons a
@@ -3726,6 +4488,7 @@ def build_trace(events, calls, asst_segments, user_prompt):
     ]
     written_chunks = _written_chunks(calls)
     written_paths = _written_paths({"edits": edits, "bash_cmds": bash_cmds})
+    read_paths = _read_paths({"calls": calls, "bash_cmds": bash_cmds})
     # The lexical tier reads assistant prose and nothing else - tool inputs and
     # results never enter, and what the agent quoted back out of a file it read
     # is stripped, or every block of that file matches itself.
@@ -3748,6 +4511,7 @@ def build_trace(events, calls, asst_segments, user_prompt):
         "read_calls": read_calls_with_seg,
         "written_chunks": written_chunks,
         "written_paths": written_paths,
+        "read_paths": read_paths,
         "written_text": "\n\n".join(ch["text"] for ch in written_chunks),
         "query_segments": query_segments,
         "lexical_q": lexical.query_stats(query_segments),
@@ -4771,6 +5535,10 @@ def query_block(sid, session_data, block_id, turn=None, field=None):
         f"file     {file_rec['path']} ({'loaded' if file_rec.get('loaded') else 'not loaded'})",
         f"title    {block.get('title', '')}",
         f"status   {block.get('status', '')}",
+        # Which text the verdict is about. A block judged off today's disk file
+        # may be judged against wording that postdates the session, and a
+        # reader who cannot see which one it was cannot weigh the verdict.
+        f"text     {block.get('textSource', 'disk')}",
         f"reason   {_bounded(block.get('reason'), reason_cmd)}",
     ]
     # What the wording alone can say, named as evidence rather than as a
@@ -5280,7 +6048,8 @@ def _violation_headline(files):
 
 def _compute_payload(events, calls, asst_segs, args, project_dir, id_prefix="", hook_facts=None,
                      nonresident_paths=None, usage_entries=None, history_chars=None,
-                     nonresident_by_request=None, skill_listing=None, lexical_bg=None):
+                     nonresident_by_request=None, skill_listing=None, lexical_bg=None,
+                     delivered=None):
     """Run the assessment pipeline against an event/call/segment bundle.
 
     Used twice in process_session: once over the full session (the aggregate)
@@ -5301,6 +6070,11 @@ def _compute_payload(events, calls, asst_segs, args, project_dir, id_prefix="", 
     for the aggregate and the turn's slice for a turn, and per-turn costs sum
     back to the session's.
 
+    `delivered` is the delivered-text map for this scope (see
+    `load_context_files`): pass `delivered_at(versions, 0)` for the aggregate
+    and the turn's own start index for a turn, so a document the session
+    rewrote is judged, in each turn, against the wording that turn was given.
+
     `lexical_bg` is the session's term backgrounds. The aggregate builds its
     own and every turn is handed that same one, so a block's distinctive terms
     cannot change between the turns a status is combined from and the aggregate
@@ -5315,7 +6089,8 @@ def _compute_payload(events, calls, asst_segs, args, project_dir, id_prefix="", 
     trace["judge"] = getattr(args, "judge_runner", None)
 
     context_files = load_context_files(events, calls, project_dir, args, user_prompt,
-                                       hook_facts=hook_facts, skill_listing=skill_listing)
+                                       hook_facts=hook_facts, skill_listing=skill_listing,
+                                       delivered=delivered)
     trace["lexical_bg"] = lexical_bg or lexical.build_background(
         context_files, trace["query_segments"])
     files_out = []
@@ -5504,11 +6279,17 @@ def process_session(transcript_path, args):
     attach_subagent_transcripts(agent_data["agents"], transcript_path)
     nonresident_by_request = _nonresident_by_request(series, turns, nonresident_by_turn)
 
+    # What the model was actually handed, per file and per point in the
+    # session. Derived once over the whole transcript because a turn's own
+    # slice rarely contains the read that recovered the text.
+    versions = delivered_versions(events)
+
     # Aggregate ("All turns") payload: keeps today's exact shape and behaviour.
     aggregate = _compute_payload(events, calls, asst_segs, args, project_dir,
                                  hook_facts=hook_facts, usage_entries=series,
                                  history_chars=history_chars,
-                                 nonresident_by_request=nonresident_by_request)
+                                 nonresident_by_request=nonresident_by_request,
+                                 delivered=delivered_at(versions, 0))
     _insert_compaction_rows(aggregate["timeline"], compaction_records)
     # Detected once over the whole session: a break is a transition between two
     # consecutive requests, and a per-turn series would miss every break that
@@ -5529,7 +6310,8 @@ def process_session(transcript_path, args):
                              usage_entries=usage_for_turn(series, t),
                              history_chars=history_chars,
                              skill_listing=skill_listing,
-                             lexical_bg=aggregate["lexicalBackground"])
+                             lexical_bg=aggregate["lexicalBackground"],
+                             delivered=delivered_at(versions, t["startEventIdx"]))
         _insert_cache_break_rows(p["timeline"], _breaks_within(breaks, t))
         turn_payloads.append({
             "id": f"turn-{t['index']}",
@@ -5589,6 +6371,10 @@ def process_session(transcript_path, args):
                     # describes the status it sits under.
                     if b["status"] != own:
                         b["reason"] = combined_reason(b["status"], statuses)
+                        if b.get("textNote"):
+                            b["reason"] += " " + b["textNote"]
+                        elif b.get("textSource") == "disk":
+                            b["reason"] += DISK_TEXT_CAVEAT
         # The rollups computed inside _compute_payload scored the session-wide
         # statuses; recompute them over the combined ones the aggregate now
         # carries, or the file summary contradicts the block list beneath it.
@@ -6223,6 +7009,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
               border: 1px dashed var(--border); color: var(--text-dim); font-weight: 400;
               text-transform: none; letter-spacing: 0; }
   .lex-echoed { border-style: solid; color: var(--green-soft); }
+  .src-transcript { border-style: solid; }
+  .src-disk { color: var(--amber); }
+  .src-stale { color: var(--red); border-style: solid; }
   .ev-card { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; }
   .ev-card .label { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 4px; }
   .ev-card .text { font-family: monospace; font-size: 11px; color: var(--text); word-break: break-word; white-space: pre-wrap; max-height: 220px; overflow-y: auto; }
@@ -7935,6 +8724,21 @@ const LEXICAL_CHIP = {
   'not-lexically-scorable': 'not lexically scorable — too few distinctive terms',
 };
 
+// Which text the verdict is about, baked as `textSource`. `disk` is a caveat,
+// not a detail: the file may have been edited after the session, so a verdict
+// about its wording may be about wording the model never saw.
+const TEXT_SOURCE_CHIP = {
+  'transcript': 'text as delivered',
+  'disk': 'text from disk — may postdate the session',
+  'stale': 'text from disk — provably not what was loaded',
+};
+
+function textSourceChip(b) {
+  const src = b.textSource || 'disk';
+  const text = TEXT_SOURCE_CHIP[src] || src;
+  return `<span class="lex-chip src-${src}" title="Where the block text this verdict is about came from.">${escapeHtml(text)}</span>`;
+}
+
 function lexicalChip(b) {
   if (!b.evidenceLabel) return '';
   const text = LEXICAL_CHIP[b.evidenceLabel] || b.evidenceLabel;
@@ -7946,7 +8750,7 @@ function renderRuleCheck(rc) {
   const conf = `<span class="rc-conf" title="Confidence of the check that produced this.">${escapeHtml(rc.confidence)} confidence</span>`;
   let inner = `<div class="rc-state">${escapeHtml(label)}${rc.state === 'not-checkable' ? '' : conf}</div>`;
   if (rc.source === 'fallback') {
-    inner += `<div class="rc-note">No checks file beside this document — these patterns were extracted mechanically from the rule's own backticked identifiers, so they are low confidence and never mark the block as violated.</div>`;
+    inner += `<div class="rc-note">No checks file beside this document — these patterns were extracted mechanically from the rule's own backticked identifiers, so every finding below is a candidate reported as unclear, never a violation.</div>`;
   }
   (rc.findings || []).forEach(f => {
     const verb = RULECHECK_STAGE[f.stage]
@@ -8100,7 +8904,7 @@ function renderDetail(blockId) {
         <span class="help-trigger" data-help="verdict" title="How is the verdict computed?">?</span>
       </h4>
       <div class="block-status status-${b.status}" style="font-size:13px;margin-bottom:8px">
-        <span class="status-dot"></span>${statusLabel}${lexicalChip(b)}
+        <span class="status-dot"></span>${statusLabel}${lexicalChip(b)}${textSourceChip(b)}
       </div>
       <div class="reason ${b.status}">${escapeHtml(b.reason)}</div>
     </div>

@@ -7,32 +7,32 @@ list of docs/reading-transcripts.md S11 step 3), `blocks` (block identity, no
 verdict fields) and `joins` (over-generous substring candidates to confirm or
 reject). Event and call numbers below are that view's numbering.
 
-## The four truth classes
+A verdict here is about the block text as the session received it. The frozen
+copies of the rule documents under `inputs/` were captured after the session
+ran, so where the transcript carries the delivered text - a `Read` result, an
+attachment, the pre-edit half of a write - that text is the one a row is about,
+and the frozen copy is reference only. Where nothing recovers it, the row is
+still about the frozen copy and the tool says so on the block (`text disk`, or
+`text stale` where the ctxlog hook's recorded size and digest prove the file
+changed since it was loaded).
 
-- `used` - a specific cited action satisfies what the block asks for.
-- `violated` - a citable span (file, line, matched text) shows it broken.
-- `no-hard-verdict` - nothing observable ties the block to this run, or the
-  rule's precondition never came up. Every not-used-family status is honest
-  here, and so is a co-occurrence label; a green is a false green and a red is
-  a false red.
-- `undecidable` - ground truth could not be established from the frozen inputs
-  (S11 step 5). Excluded from the scorecard's totals.
+## The rulings this file applies
 
-A descriptive block - a layout table, a repo tour - counts as `used` when the
-run produced or modified something the block specifically names, or reproduced
-its text. `used` in this taxonomy means the block was used, not that a rule was
-obeyed, and prose being copied into a written file is exactly that.
-
-A skill or command file that the session invoked is `used` in all its blocks:
-the invocation is a harness-defined record tying that document to the run.
-That is a ruling, not a measurement - a reader who disagrees should say so here
-rather than in the tool.
-
-Everything not listed with its own evidence below is `no-hard-verdict` by that
-default, which is what the verdict ladder says when nothing cites a tie.
+They are written once, in [`snapshots/expected/RULINGS.md`](../../RULINGS.md), and every
+row here is scored under them. The four truth classes (`used`, `violated`,
+`no-hard-verdict`, `undecidable`) are ruling 1; the delivered-text rule above is
+ruling 2; the descriptive-block rule is ruling 3, and its disputed half in
+particular: **A file created under a directory the block names does not count.**
+Invoking a skill or command file makes only that document's own first block -
+its identity block - `used`; every other block has to earn its verdict from its
+own evidence (ruling 4), and everything not listed below with its own evidence
+is `no-hard-verdict` by default (ruling 5).
 
 This file is the ground truth itself, not a report about it: edit it by hand
-when a judgement is wrong, and say in the line why it changed.
+when a judgement is wrong, and say in the line why it changed. A row corrected
+after a payload was read carries a `revised:` note and a `blind:` line saying
+whether the correction itself was derived blind (ruling 7); the scorer refuses
+one without the other.
 
 ## Verdicts
 

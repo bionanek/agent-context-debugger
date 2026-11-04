@@ -1,0 +1,98 @@
+{
+  "source": "~/Git/famigo/CLAUDE.md",
+  "_review": [
+    "Compiled from the frozen ~/Git/famigo/CLAUDE.md by the /compile-rules flow",
+    "(prompts/translate-rules.md), then read line by line before being committed.",
+    "Two of the document's five rules compile; the other three are refused below.",
+    "Both famigo baselines are judged with this file: the two sessions were given the",
+    "same document, and its `Commit message format` and `Quality Gate — MANDATORY`",
+    "sections are byte-identical between them.",
+    "The fixtures are synthetic, not lifted from the session: a fixture is about the",
+    "pattern's behaviour, and copying the corpus into it would make the self-test pass",
+    "for the same reason the audit does.",
+    "The `-F -` spelling is deliberate in the pattern: the audited sessions use both",
+    "`-F-` and `-F -`, and a pattern that knew only one condemned a compliant commit",
+    "for its spacing."
+  ],
+  "checks": [
+    {
+      "id": "commit-subject-one-short-line",
+      "rule_ref": "Commit message format",
+      "rule_text": "Rules: imperative mood; first line <= 72 chars; key technical details; no paragraphs.",
+      "statement": "Did a `git commit` carry a message that is more than one line of at most 72 characters - a subject over the limit, or a body of paragraphs?",
+      "scope": "process",
+      "evidence": "transcript",
+      "bucket": "deterministic",
+      "kind": "tool_arg_matches",
+      "tool_pattern": "^Bash git commit\\b",
+      "arg_pattern": "^git commit (?:-[A-Za-z][A-Za-z0-9-]* )*?(?:-m |-F ?- (?:<<'EOF' )?)[\"']?.{1,72}[\"']?(?: EOF)?(?: \\d+)?$",
+      "confidence": "high",
+      "message": "Commit message runs past one 72-character line: the rule asks for a single imperative subject with no paragraphs. The whole message is measured, so a short subject with an explanatory body fires this too.",
+      "examples_positive": [
+        "git commit -m \"036: Favorites controller and routes — add CRUD endpoints\"",
+        "git commit -m \"Fix auth token refresh on 401\""
+      ],
+      "examples_negative": [
+        "a subject over 72 characters, however accurate it is",
+        "a short subject followed by explanatory paragraphs in the body"
+      ],
+      "self_test": {
+        "should_match": [
+          "Bash git commit -m \"012: Rework the pagination cursor so a deleted row no longer skips a page\"",
+          "Bash git commit -F- <<'EOF' 012: Rework the pagination cursor Deleting a row shifted every later page by one, because the cursor was an offset. EOF",
+          "Bash git commit -F - <<'EOF' Fix the pagination cursor And then a paragraph of explanation that pushes the whole message well past seventy-two characters. EOF"
+        ],
+        "should_not_match": [
+          "Bash git commit -m \"036: Favorites controller and routes — add CRUD endpoints\"",
+          "Bash git commit -F- <<'EOF' Fix auth token refresh on 401 EOF",
+          "Bash git commit -a -m \"Fix auth token refresh on 401\" 600000",
+          "Bash git status --short",
+          "Bash git commit -F - <<'EOF' Fix auth token refresh on 401 EOF"
+        ]
+      }
+    },
+    {
+      "id": "quality-gate-before-push",
+      "rule_ref": "Quality Gate — MANDATORY",
+      "rule_text": "Run the Quality Gate before pushing or creating a PR when asked; do not push code with Quality Gate failures outstanding.",
+      "statement": "Was code pushed with no Quality Gate command having run first?",
+      "scope": "process",
+      "evidence": "transcript",
+      "bucket": "deterministic",
+      "kind": "tool_never_without_prior",
+      "pattern": "\\bgit\\s+push\\b",
+      "prior_pattern": "\\byarn\\s+(?:type-check|lint|test|build)\\b",
+      "confidence": "medium",
+      "message": "A `git push` ran with no Quality Gate command (`yarn type-check` / `lint` / `test` / `build`) anywhere before it.",
+      "examples_positive": [
+        "yarn type-check, yarn lint and yarn test, then git push origin develop"
+      ],
+      "examples_negative": [
+        "git push origin develop as the first command of the session"
+      ],
+      "self_test": {
+        "should_match": [
+          "Bash git push origin develop"
+        ],
+        "should_not_match": [
+          "Bash yarn type-check\nBash yarn lint\nBash git push origin develop",
+          "Bash yarn test --runInBand; git push origin develop"
+        ]
+      }
+    }
+  ],
+  "not_checkable": [
+    {
+      "rule_ref": "Start here",
+      "why": "a pointer to another document; reading it leaves no record a pattern can decide"
+    },
+    {
+      "rule_ref": "Scope-based context",
+      "why": "which AGENT.md to load depends on what the task was about, which the tool cannot establish"
+    },
+    {
+      "rule_ref": "After finishing",
+      "why": "'after any change that introduces new patterns, commands, env vars, infrastructure, or conventions' has no decidable antecedent - whether a change introduced a new convention is a judgement about the change"
+    }
+  ]
+}

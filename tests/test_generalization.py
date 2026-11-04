@@ -36,11 +36,12 @@ from tests.test_turns import (
 REPO = Path(__file__).resolve().parent.parent
 FIXTURES = Path(__file__).parent / "fixtures"
 WORKED_EXAMPLE = FIXTURES / "global_rules.md"
+WORKED_CHECKS = WORKED_EXAMPLE.with_name(WORKED_EXAMPLE.name + ".checks.json")
 
 # The predicate kinds that survive: each is a record the harness writes, joined
 # to something the block itself names. Nothing here reads a rule's phrasing.
-HARNESS_KINDS = {"trigger", "skill-invocation", "writes-to-named-path",
-                 "template-echo", "command-echo"}
+HARNESS_KINDS = {"trigger", "skill-invocation", "reads-named-path",
+                 "writes-to-named-path", "template-echo", "command-echo"}
 
 
 def bash(cmd, i, tool_id="b1"):
@@ -403,6 +404,18 @@ def test_a_foreign_language_rule_doc_derives_the_same_predicates_as_its_twin():
                 == kinds_of(PL.read_text(), pl_title)), (en_title, pl_title)
 
 
+def test_both_twins_name_the_same_files():
+    """The file-only narrowing must be about path shape, not about prose.
+
+    Both fixtures point at the same two paths in the same code font; a
+    difference here would mean the extractor read the sentence around them.
+    """
+    en, pl = EN.read_text(), PL.read_text()
+    assert brv._named_paths(en) == brv._named_paths(pl)
+    assert brv._named_paths(en) == ["~/.claude/skills/standup/SKILL.md",
+                                    "~/.claude/ERRORS.md"]
+
+
 def test_a_foreign_language_trigger_declaration_still_fires():
     """`Wyzwalacz: /standup` is the same declaration as `Trigger: /standup`.
 
@@ -494,20 +507,54 @@ def test_only_a_compiled_check_can_call_a_rule_violated(tmp_path):
     red badge can now only come from `rule_checks` - which refuses to report one
     without a file, a line and the matched text. That is the epistemic rule of
     the whole project, held here as a property of the corpus rather than a note.
+
+    Both mechanisms are live in the run, and the two premise assertions at the
+    end say so: without them this would pass over a session in which no check
+    ever ran and no strong predicate was ever applicable, which is a statement
+    about the fixture rather than about the tool.
     """
+    # A run that keeps both accusing mechanisms live rather than idle: it does
+    # the two things the compiled checks are about, compliantly, and it runs a
+    # command one of the documents prescribes verbatim. Without that, "nothing
+    # went red" would be a statement about a session in which nothing could.
     busy = [user_text("do everything", 1),
-            bash("gh pr create --fill", 2, tool_id="b1"),
-            bash('echo "$x" | pbcopy', 3, tool_id="b2"),
-            bash("git commit -am wip", 4, tool_id="b3"),
-            write_call("/repo/src/a.ts", "export const a = 1;\n", 5),
-            assistant_text("Refactored AuthController and moved the schema.", 6)]
-    for name, md in (("en", EN.read_text()), ("pl", PL.read_text()),
-                     ("table", PATH_TABLE_MD), ("eom", EOM_MD),
-                     ("worked", WORKED_EXAMPLE.read_text())):
+            bash("gh auth status", 2, tool_id="b1"),
+            bash("gh pr create --fill", 3, tool_id="b2"),
+            bash("printf '%s' \"$x\" | pbcopy", 4, tool_id="b3"),
+            bash("git commit -am wip", 5, tool_id="b4"),
+            # The credit-only premise. It used to rest on `pbcopy` being read as
+            # the clipboard rule's prescribed command, which was the pipeline
+            # bug: the rule's own forbidden shape credited it. The quality
+            # gate's fenced `pytest -q` is a whole prescribed command that
+            # really ran.
+            bash("pytest -q", 6, tool_id="b5"),
+            write_call("/repo/src/a.ts", "export const a = 1;\n", 7),
+            assistant_text("Refactored AuthController and moved the schema.", 8)]
+    trace = trace_for(with_cwd(busy, FORMIC_CWD), "do everything")
+    checked = credited = 0
+    for name, md, checks in (("en", EN.read_text(), None),
+                             ("pl", PL.read_text(), None),
+                             ("table", PATH_TABLE_MD, None),
+                             ("eom", EOM_MD, None),
+                             ("worked", WORKED_EXAMPLE.read_text(),
+                              WORKED_CHECKS.read_text())):
         doc = tmp_path / f"{name}.md"
         doc.write_text(md)
+        if checks:
+            doc.with_name(doc.name + ".checks.json").write_text(checks)
         rc.checks_for_doc.cache_clear()
         for block in blocks_of(md):
-            v = brv.assess_block(block, rule_file(doc),
-                                 trace_for(with_cwd(busy, FORMIC_CWD), "do everything"))
+            file = rule_file(doc)
+            v = brv.assess_block(block, file, trace)
             assert v["status"] != "ignored", (name, block["title"], v["reason"])
+            findings = (v.get("ruleCheck") or {}).get("findings") or []
+            if any(f.get("stage") == rc.STAGE_SATISFIED for f in findings):
+                checked += 1
+            if any(brv._fired_strongly(p, trace)
+                   for p in brv.derive_predicates(block, file)):
+                credited += 1
+    # The premises, or the loop above is a claim about an empty run: a reviewed
+    # check really ran and was satisfied, and a credit-only predicate really was
+    # applicable, and neither of them produced a red.
+    assert checked, "no compiled check ran over this session at all"
+    assert credited, "no credit-only predicate was applicable in this session"

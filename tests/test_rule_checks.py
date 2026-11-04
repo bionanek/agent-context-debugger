@@ -47,8 +47,9 @@ def check(**over):
         "applies_to": ["**/*.tsx"],
         "confidence": "high",
         "message": "reaction() is forbidden in components.",
-        # A should_not_match case puts the identifier inside a string literal,
-        # which is the check declaring that strings are not code for it.
+        # A v1 field this tool no longer reads. It stays in the fixture on
+        # purpose: string stripping is central and unconditional now, and a
+        # checks file written against the old format must still load.
         "ignore_strings": True,
         "self_test": {
             "should_match": ["    reaction(() => store.value, run);"],
@@ -87,39 +88,48 @@ def test_hash_comments_respect_the_language():
     assert "#fff" in rc.strip_comments_and_strings("const c = 0; const d = 1; /* */ #fff\n", "a.tsx")
 
 
-def test_string_contents_survive_by_default():
-    """Stripping strings blinds the checker to the most common rule shape there
-    is: in JS and TS a module path is a string literal, so `never import from X`
-    could never match. Comments were the pilot's actual false-positive source."""
+def test_string_contents_are_stripped_on_the_source_path():
+    """Strings are blanked unconditionally now: leaving them standing was an
+    opt-in nobody set, and a rule's own identifier quoted inside a string
+    literal was reported as a violation of that rule, in red. The cost is
+    stated in `strip_comments_and_strings`: a rule about what is *in* a string
+    (an import path, a `className`) needs the syntax tree, not characters."""
     src = "import { rootStore } from '../stores/rootStore';"
-    assert "rootStore'" in rc.strip_comments_and_strings(src, "Panel.tsx")
-    assert 'bg-[#f8f9f9]' in rc.strip_comments_and_strings(
+    out = rc.strip_comments_and_strings(src, "Panel.tsx")
+    assert "rootStore'" not in out
+    assert out.startswith("import { rootStore } from ")
+    assert len(out) == len(src)
+    assert 'bg-[#f8f9f9]' not in rc.strip_comments_and_strings(
         '<div className="bg-[#f8f9f9]">', "Panel.tsx")
 
 
-def test_strings_are_stripped_only_when_a_check_opts_in():
+def test_only_the_comment_span_caller_keeps_string_contents():
+    """`strip_strings=False` exists for `_comment_candidates` alone: it reads
+    back what the stripper blanked, so blanking string contents with the same
+    sentinel would report every string literal as a comment."""
     src = 'const s = "reaction(() => x, y)";'
-    assert "reaction(" in rc.strip_comments_and_strings(src, "a.tsx")
-    assert "reaction(" not in rc.strip_comments_and_strings(src, "a.tsx", strip_strings=True)
+    assert "reaction(" not in rc.strip_comments_and_strings(src, "a.tsx")
+    assert "reaction(" in rc.strip_comments_and_strings(src, "a.tsx", strip_strings=False)
 
 
 def test_a_url_inside_a_string_is_not_a_line_comment():
     """`//` in a URL used to blank the rest of the line, hiding real code from
-    the checker. String boundaries are tracked even when contents are kept."""
+    the checker. Boundaries are tracked, so blanking a string ends where the
+    string does and the code after it survives."""
     src = "const url = 'https://api.example.com'; reaction(() => x, y);"
     assert "reaction(" in rc.strip_comments_and_strings(src, "a.ts")
 
 
 def test_template_interpolations_are_code_not_string_content():
-    """`${...}` holds executable code, so blanking it hides real matches even
-    when a check has asked for strings to be stripped."""
+    """`${...}` holds executable code, so a template literal's interpolations
+    stand while the literal text around them is blanked."""
     src = "const url = `wss://${import.meta.env.VITE_HOST}/ws`;"
-    out = rc.strip_comments_and_strings(src, "a.ts", strip_strings=True)
+    out = rc.strip_comments_and_strings(src, "a.ts")
     assert "import.meta.env.VITE_HOST" in out
     assert "wss://" not in out
 
 
-def test_opting_in_to_string_stripping_suppresses_a_match_inside_a_string():
+def test_a_v1_record_reports_a_string_hit_as_unclear_through_the_loader():
     events = [user_text("tidy up", 1),
               write_call("/repo/src/Panel.tsx", 'const s = "reaction(() => x, y)";\n', 2)]
     check = {
@@ -133,9 +143,10 @@ def test_opting_in_to_string_stripping_suppresses_a_match_inside_a_string():
     assert not loaded["rejected"]
     corpus = rc.build_corpus(brv.tool_calls(events))
     findings = rc.evaluate_checks(loaded["checks"], corpus)
-    # The strict view still sees the text inside the string, so the two views
-    # disagree and the finding stays `unclear`. What matters is that it is never
-    # `violated`: the check asked for string contents to be ignored.
+    # The whole path, loader included: the strict view still sees the text
+    # inside the string, so the two views disagree and the finding stays
+    # `unclear`. The record's retired `ignore_strings` changes nothing either
+    # way - stripping is unconditional now.
     assert [f["state"] for f in findings] == ["unclear"]
 
 
@@ -297,6 +308,55 @@ def test_acknowledged_findings_do_not_make_the_block_violated():
     assert rcheck["state"] == "acknowledged"
 
 
+# ---------- strings are stripped centrally, for every check ----------
+
+STRING_SHAPES = {
+    "template literal": "const doc = `reaction(() => x, y)`;\n",
+    "double quoted": 'const doc = "reaction(() => x, y)";\n',
+    "single quoted": "const doc = 'reaction(() => x, y)';\n",
+}
+
+
+def test_a_match_only_inside_a_string_is_never_a_violation():
+    """famigo F4: the rule's own identifier, quoted inside the very script the
+    rule prescribes, reported in red. Stripping is unconditional now, so the
+    strict and stripped views disagree and the finding is a candidate."""
+    for shape, src in STRING_SHAPES.items():
+        for record in (check(), check(ignore_strings=False)):
+            events = [user_text("go", 1), write_call("/repo/src/P.tsx", src, 2)]
+            findings = rc.evaluate_checks([record], corpus_for(events))
+            assert [f["state"] for f in findings] == ["unclear"], (shape, record)
+
+
+def test_the_same_pattern_outside_a_string_is_still_a_violation():
+    """The positive control: without it the test above would pass on a pattern
+    that matches nothing at all."""
+    events = [user_text("go", 1),
+              write_call("/repo/src/P.tsx", "reaction(() => x, y);\n", 2)]
+    assert [f["state"] for f in rc.evaluate_checks([check()], corpus_for(events))] \
+        == ["violated"]
+
+
+def test_a_v1_record_carrying_a_retired_field_still_loads():
+    """The retired fields are accepted and do nothing. Refusing one would turn
+    every checks file written against the old format into unchecked rules."""
+    assert rc.IGNORED_LEGACY_FIELDS == ("ignore_strings",)
+    for field in rc.IGNORED_LEGACY_FIELDS:
+        loaded = rc.load_checks(doc(checks=[check(**{field: True})]))
+        assert [c["id"] for c in loaded["checks"]] == ["no-reaction"], field
+        assert loaded["rejected"] == [], field
+
+
+def test_a_strict_match_the_stripped_view_loses_is_unclear():
+    """The agreement rule, exercised directly: strict sees it, stripped does
+    not, so nothing is called a violation."""
+    src = 'const doc = "reaction(() => x, y)";\n'
+    entry = {"path": "src/P.tsx", "text": src}
+    assert "reaction(" in src
+    assert "reaction(" not in rc.strip_comments_and_strings(src, entry["path"])
+    assert rc._evaluate_source(check(), entry)["state"] == "unclear"
+
+
 # ---------- fallback for docs with no checks file ----------
 
 FALLBACK_MD = """## Store rules
@@ -340,6 +400,47 @@ def test_fallback_can_be_refused_for_documents_that_are_not_guidelines():
     events = [user_text("go", 1),
               write_call("/repo/src/P.tsx", "import { AuthStore } from './auth';\n", 2)]
     assert rc.check_block(block, None, corpus_for(events), fallback=False) is None
+
+
+def test_a_fallback_finding_is_a_candidate_never_a_violation():
+    """Nobody reviewed the pattern: it is a backticked token lifted out of the
+    rule's own prose, and the exception clause two sentences later may well
+    permit exactly what it matched. `unclear` is as far as that can go."""
+    block = brv.parse_claude_md(FALLBACK_MD)[0]
+    events = [user_text("go", 1),
+              write_call("/repo/src/P.tsx", "AuthStore.load();\n", 2)]
+    rcheck = rc.check_block(block, None, corpus_for(events))
+    assert rcheck["source"] == "fallback"
+    assert [f["state"] for f in rcheck["findings"]] == ["unclear"]
+    assert rcheck["state"] == "unclear"
+    assert "extracted mechanically" in rcheck["findings"][0]["message"]
+
+
+def test_a_fallback_finding_leaves_the_block_out_of_the_red_states(tmp_path):
+    """The badge and the rule line agree, at the baked-payload level: a
+    mechanically extracted candidate neither turns the block `ignored` nor puts
+    it in a rule-check state the page paints red."""
+    src = tmp_path / "GUIDELINES.md"
+    src.write_text(FALLBACK_MD)
+    rc.checks_for_doc.cache_clear()
+    events = [user_text("go", 1),
+              write_call("/repo/src/P.tsx", "AuthStore.load();\n", 2)]
+    v = brv.assess_block(brv.parse_claude_md(FALLBACK_MD)[0], rule_file(src),
+                         trace_for(events))
+    assert v["status"] != "ignored"
+    assert v["ruleCheck"]["state"] == "unclear"
+    assert not [f for f in v["ruleCheck"]["findings"]
+                if f["state"] in ("violated", "acknowledged")]
+
+
+def test_only_the_violated_rule_check_state_is_painted_red():
+    """A vocabulary check, not a layout one: the page keys its red off the
+    rule-check state, and `unclear` - the strongest thing a fallback finding
+    can be - must not be one of the states that gets it."""
+    red = [line.strip() for line in brv.HTML_TEMPLATE.splitlines()
+           if ".rc-" in line and "var(--red)" in line]
+    assert red, "no rule-check state is styled red; this check would pass vacuously"
+    assert all(".rc-violated" in line for line in red), red
 
 
 def test_fallback_never_treats_a_code_identifier_as_a_shell_command():

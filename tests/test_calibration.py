@@ -28,6 +28,14 @@ from tests import lexical_fixture as lf
 from tests.test_turns import assistant_text, user_text
 
 
+# The frozen corpus is author-private (see `tests/lexical_fixture.py`), so a
+# clone runs the inline pairs alone. The tests whose claim is about the whole
+# set say so and skip; the ones the inline pairs can still answer keep running,
+# because a gate that vanishes on a clone is no gate for a contributor.
+requires_corpus = pytest.mark.skipif(not lf.snapshots_available(),
+                                     reason=lf.CORPUS_ABSENT)
+
+
 @pytest.fixture(scope="module")
 def fixture():
     return lf.load()
@@ -40,18 +48,26 @@ def metrics(fixture):
 
 # ---------- the set itself ----------
 
-def test_the_calibration_corpus_is_present():
-    """A missing corpus is a missing gate, so it fails here rather than later.
+@requires_corpus
+def test_the_calibration_corpus_resolves_every_pair(metrics):
+    """With the corpus present, nothing may drop out of the set unannounced.
 
-    196 of the 250 pairs reference the frozen baselines under
-    `snapshots/baseline/`. Strip those and the precision gate goes on passing
-    over the 32 inline pairs alone, which is a much easier set - so the absence
-    is reported once, by name, instead of surfacing three tests later as a row
-    count nobody can interpret.
+    218 of the 250 pairs reference the frozen baselines under
+    `snapshots/baseline/`. A re-captured baseline that lost a session would
+    otherwise shrink the gate to the pairs that still resolve, which is a much
+    easier set, with nothing saying so.
     """
-    assert lf.snapshots_available(), (
-        f"{lf.SNAPSHOT_ROOT} is missing, so most of the calibration set cannot "
-        "be scored and the precision gate is measuring the inline pairs only")
+    assert metrics["unresolved"] == 0, lf.report(metrics)
+
+
+def test_the_inline_pairs_are_scorable_without_the_frozen_corpus(fixture, metrics):
+    """The floor a clone measures against, and the one this file cannot skip.
+
+    Every corpus-dependent test above skips when the baselines are absent, so
+    this is what stops the whole set silently emptying: the inline pairs carry
+    their own documents and segments and must resolve wherever the file runs.
+    """
+    assert metrics["resolved"] >= lf.inline_pair_count(fixture), lf.report(metrics)
 
 
 def test_the_fixture_is_well_formed(fixture):
@@ -80,12 +96,17 @@ def test_every_pair_resolves_to_a_block_and_a_corpus(fixture):
     re-captured baseline that renames a heading would otherwise drop those
     pairs out of the metric rather than failing.
     """
+    checked = 0
     for pair in fixture["pairs"]:
-        if "content" not in pair["block"] and not lf.snapshots_available():
+        if not lf.resolvable(pair):
             continue
         assert lf.block_content(pair, fixture).strip(), pair["id"]
         corpus = lf.corpus_for(pair, fixture)
         assert corpus["q"]["segments"], pair["id"]
+        checked += 1
+    # The skipped half is announced by the corpus-dependent tests; what this
+    # one may not do is pass having resolved nothing.
+    assert checked >= lf.inline_pair_count(fixture)
 
 
 def test_the_set_is_big_enough_to_measure(fixture):
@@ -103,6 +124,22 @@ def test_the_set_is_big_enough_to_measure(fixture):
 # ---------- the gate ----------
 
 def test_precision_on_the_labelled_set_holds_the_frozen_operating_point(fixture, metrics):
+    """The gate, at the granularity a single loosened threshold actually moves.
+
+    A ratio is too coarse to be the whole gate. `minPrecision` is 0.90 and the
+    set scores 245 pairs, so a threshold edit that manufactured its first two
+    or three false positives would still clear it, and the number a reader
+    quotes ("no false positive on the labelled set") would quietly stop being
+    true with nothing red. So the exact false-positive count is asserted here
+    rather than in a test of its own, and with the corpus present so is every
+    other figure the fixture records - the `measured` block is a claim about
+    this code, not about a past state of it.
+
+    The granularity is per-count, not per-threshold: this says the measurement
+    has not moved, and `test_the_thresholds_in_the_code_are_the_ones_the_set_was_swept_at`
+    says the numbers behind it have not either. Both are needed - a threshold
+    can move without changing a single verdict on this set.
+    """
     point = fixture["operatingPoint"]
     assert metrics["precision"] is not None, (
         "the tier predicted no positive at all, so there is no precision to "
@@ -110,19 +147,20 @@ def test_precision_on_the_labelled_set_holds_the_frozen_operating_point(fixture,
     assert metrics["precision"] >= point["minPrecision"], lf.report(metrics)
     # A tier that answered `no-lexical-trace` to everything would post a
     # perfect precision on an empty numerator, so the gate needs a floor under
-    # the numerator as well as over the ratio.
-    assert metrics["truePositives"] >= point["minTruePositives"], lf.report(metrics)
-
-
-def test_the_measured_figures_are_the_ones_the_fixture_records(fixture, metrics):
-    """The fixture is the record of what was measured, so it has to still be true.
-
-    Without this the `measured` block becomes a claim about a past state of the
-    code, which is worse than no claim: a reader would trust it.
-    """
-    recorded = fixture["operatingPoint"]["measured"]
-    for key in ("truePositives", "falsePositives", "falseNegatives", "scored"):
-        assert metrics[key] == recorded[key], (key, lf.report(metrics))
+    # the numerator as well as over the ratio. The floor is the one belonging
+    # to the set that was actually resolved: on a clone without the private
+    # corpus only the inline pairs are there, and holding them to the whole
+    # set's count would turn a missing corpus into a tier failure.
+    floor = (point["minTruePositives"] if lf.snapshots_available()
+             else point["minTruePositivesInline"])
+    assert metrics["truePositives"] >= floor, lf.report(metrics)
+    # Zero on the whole set and zero on the inline pairs alone, so this half of
+    # the gate survives on a clone where the rest of the figures cannot.
+    assert metrics["falsePositives"] == point["measured"]["falsePositives"], (
+        lf.report(metrics))
+    if lf.snapshots_available():
+        for key in ("truePositives", "falseNegatives", "scored"):
+            assert metrics[key] == point["measured"][key], (key, lf.report(metrics))
 
 
 def test_the_thresholds_in_the_code_are_the_ones_the_set_was_swept_at(fixture):
@@ -136,6 +174,7 @@ def test_the_thresholds_in_the_code_are_the_ones_the_set_was_swept_at(fixture):
     assert lexical.MIN_TERMS == point["minTerms"]
 
 
+@requires_corpus
 def test_no_pair_the_run_never_saw_scores_positive(fixture, metrics):
     """§3.2's shuffled-pair check, as a standing assertion.
 
@@ -151,6 +190,7 @@ def test_no_pair_the_run_never_saw_scores_positive(fixture, metrics):
             assert row["predicted"] not in lf.PREDICTED_POSITIVE, row
 
 
+@requires_corpus
 def test_precision_is_not_carried_by_the_easy_half(fixture, metrics):
     """The pairs read out of real transcripts have to clear the gate alone."""
     per = lf.by_provenance(metrics)

@@ -95,34 +95,75 @@ Ground-truth sources for every finding in this section are the raw transcripts u
 Distribution note: in every session the vast majority of blocks are `not-loaded` (correct,
 delivery-based). The judged population per session is ~40–120 blocks.
 
-### Measured after the work (Phase 14)
+### Measured after the work (Phase 14, re-measured in Phase 8 of the repair plan)
 
 The 8 anchor sessions were frozen (Phase 0), a ground truth was written per block from the
 frozen transcripts before either report was read, and the same frozen inputs were re-baked at
 the end. Full rows in [`snapshots/SCORECARD.md`](../snapshots/SCORECARD.md); the harness is
 `snapshots/compare.py`.
 
-| over 547 judged blocks | before | after |
+The first version of this table was self-graded and an independent review round falsified it:
+eight truth rows had been changed from `no-hard-verdict` to `used` *after* the after-run was
+read, the corpus held zero `violated` truths and no session carried a compiled checks file, and
+202 of the 226 "fixed" rows were skill blocks credited wholesale by one ruling. The numbers
+below are the re-measurement, with the ground truth re-derived blind, the rulings written down
+once in [`snapshots/expected/RULINGS.md`](../snapshots/expected/RULINGS.md), and the two halves
+reported apart.
+
+**Rule-document blocks — the half the judging mechanisms decide, one block at a time. This is
+the number the reliability claim is about.**
+
+| over 326 scored blocks | before | after |
 |---|---|---|
-| agrees with the ground truth | 295 (54%) | 521 (95%) |
+| agrees with the ground truth | 250 (77%) | 280 (86%) |
 | false green (`used` where nothing tied the block to the run) | 4 | **0** |
-| false red (`ignored` with no citable violation) | 11 | **0** |
-| under-credit (compliance the tool would not claim) | 219 | 26 |
-| block never judged at all (a skill the older code did not resolve) | 18 | **0** |
+| false red (`ignored` with no citable violation) | 10 | **0** |
+| under-credit (compliance the tool would not claim) | 50 | 46 |
+| block never judged at all | 12 | **0** |
 
-Regressed verdicts: **0**. The remaining 26 under-credits are each accounted for in the
-scorecard, and they fall into four groups: prose rules with no compiled checks file for this
-user's own documents (the gh-account and "verification before claiming done" rules — the
-report names `/compile-rules` on them), a skill invoked by typing its name with no `Skill`
-tool call behind it (a deliberate refusal, §2 F-BLINDSPOT's mirror image), a read-kind
-document whose commands ran in later turns than the read (the residency caveat), and commands
-a block names in an inline span rather than a fenced block, which `command-echo` does not read.
+**Skill and command blocks — credited wholesale by the invoked-skill ruling (RULINGS.md 4), so
+these rows move together and say more about that ruling than about the judging.**
 
-Two caveats on the numbers. The truth classes are deliberately coarse — `used` /
-`violated` / `no-hard-verdict` / `undecidable` — because `dormant` versus `unused` is not a
-reliability claim while a green over an untied rule is; and 25 of the 547 rows were not
-written blind - 7 revised after reading the after-run, and 18 for blocks the baseline never
-judged at all - each saying so in its own line with the evidence behind it.
+| over 210 scored blocks | before | after |
+|---|---|---|
+| agrees with the ground truth | 5 | 207 |
+| false green / false red | 0 / 0 | 0 / 0 |
+| under-credit | 187 | 3 |
+| block never judged at all | 18 | **0** |
+
+Red-side coverage, stated because a false-red count of zero is otherwise unmeasurable: the
+corpus carries **2 `violated` truths** (the famigo `5448a718` and `9dd3cc8a` commit-message
+rules, cited at three and four `git commit` calls whose subjects run 73-83 characters against a
+72-character limit, each with a paragraph body the same rule forbids) and **2 sessions carrying
+a compiled checks file** (`snapshots/checks/famigo/*/…/CLAUDE.md.checks.json`, reviewed and
+committed). Both `violated` rows are reached through that checks file, so their improvement
+comes from a new judgement input as well as from the code, and the baseline could not have
+reached them at all. Everything else in the two tables is the same frozen input judged by
+different code.
+
+**Regressed verdicts: 2**, and they are not incidental. Both are `~/.claude/CLAUDE.md` blocks in
+the two formicHMI sessions whose skill really was invoked: the ctxlog hook's recorded size and
+digest prove that file changed after it was loaded, so Phase 6 refuses to read any of its
+wording as a rule and the block drops from `used` to `unused`. That is the cost of judging the
+delivered text rather than the file on disk today, paid where it is visible.
+`snapshots/compare.py` exits non-zero on them, as it should.
+
+Three caveats on the numbers.
+
+- The truth classes are deliberately coarse - `used` / `violated` / `no-hard-verdict` /
+  `undecidable` - because `dormant` versus `unused` is not a reliability claim while a green
+  over an untied rule is.
+- 26 rows are excluded as `undecidable`, 14 of them because Phase 6 re-parsed one formic-core
+  `AGENTS.md` from its delivered text, which has one section fewer than the frozen disk copy
+  and therefore renumbers every block id after it. Those rows name sections of a document the
+  session was never given.
+- Every row not derived blind says so in its own line, under a `blind:` field the scorer
+  refuses to let a `revised:` note omit. In this pass 27 rows carry `blind: no`: the 14
+  renumbered ids above, the 12 rows added for the same sections under the ids the delivered
+  text produces, and one more - the famigo `figma-design-system` redirect stub, moved *to*
+  `used` against the reading that would have flattered the scorecard, because the review's
+  finding was that the descriptive-block ruling had been applied only where the tool went
+  green. The other 54 rows that moved in this pass were derived blind.
 
 ### Failure mechanisms, ranked by damage (consistent across all four audits)
 

@@ -16,3 +16,7 @@ __pycache__/
 .pytest_cache/
 .venv/
 .DS_Store
+
+# Frozen calibration corpus: raw transcripts with private content, never committed
+snapshots/baseline/
+snapshots/after/

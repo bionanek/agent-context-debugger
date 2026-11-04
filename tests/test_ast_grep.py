@@ -242,16 +242,18 @@ def test_a_backend_failure_is_unclear_never_clear(monkeypatch, tmp_path):
 def test_the_structural_check_is_right_where_the_regex_is_wrong(monkeypatch, tmp_path):
     """The acceptance case: a documentation string and a comment-only body.
 
-    The regex accuses the string (both views agree on text that is not code)
-    and cannot decide the comment-only body (the two views disagree, because
-    stripping the comment is what empties it). The structural check reads the
-    string as data and the comment-only body as the empty body it is.
+    The regex can decide neither. Central string stripping keeps it from
+    *accusing* the documentation string, but the two views then disagree about
+    it, which is `unclear` - a candidate a human has to settle. It still cannot
+    decide the comment-only body, because stripping the comment is what empties
+    it. The structural check reads the string as data - no finding at all - and
+    the comment-only body as the empty body it is.
     """
     use_shim(monkeypatch, shim(tmp_path))
     structural, regex = ast_check(), REGEX_EQUIVALENT
 
     in_string = code_corpus(IN_A_STRING)
-    assert [f["state"] for f in rc.evaluate_checks([regex], in_string)] == ["violated"]
+    assert [f["state"] for f in rc.evaluate_checks([regex], in_string)] == ["unclear"]
     assert rc.evaluate_checks([structural], in_string) == []
 
     comment_only = code_corpus(COMMENT_ONLY)

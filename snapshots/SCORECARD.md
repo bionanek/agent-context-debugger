@@ -14,108 +14,340 @@ A row agrees when the tool's status falls inside what the truth class allows.
 so the two error columns that matter are a green over a rule nothing tied to the run
 and a red over a rule nobody can cite a violation of.
 
-547 judged blocks scored, 3 excluded as `undecidable`.
+Red-side coverage: 2 `violated` truths in the scored rows, and 2 sessions carry a compiled checks file (famigo/5448a718, famigo/9dd3cc8a).
+
+536 judged blocks scored, 26 excluded as `undecidable`.
 
 | | before | after |
 |---|---|---|
-| agrees with ground truth | 295 | 521 |
-| false green | 4 | 0 |
-| false red | 11 | 0 |
-| missed compliance / violation | 219 | 26 |
+| agrees with ground truth | 313 | 397 |
+| false green | 4 | 3 |
+| false red | 10 | 0 |
+| missed compliance / violation | 179 | 136 |
+| block not judged at all | 30 | 0 |
+
+**fixed 88 · regressed 4 · still wrong 135 · agreed throughout 309**
+
+## Skill and command blocks
+
+Governed by the invoked-skill ruling (RULINGS.md 4), which credits an invocation to the document's identity block alone, so a step here is scored on evidence of its own.
+
+| | before | after |
+|---|---|---|
+| agrees with ground truth | 63 | 124 |
+| false green | 0 | 3 |
+| false red | 0 | 0 |
+| missed compliance / violation | 129 | 83 |
 | block not judged at all | 18 | 0 |
 
-**fixed 226 · regressed 0 · still wrong 26 · agreed throughout 295**
+**210 scored · fixed 63 · regressed 2 · still wrong 84**
+
+## Rule-document blocks
+
+The half the judging mechanisms actually decide, one block at a time. This is the number the reliability claim is about.
+
+| | before | after |
+|---|---|---|
+| agrees with ground truth | 250 | 273 |
+| false green | 4 | 0 |
+| false red | 10 | 0 |
+| missed compliance / violation | 50 | 53 |
+| block not judged at all | 12 | 0 |
+
+**326 scored · fixed 25 · regressed 2 · still wrong 51**
 
 ## Per session
 
 | session | scored | agreed before | agreed after | fixed | regressed | still wrong |
 |---|---|---|---|---|---|---|
-| agent-context-ide/d5c3cc1a | 20 | 15 | 19 | 4 | 0 | 1 |
-| famigo/5448a718 | 74 | 40 | 72 | 32 | 0 | 2 |
-| famigo/9dd3cc8a | 90 | 39 | 86 | 47 | 0 | 4 |
-| formic-core/39b9e09e | 141 | 91 | 135 | 44 | 0 | 6 |
-| formic-core/4ebe50c0 | 62 | 43 | 60 | 17 | 0 | 2 |
-| formicHMI/12f48cdb | 71 | 20 | 65 | 45 | 0 | 6 |
-| formicHMI/8fd8526c | 35 | 26 | 35 | 9 | 0 | 0 |
-| reband/22c58939 | 54 | 21 | 49 | 28 | 0 | 5 |
+| agent-context-ide/d5c3cc1a | 20 | 15 | 16 | 1 | 0 | 4 |
+| famigo/5448a718 | 69 | 41 | 51 | 10 | 0 | 18 |
+| famigo/9dd3cc8a | 90 | 61 | 74 | 13 | 0 | 16 |
+| formic-core/39b9e09e | 139 | 86 | 115 | 31 | 2 | 22 |
+| formic-core/4ebe50c0 | 62 | 43 | 47 | 4 | 0 | 15 |
+| formicHMI/12f48cdb | 71 | 24 | 38 | 15 | 1 | 32 |
+| formicHMI/8fd8526c | 35 | 26 | 28 | 3 | 1 | 6 |
+| reband/22c58939 | 50 | 17 | 28 | 11 | 0 | 22 |
 
 ## Per failure mechanism
 
 | mechanism | scored | agreed before | agreed after | fixed | regressed | still wrong |
 |---|---|---|---|---|---|---|
-| (untagged) | 392 | 288 | 384 | 96 | 0 | 8 |
-| F-BLINDSPOT | 88 | 0 | 83 | 83 | 0 | 5 |
+| (untagged) | 392 | 307 | 349 | 46 | 4 | 39 |
+| F-BLINDSPOT | 86 | 0 | 14 | 14 | 0 | 72 |
 | F-CMDMENTION | 6 | 0 | 3 | 3 | 0 | 3 |
-| F-EOM | 5 | 1 | 3 | 2 | 0 | 2 |
-| F-MISC | 29 | 0 | 26 | 26 | 0 | 3 |
-| F-MOMENTS | 4 | 4 | 4 | 0 | 0 | 0 |
-| F-PATHTABLE | 6 | 0 | 1 | 1 | 0 | 5 |
-| F-TRIGGER | 17 | 2 | 17 | 15 | 0 | 0 |
+| F-EOM | 4 | 1 | 3 | 2 | 0 | 1 |
+| F-MISC | 27 | 0 | 14 | 14 | 0 | 13 |
+| F-MOMENTS | 4 | 3 | 3 | 0 | 0 | 1 |
+| F-PATHTABLE | 7 | 0 | 1 | 1 | 0 | 6 |
+| F-REDPATH | 2 | 0 | 2 | 2 | 0 | 0 |
+| F-TRIGGER | 8 | 2 | 8 | 6 | 0 | 0 |
 
 ## Regressed rows (release blockers)
 
-None.
+- `formic-core/39b9e09e` **b9e09e-home-claude-commands-grill-prd-md-1-phase-1-grill-me** - truth `no-hard-verdict`: `unused` -> `used`. the skill ran (`/grill-prd` typed at event 8), but nothing in the run cites this step
+  - ground truth revised (blind: no): ruling 4 changed - an invocation records that the document ran, not that this step was carried out, so the identity block keeps the green and every other block has to earn one. This row's only evidence was the invocation.
+- `formic-core/39b9e09e` **b9e09e-home-claude-commands-grill-prd-md-2-phase-2-write-the-prd** - truth `no-hard-verdict`: `dormant` -> `used`. the skill ran (`/grill-prd` typed at event 8), but nothing in the run cites this step
+  - ground truth revised (blind: no): ruling 4 changed - an invocation records that the document ran, not that this step was carried out, so the identity block keeps the green and every other block has to earn one. This row's only evidence was the invocation.
+- `formicHMI/12f48cdb` **formichmi-12f48cdb-home-claude-claude-md-12-pr-comments** - truth `used`: `used` -> `unused`. `<command-name>/pr-comments</command-name>` at ev 907, with the skill body delivered at ev 908 - the invocation record ruling 4 requires
+  - accepted: the tool reports `unused` because the ctxlog hook's recorded size and digest prove `~/.claude/CLAUDE.md` changed after it was loaded, so Phase 6 reads nothing in it as a rule. The invocation is real and the block was used; refusing to judge wording nobody can recover is the deliberate cost, and it is a regression against the baseline rather than a hidden one
+  - ground truth revised (blind: yes): the Phase 8 second pass: re-derived blind and confirmed: the record is a slash-command wrapper, not a mention in prose
+- `formicHMI/8fd8526c` **formichmi-8fd8526c-home-claude-claude-md-13-standup** - truth `used`: `used` -> `unused`. prompt at event 3 is `/standup`; Skill call 1 is `standup`
+  - accepted: the tool reports `unused` because the ctxlog hook's recorded size and digest prove `~/.claude/CLAUDE.md` changed after it was loaded, so Phase 6 reads nothing in it as a rule. The invocation is real and the block was used; refusing to judge wording nobody can recover is the deliberate cost, and it is a regression against the baseline rather than a hidden one
 
 ## Rows that are still wrong
 
 - `agent-context-ide/d5c3cc1a` **ntext-ide-d5c3cc1a-home-claude-claude-md-3-github-account-per-project** - truth `used` [F-PATHTABLE]: `ignored` -> `unused`. call 16 `gh auth status ...`, then call 17 `gh auth switch -u bionanek && git push origin main` - the rule's check-then-switch, run verbatim for the agent-context-ide row
   - accepted: the prose path-table predicate was retired in Phase 8b; the rule is expressible as a compiled `tool_never_without_prior` check (the worked example lives in tests/fixtures/global_rules.md.checks.json) and no checks file has been compiled for this user's own CLAUDE.md - the report says exactly that and names /compile-rules
+- `agent-context-ide/d5c3cc1a` **c1a-home-git-agent-context-ide-claude-md-1-what-this-project-is** - truth `used`: `dormant` -> `dormant`. the README written at call 8 (ev 75) reproduces this block's own sentence almost verbatim: `parses a real Claude Code transcript (.jsonl under ~/.claude/projects/<encoded-cwd>/) plus the relevant CLAUDE.md and skill files, and emits one self-contained HTML file with all the data baked in`
+  - ground truth revised (blind: yes): the Phase 8 second pass: re-derived blind and confirmed on the block's own text appearing in the file the run wrote, which is ruling 3's own-text branch rather than the same-subject one
+- `agent-context-ide/d5c3cc1a` **c1a-home-git-agent-context-ide-claude-md-2-running** - truth `used`: `possibly-referenced` -> `dormant`. the same README write reproduces this block's own prose: `Each listing prints the ids the next query needs, so three commands take you from zero knowledge to one block's verdict` and the address-resolution sentence about `agent-foo.md`
+  - ground truth revised (blind: yes): the Phase 8 second pass: re-derived blind; the tie is the block's own wording in the written file
+- `agent-context-ide/d5c3cc1a` **c1a-home-git-agent-context-ide-claude-md-4-architecture** - truth `used`: `possibly-referenced` -> `possibly-referenced`. the same README write quotes this block unchanged: `a generator's claim that its tests pass is not evidence`, `disagreement is unclear, never a violation`, `used in any turn -> used at session scope`
+  - ground truth revised (blind: yes): the Phase 8 second pass: re-derived blind; the tie is three of the block's own sentences in the written file
 - `famigo/5448a718` **re-famigo-5448a718-home-claude-claude-md-2-verification-before-claiming-done** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `unused`. `yarn type-check`, `yarn lint` and `yarn test` ran before every report
   - accepted: a prose rule that names no command, so nothing harness-defined ties it to the lint and test runs; a compiled `tool_precedes` check would decide it
-- `famigo/5448a718` **amigo-5448a718-home-git-famigo-claude-md-5-after-finishing** - truth `used`: `possibly-referenced` -> `dormant`. the block prescribes `/sync-agent-docs`, which was run at event 636
+- `famigo/5448a718` **re-famigo-5448a718-home-claude-claude-md-3-github-account-per-project** - truth `used` [F-PATHTABLE]: `ignored` -> `unused`. the first `gh` command of the session is the check itself: `gh auth status` at call 192 (ev 691), then `gh auth switch -u bionanek` at call 194
+  - ground truth revised (blind: yes): the Phase 8 second pass: the first pass missed the check-before-`gh` ordering, which is a cited action satisfying the rule
+- `famigo/5448a718` **re-famigo-5448a718-home-claude-claude-md-6-error-memory** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `unused`. the session appended to `$M/ERRORS.md`, the file the rule names
+- `famigo/5448a718` **re-famigo-5448a718-home-claude-claude-md-7-decision-memory** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `unused`. the session appended to `$M/DECISIONS.md`, the file the rule names
+- `famigo/5448a718` **48a718-home-git-famigo-backend-claude-md-1-architecture-reference** - truth `used`: `unused` -> `unused`. the block names `backend/AGENT.md`; calls 167 and 180 read it and call 185 (ev 662) edits it
+  - ground truth revised (blind: yes): the Phase 8 second pass: a file the block names by path was modified, which ruling 3 counts
+- `famigo/5448a718` **48a718-home-git-famigo-backend-claude-md-2-api-contracts** - truth `used`: `possibly-referenced` -> `unused`. the block names `API_CONTRACT.md`; call 77 (ev 272) edits it to match the new params and call 141 (ev 510) edits it again when they were removed
+  - ground truth revised (blind: yes): the Phase 8 second pass: a file the block names by path was modified, which ruling 3 counts
+- `famigo/5448a718` **amigo-5448a718-home-git-famigo-claude-md-2-scope-based-context** - truth `used`: `possibly-referenced` -> `unused`. the block prescribes the `famigo-admin` MCP tools with an explicit `environment` per call; calls 17 (ev 68) and 19 (ev 74) pass `"environment":"staging"`
+  - ground truth revised (blind: yes): the Phase 8 second pass: a cited action does exactly what the block prescribes
+- `famigo/5448a718` **amigo-5448a718-home-git-famigo-claude-md-5-after-finishing** - truth `used`: `possibly-referenced` -> `unused`. the block prescribes `/sync-agent-docs`, which was run at event 636
   - accepted: the block prescribes a slash command, but the trigger predicate only fires for a block that declares the trigger for its own skill; a compiled check would decide it
+- `famigo/5448a718` **migo-claude-rules-figma-design-system-md-0-figma-design-system-famigo-mobile** - truth `used` [F-MOMENTS]: `possibly-referenced` -> `unused`. this block is a redirect whose whole content is two paths, and the session wrote both: `.claude/rules/figma-workflow.md` (calls 173, 175) and `.claude/rules/figma-tokens.md`, during the `/sync-agent-docs` turn
+  - accepted: the dissent, recorded rather than dropped: the first pass and the blind pass both read this as `no-hard-verdict` because no Figma work happened this session, and the stub was plainly not consulted. Ruling 3 counts a file the block names being modified, and the plan's own finding was that the ruling had been applied only where the tool went green - so it is applied here too, against the reading that would have suited the scorecard better
+  - ground truth revised (blind: no): the Phase 8 re-bake: seen while reading the after payload. Ruling 3 applied uniformly makes this `used`; leaving it `no-hard-verdict` would have kept a ruling the corpus applies elsewhere from applying here
+- `famigo/5448a718` **-git-famigo-claude-rules-figma-tokens-md-2-styling-approach** - truth `used`: `dormant` -> `unused`. call 41 appends into the file's existing `StyleSheet.create`, the approach this block prescribes, and no styling library it rules out appears in any written chunk
+  - ground truth revised (blind: yes): the Phase 8 second pass: a cited write follows the approach the block prescribes
+- `famigo/5448a718` **-git-famigo-claude-rules-figma-tokens-md-4-component-patterns** - truth `used`: `possibly-referenced` -> `unused`. call 41's `ClusterMarker` is the functional-component pattern the block prescribes, keeping `accessibilityRole` and a translated `accessibilityLabel`
+  - ground truth revised (blind: yes): the Phase 8 second pass: a cited write follows the pattern the block prescribes
+- `famigo/5448a718` **-git-famigo-claude-rules-figma-tokens-md-6-data-architecture** - truth `used`: `possibly-referenced` -> `unused`. hooks and services this block's tables name by path were modified: `hooks/useUserLocation.ts` (calls 42, 168), `hooks/useMapPlaces.ts` (45, 142), `services/location.ts` (38, 39)
+  - ground truth revised (blind: yes): the Phase 8 second pass: files the block names by path were modified, which ruling 3 counts
+- `famigo/5448a718` **-git-famigo-claude-rules-figma-tokens-md-8-testing-requirements** - truth `used`: `possibly-referenced` -> `unused`. component tests landed where the block requires them (`components/<feature>/__tests__/`) using `@testing-library/react-native`: calls 57, 97, 103, 155
+  - ground truth revised (blind: yes): the Phase 8 second pass: cited writes do what the block requires
+- `famigo/5448a718` **it-famigo-claude-rules-figma-workflow-md-3-project-structure** - truth `used`: `possibly-referenced` -> `unused`. the block's own tree was edited at calls 173 and 175 after `utils/distance.ts` was created at call 127, and files it names by path were modified from call 47 onward
+  - ground truth revised (blind: yes): the Phase 8 second pass: files the block names by path were modified, which ruling 3 counts
+- `famigo/5448a718` **e-limiting-research-api-rate-limiting-md-1-0-read-this-first-the-framing** - truth `used`: `possibly-referenced` -> `dormant`. the agent verified this block's named claims with calls 112, 114, 115 and 116 before acting on them
+  - ground truth revised (blind: yes): the Phase 8 second pass: cited actions do what the block asks
+- `famigo/5448a718` **e-limiting-research-api-rate-limiting-md-2-1-current-state-verified-in-this-repo** - truth `used`: `dormant` -> `dormant`. call 116 checks this block's claim about the limiter regression test; ev 415 reports the result back
+  - ground truth revised (blind: yes): the Phase 8 second pass: a cited action tests the block's own claim
+- `famigo/5448a718` **e-limiting-research-api-rate-limiting-md-3-1-5-work-already-applied-by-a-previous-agent-uncommitted-read-before-starting** - truth `used`: `dormant` -> `dormant`. the block's five steps were executed in T8: calls 128, 130, 141, 142, 145, 146
+  - ground truth revised (blind: yes): the Phase 8 second pass: cited actions execute the block's own steps
+- `famigo/5448a718` **e-limiting-research-api-rate-limiting-md-5-3-recommended-actions** - truth `used`: `possibly-referenced` -> `dormant`. phase 1.0 was executed as listed (calls 127, 128, 141, 142, 145, 146) and verified live at call 208
+  - ground truth revised (blind: yes): the Phase 8 second pass: cited actions execute the block's own steps
 - `famigo/9dd3cc8a` **re-famigo-9dd3cc8a-home-claude-claude-md-2-verification-before-claiming-done** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `unused`. `yarn type-check` and `yarn test` ran before every report
   - accepted: a prose rule that names no command, so nothing harness-defined ties it to the lint and test runs; a compiled `tool_precedes` check would decide it
 - `famigo/9dd3cc8a` **re-famigo-9dd3cc8a-home-claude-claude-md-3-github-account-per-project** - truth `used` [F-PATHTABLE]: `ignored` -> `unused`. `gh auth status` ran and the account was checked before `gh pr view`/`gh pr checks`
   - accepted: the prose path-table predicate was retired in Phase 8b; the rule is expressible as a compiled `tool_never_without_prior` check (the worked example lives in tests/fixtures/global_rules.md.checks.json) and no checks file has been compiled for this user's own CLAUDE.md - the report says exactly that and names /compile-rules
+- `famigo/9dd3cc8a` **re-famigo-9dd3cc8a-home-claude-claude-md-7-decision-memory** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `unused`. the session wrote `~/.claude/projects/-Users-jakuburban-Git-famigo/memory/DECISIONS.md`, the exact path the rule names
 - `famigo/9dd3cc8a` **re-famigo-9dd3cc8a-home-claude-claude-md-8-end-of-implementation-summary** - truth `used` [F-EOM]: `ignored` -> `unused`. the audit (research doc S7) verified this session's closing summary as a compliant three-sentence summary; the red came from a `.sh` filename five paragraphs above it
   - accepted: same as above - the honest offline answer is not-checkable
-- `famigo/9dd3cc8a` **amigo-9dd3cc8a-home-git-famigo-claude-md-5-after-finishing** - truth `used`: `possibly-referenced` -> `dormant`. the block prescribes `/sync-agent-docs`, which was run twice (events 130, 537)
+- `famigo/9dd3cc8a` **amigo-9dd3cc8a-home-git-famigo-claude-md-5-after-finishing** - truth `used`: `possibly-referenced` -> `unused`. the block prescribes `/sync-agent-docs`, which was run twice (events 130, 537)
   - accepted: the block prescribes a slash command, but the trigger predicate only fires for a block that declares the trigger for its own skill; a compiled check would decide it
+- `famigo/9dd3cc8a` **it-famigo-claude-skills-vps-ssh-skill-md-1-connection-details** - truth `used` [F-BLINDSPOT]: `dormant` -> `dormant`. Skill call 58 is `vps-ssh`; calls 160-162 then edit that same SKILL.md
+- `famigo/9dd3cc8a` **it-famigo-claude-skills-vps-ssh-skill-md-2-before-running-anything-destructive** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `unused`. Skill call 58 is `vps-ssh`; calls 160-162 then edit that same SKILL.md
+- `famigo/9dd3cc8a` **it-famigo-claude-skills-vps-ssh-skill-md-3-what-s-running-on-the-server** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `dormant`. Skill call 58 is `vps-ssh`; calls 160-162 then edit that same SKILL.md
+- `famigo/9dd3cc8a` **it-famigo-claude-skills-vps-ssh-skill-md-4-quick-reference-commands** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `possibly-referenced`. Skill call 58 is `vps-ssh`; calls 160-162 then edit that same SKILL.md
+- `famigo/9dd3cc8a` **it-famigo-claude-skills-vps-ssh-skill-md-5-ci-cd** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `possibly-referenced`. Skill call 58 is `vps-ssh`; calls 160-162 then edit that same SKILL.md
+- `famigo/9dd3cc8a` **it-famigo-claude-skills-vps-ssh-skill-md-6-host-sizing-and-daemon-config** - truth `used` [F-BLINDSPOT]: `dormant` -> `possibly-referenced`. Skill call 58 is `vps-ssh`; calls 160-162 then edit that same SKILL.md
+- `famigo/9dd3cc8a` **it-famigo-claude-skills-vps-ssh-skill-md-7-troubleshooting-dockerd-cpu** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `possibly-referenced`. Skill call 58 is `vps-ssh`; calls 160-162 then edit that same SKILL.md
+- `famigo/9dd3cc8a` **it-famigo-claude-skills-vps-ssh-skill-md-8-firewall** - truth `used` [F-BLINDSPOT]: `unused` -> `unused`. Skill call 58 is `vps-ssh`; calls 160-162 then edit that same SKILL.md
+- `famigo/9dd3cc8a` **it-famigo-claude-skills-vps-ssh-skill-md-9-troubleshooting-the-proxy** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `possibly-referenced`. Skill call 58 is `vps-ssh`; calls 160-162 then edit that same SKILL.md
+- `famigo/9dd3cc8a` **it-famigo-claude-skills-vps-ssh-skill-md-10-staging-vs-production** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `dormant`. Skill call 58 is `vps-ssh`; calls 160-162 then edit that same SKILL.md
+- `famigo/9dd3cc8a` **it-famigo-claude-skills-vps-ssh-skill-md-11-safety-rules** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `possibly-referenced`. Skill call 58 is `vps-ssh`; calls 160-162 then edit that same SKILL.md
 - `formic-core/39b9e09e` **rmic-core-39b9e09e-home-claude-claude-md-2-verification-before-claiming-done** - truth `used`: `possibly-referenced` -> `unused`. `just palletizer-hmi-lint`, `yarn test` and `yarn test:browser:noUI` ran before reporting
   - accepted: a prose rule that names no command, so nothing harness-defined ties it to the lint and test runs; a compiled `tool_precedes` check would decide it
 - `formic-core/39b9e09e` **rmic-core-39b9e09e-home-claude-claude-md-3-github-account-per-project** - truth `used` [F-PATHTABLE]: `ignored` -> `unused`. `gh auth status` ran and the account was already correct, which is what "switch if needed" asks for
   - accepted: the prose path-table predicate was retired in Phase 8b; the rule is expressible as a compiled `tool_never_without_prior` check (the worked example lives in tests/fixtures/global_rules.md.checks.json) and no checks file has been compiled for this user's own CLAUDE.md - the report says exactly that and names /compile-rules
+- `formic-core/39b9e09e` **9e-home-claude-skills-create-pr-skill-md-1-golden-rules** - truth `used`: `unused` -> `dormant`. `/create-pr` typed at event 1712; Skill call 232; `gh pr checks 1463 --watch` is Step 7
+- `formic-core/39b9e09e` **9e-home-claude-skills-create-pr-skill-md-2-step-1-match-the-github-account** - truth `used`: `possibly-referenced` -> `possibly-referenced`. `/create-pr` typed at event 1712; Skill call 232; `gh pr checks 1463 --watch` is Step 7
+- `formic-core/39b9e09e` **9e-home-claude-skills-create-pr-skill-md-4-step-3-ask-when-unsure-or-media-is-warranted** - truth `used`: `unused` -> `dormant`. `/create-pr` typed at event 1712; Skill call 232; `gh pr checks 1463 --watch` is Step 7
+- `formic-core/39b9e09e` **9e-home-claude-skills-create-pr-skill-md-5-step-4-determine-the-base-branch** - truth `used`: `possibly-referenced` -> `possibly-referenced`. `/create-pr` typed at event 1712; Skill call 232; `gh pr checks 1463 --watch` is Step 7
+- `formic-core/39b9e09e` **9e-home-claude-skills-create-pr-skill-md-6-step-5-compose-the-pr-from-the-diff-and-the-chat** - truth `used`: `possibly-referenced` -> `dormant`. `/create-pr` typed at event 1712; Skill call 232; `gh pr checks 1463 --watch` is Step 7
+- `formic-core/39b9e09e` **9e-home-claude-skills-create-pr-skill-md-7-step-6-push-and-open-the-pr** - truth `used`: `possibly-referenced` -> `unused`. `/create-pr` typed at event 1712; Skill call 232; `gh pr checks 1463 --watch` is Step 7
+- `formic-core/39b9e09e` **9e-home-claude-skills-create-pr-skill-md-8-step-7-monitor-the-checks** - truth `used`: `dormant` -> `dormant`. `/create-pr` typed at event 1712; Skill call 232; `gh pr checks 1463 --watch` is Step 7
+- `formic-core/39b9e09e` **e09e-home-claude-commands-prd-to-plan-md-1-process** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `dormant`. `/prd-to-plan` typed at event 368; the plan and design files under `plans/palletizer-cases-handling/` were written from its template
+- `formic-core/39b9e09e` **e09e-home-claude-commands-prd-to-plan-md-2-plan-feature-name** - truth `used` [F-BLINDSPOT]: `unused` -> `unused`. `/prd-to-plan` typed at event 368; the plan and design files under `plans/palletizer-cases-handling/` were written from its template
+- `formic-core/39b9e09e` **e09e-home-claude-commands-prd-to-plan-md-3-approach** - truth `used` [F-BLINDSPOT]: `unused` -> `unused`. `/prd-to-plan` typed at event 368; the plan and design files under `plans/palletizer-cases-handling/` were written from its template
+- `formic-core/39b9e09e` **e09e-home-claude-commands-prd-to-plan-md-4-architectural-decisions** - truth `used` [F-BLINDSPOT]: `unused` -> `dormant`. `/prd-to-plan` typed at event 368; the plan and design files under `plans/palletizer-cases-handling/` were written from its template
+- `formic-core/39b9e09e` **e09e-home-claude-commands-prd-to-plan-md-5-phase-1-title** - truth `used` [F-BLINDSPOT]: `unused` -> `dormant`. `/prd-to-plan` typed at event 368; the plan and design files under `plans/palletizer-cases-handling/` were written from its template
+- `formic-core/39b9e09e` **e09e-home-claude-commands-prd-to-plan-md-6-phase-2-title** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `dormant`. `/prd-to-plan` typed at event 368; the plan and design files under `plans/palletizer-cases-handling/` were written from its template
+- `formic-core/39b9e09e` **e09e-home-claude-commands-write-a-prd-md-1-step-2-write-the-prd** - truth `used`: `unused` -> `unused`. Skill call 15 is `write-a-prd`; `prd-palletizer-cases-handling.md` written
+- `formic-core/39b9e09e` **e09e-home-claude-commands-write-a-prd-md-2-prd-template** - truth `used`: `unused` -> `dormant`. Skill call 15 is `write-a-prd`; `prd-palletizer-cases-handling.md` written
 - `formic-core/39b9e09e` **git-formic-core-palletizer-hmi-agents-md-11-commands** - truth `used` [F-BLINDSPOT]: `dormant` -> `dormant`. `just palletizer-hmi-lint`, `just palletizer-hmi-dev` and `yarn test:browser:noUI` - commands this block and nothing else names - all ran verbatim
   - accepted: Phase 4's residency caveat: the AGENTS.md was read in one turn and its commands ran in later ones, so combining the per-turn statuses yields dormant
 - `formic-core/39b9e09e` **t-formic-core-docs-skills-review-impl-md-1-trigger** - truth `used`: `dormant` -> `dormant`. `/review-impl` typed at event 1378, and its findings were then addressed
-  - accepted: the skill was invoked by typing its name, with no Skill tool call behind it; Phase 4 refuses a prompt mention as proof a skill ran, because accepting it would green every block of a skill the user merely named
-- `formic-core/39b9e09e` **t-formic-core-docs-skills-review-impl-md-2-input** - truth `used`: `possibly-referenced` -> `dormant`. `/review-impl` typed at event 1378, and its findings were then addressed
-  - accepted: the skill was invoked by typing its name, with no Skill tool call behind it; Phase 4 refuses a prompt mention as proof a skill ran, because accepting it would green every block of a skill the user merely named
+  - accepted: the invocation record here is the `<command-name>` wrapper a typed slash command leaves, not a `Skill` tool call. Both are invocations under ruling 4 and the tool reads both; what it refuses - and what this note used to describe wrongly - is a bare `/name` mentioned in a prompt's prose, which is not one of the two
+- `formic-core/39b9e09e` **t-formic-core-docs-skills-review-impl-md-2-input** - truth `used`: `possibly-referenced` -> `unused`. `/review-impl` typed at event 1378, and its findings were then addressed
+  - accepted: the invocation record here is the `<command-name>` wrapper a typed slash command leaves, not a `Skill` tool call. Both are invocations under ruling 4 and the tool reads both; what it refuses - and what this note used to describe wrongly - is a bare `/name` mentioned in a prompt's prose, which is not one of the two
 - `formic-core/39b9e09e` **t-formic-core-docs-skills-review-impl-md-3-steps** - truth `used`: `possibly-referenced` -> `dormant`. `/review-impl` typed at event 1378, and its findings were then addressed
-  - accepted: the skill was invoked by typing its name, with no Skill tool call behind it; Phase 4 refuses a prompt mention as proof a skill ran, because accepting it would green every block of a skill the user merely named
+  - accepted: the invocation record here is the `<command-name>` wrapper a typed slash command leaves, not a `Skill` tool call. Both are invocations under ruling 4 and the tool reads both; what it refuses - and what this note used to describe wrongly - is a bare `/name` mentioned in a prompt's prose, which is not one of the two
+- `formic-core/39b9e09e` **-skills-implement-plan-workflow-skill-md-1-steps** - truth `no-hard-verdict`: `(absent)` -> `used`. the skill ran (`<command-name>/implement-plan-workflow</command-name>` at ev 413, with the skill body delivered at ev 414), but nothing in the run cites this step
+  - ground truth revised (blind: no): ruling 4 changed - an invocation records that the document ran, not that this step was carried out, so the identity block keeps the green and every other block has to earn one. This row's only evidence was the invocation.
 - `formic-core/4ebe50c0` **rmic-core-4ebe50c0-home-claude-claude-md-2-verification-before-claiming-done** - truth `used`: `possibly-referenced` -> `unused`. `npx vitest run --config=vitest.config.ts --project=unit` ran before reporting
   - accepted: a prose rule that names no command, so nothing harness-defined ties it to the lint and test runs; a compiled `tool_precedes` check would decide it
 - `formic-core/4ebe50c0` **rmic-core-4ebe50c0-home-claude-claude-md-3-github-account-per-project** - truth `used` [F-PATHTABLE]: `ignored` -> `unused`. `gh auth status` runs, then `gh auth switch -u bionanek-x && gh pr view ...` - the rule's check-then-switch for the formic row
   - accepted: the prose path-table predicate was retired in Phase 8b; the rule is expressible as a compiled `tool_never_without_prior` check (the worked example lives in tests/fixtures/global_rules.md.checks.json) and no checks file has been compiled for this user's own CLAUDE.md - the report says exactly that and names /compile-rules
+- `formic-core/4ebe50c0` **e50c0-home-claude-skills-commit-skill-md-1-golden-rules** - truth `used` [F-BLINDSPOT]: `unused` -> `dormant`. `/commit` typed at event 91, followed by the commit and push
+- `formic-core/4ebe50c0` **e50c0-home-claude-skills-commit-skill-md-2-step-1-match-the-github-account** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `possibly-referenced`. `/commit` typed at event 91, followed by the commit and push
+- `formic-core/4ebe50c0` **e50c0-home-claude-skills-commit-skill-md-3-step-2-learn-the-commit-convention** - truth `used` [F-BLINDSPOT]: `dormant` -> `dormant`. `/commit` typed at event 91, followed by the commit and push
+- `formic-core/4ebe50c0` **e50c0-home-claude-skills-commit-skill-md-4-step-3-check-the-branch** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `dormant`. `/commit` typed at event 91, followed by the commit and push
+- `formic-core/4ebe50c0` **e50c0-home-claude-skills-commit-skill-md-6-step-5-stage-and-commit** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `unused`. `/commit` typed at event 91, followed by the commit and push
+- `formic-core/4ebe50c0` **e50c0-home-claude-skills-commit-skill-md-7-step-6-report** - truth `used` [F-BLINDSPOT]: `unused` -> `unused`. `/commit` typed at event 91, followed by the commit and push
+- `formic-core/4ebe50c0` **-home-claude-skills-pr-comments-skill-md-1-golden-rules** - truth `used` [F-BLINDSPOT]: `unused` -> `dormant`. `/pr-comments` typed at event 6; Skill call 3; the triage list followed
+- `formic-core/4ebe50c0` **-home-claude-skills-pr-comments-skill-md-2-step-1-match-the-github-account** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `possibly-referenced`. `/pr-comments` typed at event 6; Skill call 3; the triage list followed
+- `formic-core/4ebe50c0` **-home-claude-skills-pr-comments-skill-md-3-step-2-resolve-the-pr** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `possibly-referenced`. `/pr-comments` typed at event 6; Skill call 3; the triage list followed
+- `formic-core/4ebe50c0` **-home-claude-skills-pr-comments-skill-md-4-step-3-fetch-unresolved-review-threads** - truth `used` [F-BLINDSPOT]: `dormant` -> `possibly-referenced`. `/pr-comments` typed at event 6; Skill call 3; the triage list followed
+- `formic-core/4ebe50c0` **-home-claude-skills-pr-comments-skill-md-5-step-4-evaluate-each-comment-against-the-current-code** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `dormant`. `/pr-comments` typed at event 6; Skill call 3; the triage list followed
+- `formic-core/4ebe50c0` **-home-claude-skills-pr-comments-skill-md-6-step-5-output-the-triage-list** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `dormant`. `/pr-comments` typed at event 6; Skill call 3; the triage list followed
+- `formic-core/4ebe50c0` **-home-claude-skills-pr-comments-skill-md-7-notes** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `dormant`. `/pr-comments` typed at event 6; Skill call 3; the triage list followed
 - `formicHMI/12f48cdb` **formichmi-12f48cdb-home-claude-claude-md-2-verification-before-claiming-done** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `unused`. `pnpm lint:all` and `pnpm test` run before the commit
   - accepted: a prose rule that names no command, so nothing harness-defined ties it to the lint and test runs; a compiled `tool_precedes` check would decide it
 - `formicHMI/12f48cdb` **formichmi-12f48cdb-home-claude-claude-md-3-github-account-per-project** - truth `used` [F-PATHTABLE]: `ignored` -> `unused`. `gh auth status` and `gh auth switch -u bionanek-x` run repeatedly before every gh call (the audit counted 13 switches)
   - accepted: the prose path-table predicate was retired in Phase 8b; the rule is expressible as a compiled `tool_never_without_prior` check (the worked example lives in tests/fixtures/global_rules.md.checks.json) and no checks file has been compiled for this user's own CLAUDE.md - the report says exactly that and names /compile-rules
 - `formicHMI/12f48cdb` **8cdb-home-git-formic-formichmi-agents-md-7-git-workflow** - truth `used`: `possibly-referenced` -> `possibly-referenced`. the branch created is `feature/RBT-8135-crowder-reset-block`, exactly the prescribed `feature|bugfix|hotfix/PROJ-123-description` shape, and validation ran before the commit
   - accepted: branch naming is a compiled-check question (a `tool_arg_matches` over the branch command), not a harness-defined signal
+- `formicHMI/12f48cdb` **8cdb-home-git-formic-formichmi-agents-md-9-coding-guidelines** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `dormant`. both files the no-hardcoded-strings rule names were written: `src/translations/en.json` and `src/translations/es_MX.json`
+- `formicHMI/12f48cdb` **48cdb-home-claude-skills-commit-skill-md-1-golden-rules** - truth `used` [F-BLINDSPOT]: `unused` -> `dormant`. `/commit` typed at event 765; Skill call 200; two commits followed
+- `formicHMI/12f48cdb` **48cdb-home-claude-skills-commit-skill-md-2-step-1-match-the-github-account** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `dormant`. `/commit` typed at event 765; Skill call 200; two commits followed
+- `formicHMI/12f48cdb` **48cdb-home-claude-skills-commit-skill-md-3-step-2-learn-the-commit-convention** - truth `used` [F-BLINDSPOT]: `dormant` -> `dormant`. `/commit` typed at event 765; Skill call 200; two commits followed
+- `formicHMI/12f48cdb` **48cdb-home-claude-skills-commit-skill-md-4-step-3-check-the-branch** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `dormant`. `/commit` typed at event 765; Skill call 200; two commits followed
+- `formicHMI/12f48cdb` **48cdb-home-claude-skills-commit-skill-md-5-step-4-run-tests-lints** - truth `used` [F-BLINDSPOT]: `dormant` -> `dormant`. `/commit` typed at event 765; Skill call 200; two commits followed
+- `formicHMI/12f48cdb` **48cdb-home-claude-skills-commit-skill-md-6-step-5-stage-and-commit** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `unused`. `/commit` typed at event 765; Skill call 200; two commits followed
+- `formicHMI/12f48cdb` **48cdb-home-claude-skills-commit-skill-md-7-step-6-report** - truth `used` [F-BLINDSPOT]: `unused` -> `unused`. `/commit` typed at event 765; Skill call 200; two commits followed
+- `formicHMI/12f48cdb` **db-home-claude-skills-create-pr-skill-md-1-golden-rules** - truth `used` [F-BLINDSPOT]: `unused` -> `dormant`. `/create-pr` typed at event 830; PR 578 opened and `gh pr checks 578 --watch` run, which is Step 7
+- `formicHMI/12f48cdb` **db-home-claude-skills-create-pr-skill-md-2-step-1-match-the-github-account** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `dormant`. `/create-pr` typed at event 830; PR 578 opened and `gh pr checks 578 --watch` run, which is Step 7
+- `formicHMI/12f48cdb` **db-home-claude-skills-create-pr-skill-md-3-step-2-learn-the-pr-convention** - truth `used` [F-BLINDSPOT]: `dormant` -> `dormant`. `/create-pr` typed at event 830; PR 578 opened and `gh pr checks 578 --watch` run, which is Step 7
+- `formicHMI/12f48cdb` **db-home-claude-skills-create-pr-skill-md-4-step-3-ask-when-unsure-or-media-is-warranted** - truth `used` [F-BLINDSPOT]: `unused` -> `dormant`. `/create-pr` typed at event 830; PR 578 opened and `gh pr checks 578 --watch` run, which is Step 7
+- `formicHMI/12f48cdb` **db-home-claude-skills-create-pr-skill-md-5-step-4-determine-the-base-branch** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `possibly-referenced`. `/create-pr` typed at event 830; PR 578 opened and `gh pr checks 578 --watch` run, which is Step 7
+- `formicHMI/12f48cdb` **db-home-claude-skills-create-pr-skill-md-6-step-5-compose-the-pr-from-the-diff-and-the-chat** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `dormant`. `/create-pr` typed at event 830; PR 578 opened and `gh pr checks 578 --watch` run, which is Step 7
+- `formicHMI/12f48cdb` **db-home-claude-skills-create-pr-skill-md-7-step-6-push-and-open-the-pr** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `unused`. `/create-pr` typed at event 830; PR 578 opened and `gh pr checks 578 --watch` run, which is Step 7
+- `formicHMI/12f48cdb` **db-home-claude-skills-create-pr-skill-md-8-step-7-monitor-the-checks** - truth `used` [F-BLINDSPOT]: `dormant` -> `dormant`. `/create-pr` typed at event 830; PR 578 opened and `gh pr checks 578 --watch` run, which is Step 7
+- `formicHMI/12f48cdb` **-home-claude-skills-pr-comments-skill-md-1-golden-rules** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `dormant`. `/pr-comments` typed at event 907; the skill's GraphQL review-thread queries ran
+- `formicHMI/12f48cdb` **-home-claude-skills-pr-comments-skill-md-2-step-1-match-the-github-account** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `possibly-referenced`. `/pr-comments` typed at event 907; the skill's GraphQL review-thread queries ran
+- `formicHMI/12f48cdb` **-home-claude-skills-pr-comments-skill-md-3-step-2-resolve-the-pr** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `possibly-referenced`. `/pr-comments` typed at event 907; the skill's GraphQL review-thread queries ran
+- `formicHMI/12f48cdb` **-home-claude-skills-pr-comments-skill-md-4-step-3-fetch-unresolved-review-threads** - truth `used` [F-BLINDSPOT]: `dormant` -> `possibly-referenced`. `/pr-comments` typed at event 907; the skill's GraphQL review-thread queries ran
+- `formicHMI/12f48cdb` **-home-claude-skills-pr-comments-skill-md-5-step-4-evaluate-each-comment-against-the-current-code** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `dormant`. `/pr-comments` typed at event 907; the skill's GraphQL review-thread queries ran
+- `formicHMI/12f48cdb` **-home-claude-skills-pr-comments-skill-md-6-step-5-output-the-triage-list** - truth `used` [F-BLINDSPOT]: `unused` -> `dormant`. `/pr-comments` typed at event 907; the skill's GraphQL review-thread queries ran
+- `formicHMI/12f48cdb` **-home-claude-skills-pr-comments-skill-md-7-notes** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `dormant`. `/pr-comments` typed at event 907; the skill's GraphQL review-thread queries ran
 - `formicHMI/12f48cdb` **listing-only-grill-prd-0-grill-prd** - truth `used` [F-MISC]: `unused` -> `dormant`. `/grill-prd` typed at event 6, and the skill has no SKILL.md on disk
-  - accepted: the skill was invoked by typing its name, with no Skill tool call behind it; Phase 4 refuses a prompt mention as proof a skill ran, because accepting it would green every block of a skill the user merely named
+  - accepted: the invocation record here is the `<command-name>` wrapper a typed slash command leaves, not a `Skill` tool call. Both are invocations under ruling 4 and the tool reads both; what it refuses - and what this note used to describe wrongly - is a bare `/name` mentioned in a prompt's prose, which is not one of the two
 - `formicHMI/12f48cdb` **f48cdb-home-claude-commands-grill-prd-md-0-phase-0-figma-design-optional** - truth `used` [F-MISC]: `possibly-referenced` -> `dormant`. `/grill-prd` typed at event 6
-  - accepted: the skill was invoked by typing its name, with no Skill tool call behind it; Phase 4 refuses a prompt mention as proof a skill ran, because accepting it would green every block of a skill the user merely named
-- `formicHMI/12f48cdb` **f48cdb-home-claude-commands-grill-prd-md-1-phase-1-grill-me** - truth `used` [F-MISC]: `possibly-referenced` -> `dormant`. `/grill-prd` typed at event 6
-  - accepted: the skill was invoked by typing its name, with no Skill tool call behind it; Phase 4 refuses a prompt mention as proof a skill ran, because accepting it would green every block of a skill the user merely named
+  - accepted: the invocation record here is the `<command-name>` wrapper a typed slash command leaves, not a `Skill` tool call. Both are invocations under ruling 4 and the tool reads both; what it refuses - and what this note used to describe wrongly - is a bare `/name` mentioned in a prompt's prose, which is not one of the two
+- `formicHMI/12f48cdb` **8cdb-home-claude-commands-prd-to-plan-md-2-plan-feature-name** - truth `used` [F-MISC]: `unused` -> `unused`. `/prd-to-plan` typed at event 191; `plans/crowder-calibration-reset-required/plan-*.md` written
+- `formicHMI/12f48cdb` **8cdb-home-claude-commands-prd-to-plan-md-3-approach** - truth `used` [F-MISC]: `unused` -> `unused`. `/prd-to-plan` typed at event 191; `plans/crowder-calibration-reset-required/plan-*.md` written
+- `formicHMI/12f48cdb` **8cdb-home-claude-commands-prd-to-plan-md-4-architectural-decisions** - truth `used` [F-MISC]: `unused` -> `dormant`. `/prd-to-plan` typed at event 191; `plans/crowder-calibration-reset-required/plan-*.md` written
+- `formicHMI/12f48cdb` **8cdb-home-claude-commands-write-a-prd-md-1-step-2-write-the-prd** - truth `used` [F-BLINDSPOT]: `unused` -> `unused`. Skill call 43 is `write-a-prd`; the prd file under plans/ was written
+- `formicHMI/8fd8526c` **526c-home-claude-skills-standup-skill-md-1-repos-to-scan** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `unused`. the skill was invoked (Skill call 1, `/standup` typed) and its steps drove the whole session - `git log`, `git reflog`, `git status`, `git diff` in calls 2-4 are Step 1's own commands
+- `formicHMI/8fd8526c` **526c-home-claude-skills-standup-skill-md-2-which-app-each-change-belongs-to** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `possibly-referenced`. the skill was invoked (Skill call 1, `/standup` typed) and its steps drove the whole session - `git log`, `git reflog`, `git status`, `git diff` in calls 2-4 are Step 1's own commands
+- `formicHMI/8fd8526c` **526c-home-claude-skills-standup-skill-md-4-step-2-cross-check-against-jira** - truth `used` [F-BLINDSPOT]: `dormant` -> `dormant`. the skill was invoked (Skill call 1, `/standup` typed) and its steps drove the whole session - `git log`, `git reflog`, `git status`, `git diff` in calls 2-4 are Step 1's own commands
+- `formicHMI/8fd8526c` **526c-home-claude-skills-standup-skill-md-5-step-3-the-list** - truth `used` [F-BLINDSPOT]: `unused` -> `unused`. the skill was invoked (Skill call 1, `/standup` typed) and its steps drove the whole session - `git log`, `git reflog`, `git status`, `git diff` in calls 2-4 are Step 1's own commands
+- `formicHMI/8fd8526c` **526c-home-claude-skills-standup-skill-md-6-step-4-the-slack-message** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `possibly-referenced`. the skill was invoked (Skill call 1, `/standup` typed) and its steps drove the whole session - `git log`, `git reflog`, `git status`, `git diff` in calls 2-4 are Step 1's own commands
+- `formicHMI/8fd8526c` **526c-home-claude-skills-standup-skill-md-7-output** - truth `used` [F-BLINDSPOT]: `unused` -> `unused`. the skill was invoked (Skill call 1, `/standup` typed) and its steps drove the whole session - `git log`, `git reflog`, `git status`, `git diff` in calls 2-4 are Step 1's own commands
 - `reband/22c58939` **re-reband-22c58939-home-claude-claude-md-2-verification-before-claiming-done** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `unused`. `npm run typecheck`, `npm run lint` and `npx jest`/`npm test` run before every report (calls 51, 69, 76, 85, 104, 113, 126, 144)
   - accepted: a prose rule that names no command, so nothing harness-defined ties it to the lint and test runs; a compiled `tool_precedes` check would decide it
-- `reband/22c58939` **re-reband-22c58939-home-claude-claude-md-8-end-of-implementation-summary** - truth `used` [F-EOM]: `ignored` -> `unused`. code shipped and the closing message summarised it; the audit (research doc S7) verified this session's summary as compliant
-  - accepted: a response-shape rule about prose; offline the tool can only say not-checkable, and the compiled record for it is a communication-scope judged one (Phase 8b worked example)
+- `reband/22c58939` **re-reband-22c58939-home-claude-claude-md-6-error-memory** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `unused`. call 116 appends to `ERRORS.md` under the memory dir with the rule's own `**What failed:** / **What worked:** / **Next time:**` template
+- `reband/22c58939` **re-reband-22c58939-home-claude-claude-md-7-decision-memory** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `unused`. call 38 appends to `DECISIONS.md` with the rule's `**Decided:**` template
+- `reband/22c58939` **re-reband-22c58939-home-reband-agents-md-0-agents-md-codebase-guide-for-ai-agents** - truth `used`: `possibly-referenced` -> `unused`. the block says `read this first ... keep it accurate when you change the code`: read in full at call 44 (ev 250) before the phase agents were spawned, and kept accurate at calls 149-152 after the code changed
+  - accepted: the tie is a write to the block's own document, which the tool excludes by design - a memory file otherwise matches its own template and marks every older entry in it used - so this compliance is one the tool cannot see
+  - ground truth revised (blind: yes): the Phase 8 second pass: the first pass missed both halves of what this block asks
+- `reband/22c58939` **re-reband-22c58939-home-reband-agents-md-1-what-this-is** - truth `used`: `possibly-referenced` -> `possibly-referenced`. the block's own wording (`bare **React Native 0.86**`, `NOT Expo`, `react-native-audio-api` 0.12.2) was reproduced into every phase-agent prompt at calls 46-50
+  - ground truth revised (blind: yes): the Phase 8 second pass: the block's own text was reproduced in something the run wrote, which ruling 3 counts
+- `reband/22c58939` **re-reband-22c58939-home-reband-agents-md-3-where-things-live** - truth `used`: `possibly-referenced` -> `dormant`. the run rewrote this table to keep it true: call 149 (ev 769) inserts the `tuner/` row, call 150 adds `TunerScreen`/`ArcMeter`/`StringRow`, call 151 changes the tab list
+  - accepted: the tie is a write to the block's own document, which the tool excludes by design - a memory file otherwise matches its own template and marks every older entry in it used - so this compliance is one the tool cannot see
+  - ground truth revised (blind: yes): the Phase 8 second pass: the first pass credited this to files landing under directories the table names, which ruling 3 rejects; the blind pass found the stronger tie, the rewrite of the table itself, so the verdict stands on new evidence
 - `reband/22c58939` **re-reband-22c58939-home-reband-agents-md-4-build-run-test** - truth `used` [F-CMDMENTION]: `possibly-referenced` -> `dormant`. `npm run typecheck`, `npm run lint`, `npm test` and `npx react-native run-ios --device "BobPhone13" --mode Release` all ran verbatim
   - accepted: the commands sit in inline backticks in prose rather than a fenced block, and command-echo reads fences only - filed as a follow-up
+- `reband/22c58939` **re-reband-22c58939-home-reband-agents-md-5-gotchas-learned-the-hard-way-see-also-claude-projects-memory-errors-md** - truth `used`: `possibly-referenced` -> `possibly-referenced`. call 152 (ev 779) inserts the tuner mic-capture bullet into this block's own list, and two of its listed gotchas were reproduced into the phase-1 prompt at call 46
+  - accepted: the tie is a write to the block's own document, which the tool excludes by design - a memory file otherwise matches its own template and marks every older entry in it used - so this compliance is one the tool cannot see
+  - ground truth revised (blind: yes): the Phase 8 second pass: the first pass credited the tuner files landing under a named directory, which ruling 3 rejects; the tie that survives is the rewrite of the block itself
 - `reband/22c58939` **re-reband-22c58939-home-reband-agents-md-7-conventions** - truth `used` [F-CMDMENTION]: `possibly-referenced` -> `unused`. the block's "Run typecheck + lint + test before claiming done" is satisfied by calls 51, 69, 76, 104, 144
   - accepted: same as Build / run / test: the commands this block asks for are named in prose, not fenced
+- `reband/22c58939` **c58939-home-claude-commands-grill-prd-md-1-phase-1-grill-me** - truth `used` [F-MISC]: `unused` -> `dormant`. `/grill-prd` typed at event 73; its two phases ran as Skill calls 17 (`grill-me`) and 34 (`write-a-prd`)
+  - accepted: the invocation record here is the `<command-name>` wrapper a typed slash command leaves, not a `Skill` tool call. Both are invocations under ruling 4 and the tool reads both; what it refuses - and what this note used to describe wrongly - is a bare `/name` mentioned in a prompt's prose, which is not one of the two
+- `reband/22c58939` **c58939-home-claude-commands-grill-prd-md-2-phase-2-write-the-prd** - truth `used` [F-MISC]: `dormant` -> `dormant`. `/grill-prd` typed at event 73; its two phases ran as Skill calls 17 (`grill-me`) and 34 (`write-a-prd`)
+- `reband/22c58939` **8939-home-claude-commands-prd-to-plan-md-1-process** - truth `used` [F-MISC]: `possibly-referenced` -> `dormant`. `/prd-to-plan` typed at event 211; call 41 writes `plans/guitar-tuner/plan-guitar-tuner.md`
+- `reband/22c58939` **8939-home-claude-commands-prd-to-plan-md-2-plan-feature-name** - truth `used` [F-MISC]: `unused` -> `unused`. `/prd-to-plan` typed at event 211; call 41 writes `plans/guitar-tuner/plan-guitar-tuner.md`
+- `reband/22c58939` **8939-home-claude-commands-prd-to-plan-md-3-approach** - truth `used` [F-MISC]: `possibly-referenced` -> `unused`. `/prd-to-plan` typed at event 211; call 41 writes `plans/guitar-tuner/plan-guitar-tuner.md`
+- `reband/22c58939` **8939-home-claude-commands-prd-to-plan-md-4-architectural-decisions** - truth `used` [F-MISC]: `possibly-referenced` -> `dormant`. `/prd-to-plan` typed at event 211; call 41 writes `plans/guitar-tuner/plan-guitar-tuner.md`
+- `reband/22c58939` **8939-home-claude-commands-prd-to-plan-md-5-phase-1-title** - truth `used` [F-MISC]: `possibly-referenced` -> `dormant`. `/prd-to-plan` typed at event 211; call 41 writes `plans/guitar-tuner/plan-guitar-tuner.md`
+- `reband/22c58939` **8939-home-claude-commands-prd-to-plan-md-6-phase-2-title** - truth `used` [F-MISC]: `possibly-referenced` -> `dormant`. `/prd-to-plan` typed at event 211; call 41 writes `plans/guitar-tuner/plan-guitar-tuner.md`
+- `reband/22c58939` **8939-home-claude-commands-write-a-prd-md-1-step-2-write-the-prd** - truth `used` [F-BLINDSPOT]: `possibly-referenced` -> `unused`. Skill call 34 is `write-a-prd`; call 36 writes `plans/guitar-tuner/prd-guitar-tuner.md`
+- `reband/22c58939` **8939-home-claude-commands-write-a-prd-md-2-prd-template** - truth `used` [F-BLINDSPOT]: `unused` -> `dormant`. Skill call 34 is `write-a-prd`; call 36 writes `plans/guitar-tuner/prd-guitar-tuner.md`
+- `reband/22c58939` **re-reband-22c58939-home-reband-readme-md-4-project-layout** - truth `used`: `possibly-referenced` -> `unused`. call 153 (ev 783) rewrites this table: it inserts the `app/src/tuner/` row and adds `Tuner` to the screens row
+  - accepted: the tie is a write to the block's own document, which the tool excludes by design - a memory file otherwise matches its own template and marks every older entry in it used - so this compliance is one the tool cannot see
+  - ground truth revised (blind: yes): the Phase 8 second pass: same correction as the AGENTS.md table - the directory join is rejected, the rewrite of the block is what stands
 - `reband/22c58939` **re-reband-22c58939-home-reband-readme-md-5-tests-quality-gates** - truth `used` [F-CMDMENTION]: `dormant` -> `unused`. the three commands the block names (`npm run typecheck`, `npm run lint`, `npm test`) ran repeatedly
   - accepted: same as Build / run / test: the commands are named in an inline span, not a fenced block
+- `reband/22c58939` **re-reband-22c58939-home-reband-readme-md-6-status** - truth `used`: `possibly-referenced` -> `unused`. call 154 (ev 787) adds the tuner line to this block's own status list
+  - accepted: the tie is a write to the block's own document, which the tool excludes by design - a memory file otherwise matches its own template and marks every older entry in it used - so this compliance is one the tool cannot see
+  - ground truth revised (blind: yes): the Phase 8 second pass: the first pass missed the edit to the block's own text
 
 ## Excluded as undecidable
 
+- `famigo/5448a718` **re-famigo-5448a718-home-claude-claude-md-0-how-to-talk-to-me** - truth `undecidable`: `possibly-referenced` -> `unused`. tone and response-shape rule; em-dashes do appear in the assistant prose (ev 631, 731, 744) against `never use em-dashes`, but the delivered file (14168 B) is not the frozen one (14687 B), so it is not established that the clause was delivered
+  - ground truth revised (blind: yes): the Phase 8 second pass: the first pass called this `no-hard-verdict`; the blind pass found observable but inconclusive evidence on both sides, which is what `undecidable` is for
+- `famigo/5448a718` **re-famigo-5448a718-home-claude-claude-md-1-global-claude-code-rules** - truth `undecidable`: `possibly-referenced` -> `unused`. behavioural block; conformant samples exist (why-comments written at calls 31 and 41, a question before acting at ev 107) but neither compliance nor breach can be enumerated from the frozen inputs
+  - ground truth revised (blind: yes): the Phase 8 second pass: `no-hard-verdict` understated it - there is evidence, it just does not settle the question
+- `famigo/5448a718` **re-famigo-5448a718-home-claude-claude-md-5-deep-thinking-for-hard-problems** - truth `undecidable`: `possibly-referenced` -> `unused`. extended-thinking use is not observable from the log; no tool evidence is possible either way
+  - ground truth revised (blind: yes): the Phase 8 second pass: a rule that cannot be observed is `undecidable`, not `no-hard-verdict` - the precondition did come up
 - `famigo/5448a718` **re-famigo-5448a718-home-claude-claude-md-8-end-of-implementation-summary** - truth `undecidable` [F-EOM]: `dormant` -> `unused`. the rule applied - a three-commit feature shipped, partly through bash heredocs - but whether the closing paragraph satisfies it is a judgement about prose
   - accepted: a response-shape rule about prose; offline the tool can only say not-checkable, and the compiled record for it is a communication-scope judged one (Phase 8b worked example)
+- `famigo/5448a718` **amigo-5448a718-home-git-famigo-claude-md-1-start-here** - truth `undecidable`: `possibly-referenced` -> `unused`. the block names `.cursor/PROJECT.md` and call 187 (ev 667) edits it - but the block asks for it to be read *first*, and it was not read until T10
+  - ground truth revised (blind: yes): the Phase 8 second pass: a named file was touched, which ruling 3 counts, but for the opposite of what the block asks; the two readings are both defensible, so ruling 8 applies
+- `famigo/5448a718` **-git-famigo-claude-rules-figma-tokens-md-1-design-tokens** - truth `undecidable`: `dormant` -> `unused`. the cluster style written at call 41 uses the palette's exact values (`#fa5f1c`, the iOS shadow pattern), which is either this block's tokens being reproduced or the repo-wide convention they describe
+  - ground truth revised (blind: yes): the Phase 8 second pass: the blind reading was `used` at low confidence; two readings of the same hex literals is what ruling 8 calls undecidable
 - `formic-core/39b9e09e` **rmic-core-39b9e09e-home-claude-claude-md-8-end-of-implementation-summary** - truth `undecidable` [F-EOM]: `ignored` -> `unused`. the rule applied (code shipped) but compliance is a judgement about the closing prose
   - accepted: a response-shape rule about prose; offline the tool can only say not-checkable, and the compiled record for it is a communication-scope judged one (Phase 8b worked example)
+- `formic-core/39b9e09e` **-39b9e09e-home-git-formic-core-agents-md-4-human-review-and-documentation-policy** - truth `undecidable`: `possibly-referenced` -> `(absent)`. this id names a section of the frozen disk copy that is not a section of the text the session was given: the delivered AGENTS.md has no `Human Review and Documentation Policy` and calls the graphify section something else, so every later block renumbers. Ruling 2 makes the delivered text the subject, and there is no counterpart row to score this id against
+  - ground truth revised (blind: no): the Phase 8 re-bake: seen while reading the after payload, not derived blind - the id shift is a fact about the two payloads, and the row is excluded rather than re-pointed at a block it was not written about
+- `formic-core/39b9e09e` **-39b9e09e-home-git-formic-core-agents-md-5-core-ai-agent-workflow** - truth `undecidable`: `possibly-referenced` -> `(absent)`. this id names a section of the frozen disk copy that is not a section of the text the session was given: the delivered AGENTS.md has no `Human Review and Documentation Policy` and calls the graphify section something else, so every later block renumbers. Ruling 2 makes the delivered text the subject, and there is no counterpart row to score this id against
+  - ground truth revised (blind: no): the Phase 8 re-bake: seen while reading the after payload, not derived blind - the id shift is a fact about the two payloads, and the row is excluded rather than re-pointed at a block it was not written about
+- `formic-core/39b9e09e` **-39b9e09e-home-git-formic-core-agents-md-6-graphify-is-local-only** - truth `undecidable`: `possibly-referenced` -> `(absent)`. this id names a section of the frozen disk copy that is not a section of the text the session was given: the delivered AGENTS.md has no `Human Review and Documentation Policy` and calls the graphify section something else, so every later block renumbers. Ruling 2 makes the delivered text the subject, and there is no counterpart row to score this id against
+  - ground truth revised (blind: no): the Phase 8 re-bake: seen while reading the after payload, not derived blind - the id shift is a fact about the two payloads, and the row is excluded rather than re-pointed at a block it was not written about
+- `formic-core/39b9e09e` **-39b9e09e-home-git-formic-core-agents-md-7-tools** - truth `undecidable`: `unused` -> `(absent)`. this id names a section of the frozen disk copy that is not a section of the text the session was given: the delivered AGENTS.md has no `Human Review and Documentation Policy` and calls the graphify section something else, so every later block renumbers. Ruling 2 makes the delivered text the subject, and there is no counterpart row to score this id against
+  - ground truth revised (blind: no): the Phase 8 re-bake: seen while reading the after payload, not derived blind - the id shift is a fact about the two payloads, and the row is excluded rather than re-pointed at a block it was not written about
+- `formic-core/39b9e09e` **-39b9e09e-home-git-formic-core-agents-md-8-available-commands-commands** - truth `undecidable`: `possibly-referenced` -> `(absent)`. this id names a section of the frozen disk copy that is not a section of the text the session was given: the delivered AGENTS.md has no `Human Review and Documentation Policy` and calls the graphify section something else, so every later block renumbers. Ruling 2 makes the delivered text the subject, and there is no counterpart row to score this id against
+  - ground truth revised (blind: no): the Phase 8 re-bake: seen while reading the after payload, not derived blind - the id shift is a fact about the two payloads, and the row is excluded rather than re-pointed at a block it was not written about
+- `formic-core/39b9e09e` **-39b9e09e-home-git-formic-core-agents-md-9-git-workflow** - truth `undecidable`: `possibly-referenced` -> `(absent)`. this id names a section of the frozen disk copy that is not a section of the text the session was given: the delivered AGENTS.md has no `Human Review and Documentation Policy` and calls the graphify section something else, so every later block renumbers. Ruling 2 makes the delivered text the subject, and there is no counterpart row to score this id against
+  - ground truth revised (blind: no): the Phase 8 re-bake: seen while reading the after payload, not derived blind - the id shift is a fact about the two payloads, and the row is excluded rather than re-pointed at a block it was not written about
+- `formic-core/39b9e09e` **-39b9e09e-home-git-formic-core-agents-md-10-things-to-avoid-doing** - truth `undecidable`: `possibly-referenced` -> `(absent)`. this id names a section of the frozen disk copy that is not a section of the text the session was given: the delivered AGENTS.md has no `Human Review and Documentation Policy` and calls the graphify section something else, so every later block renumbers. Ruling 2 makes the delivered text the subject, and there is no counterpart row to score this id against
+  - ground truth revised (blind: no): the Phase 8 re-bake: seen while reading the after payload, not derived blind - the id shift is a fact about the two payloads, and the row is excluded rather than re-pointed at a block it was not written about
+- `formic-core/39b9e09e` **-39b9e09e-home-git-formic-core-agents-md-11-coding-guidelines** - truth `undecidable`: `possibly-referenced` -> `(absent)`. this id names a section of the frozen disk copy that is not a section of the text the session was given: the delivered AGENTS.md has no `Human Review and Documentation Policy` and calls the graphify section something else, so every later block renumbers. Ruling 2 makes the delivered text the subject, and there is no counterpart row to score this id against
+  - ground truth revised (blind: no): the Phase 8 re-bake: seen while reading the after payload, not derived blind - the id shift is a fact about the two payloads, and the row is excluded rather than re-pointed at a block it was not written about
+- `formic-core/39b9e09e` **-39b9e09e-home-git-formic-core-agents-md-12-detailed-documentation** - truth `undecidable`: `possibly-referenced` -> `(absent)`. this id names a section of the frozen disk copy that is not a section of the text the session was given: the delivered AGENTS.md has no `Human Review and Documentation Policy` and calls the graphify section something else, so every later block renumbers. Ruling 2 makes the delivered text the subject, and there is no counterpart row to score this id against
+  - ground truth revised (blind: no): the Phase 8 re-bake: seen while reading the after payload, not derived blind - the id shift is a fact about the two payloads, and the row is excluded rather than re-pointed at a block it was not written about
+- `formic-core/39b9e09e` **-39b9e09e-home-git-formic-core-agents-md-13-skills** - truth `undecidable`: `possibly-referenced` -> `(absent)`. this id names a section of the frozen disk copy that is not a section of the text the session was given: the delivered AGENTS.md has no `Human Review and Documentation Policy` and calls the graphify section something else, so every later block renumbers. Ruling 2 makes the delivered text the subject, and there is no counterpart row to score this id against
+  - ground truth revised (blind: no): the Phase 8 re-bake: seen while reading the after payload, not derived blind - the id shift is a fact about the two payloads, and the row is excluded rather than re-pointed at a block it was not written about
+- `formic-core/39b9e09e` **-39b9e09e-home-git-formic-core-agents-md-14-post-task-rule** - truth `undecidable`: `possibly-referenced` -> `(absent)`. this id names a section of the frozen disk copy that is not a section of the text the session was given: the delivered AGENTS.md has no `Human Review and Documentation Policy` and calls the graphify section something else, so every later block renumbers. Ruling 2 makes the delivered text the subject, and there is no counterpart row to score this id against
+  - ground truth revised (blind: no): the Phase 8 re-bake: seen while reading the after payload, not derived blind - the id shift is a fact about the two payloads, and the row is excluded rather than re-pointed at a block it was not written about
+- `formic-core/39b9e09e` **-docs-rules-general-coding-guidelines-md-0-comments-docstrings-and-durable-docs** - truth `undecidable`: `possibly-referenced` -> `(absent)`. this id names a section of the frozen disk copy that is not a section of the text the session was given: the delivered AGENTS.md has no `Human Review and Documentation Policy` and calls the graphify section something else, so every later block renumbers. Ruling 2 makes the delivered text the subject, and there is no counterpart row to score this id against
+  - ground truth revised (blind: no): the Phase 8 re-bake: seen while reading the after payload, not derived blind - the id shift is a fact about the two payloads, and the row is excluded rather than re-pointed at a block it was not written about
+- `formic-core/39b9e09e` **-docs-rules-general-coding-guidelines-md-1-forbidden-changes** - truth `undecidable`: `possibly-referenced` -> `(absent)`. this id names a section of the frozen disk copy that is not a section of the text the session was given: the delivered AGENTS.md has no `Human Review and Documentation Policy` and calls the graphify section something else, so every later block renumbers. Ruling 2 makes the delivered text the subject, and there is no counterpart row to score this id against
+  - ground truth revised (blind: no): the Phase 8 re-bake: seen while reading the after payload, not derived blind - the id shift is a fact about the two payloads, and the row is excluded rather than re-pointed at a block it was not written about
+- `formic-core/39b9e09e` **-docs-rules-general-coding-guidelines-md-2-architecture-decisions-intentional-do-not-fix** - truth `undecidable`: `possibly-referenced` -> `(absent)`. this id names a section of the frozen disk copy that is not a section of the text the session was given: the delivered AGENTS.md has no `Human Review and Documentation Policy` and calls the graphify section something else, so every later block renumbers. Ruling 2 makes the delivered text the subject, and there is no counterpart row to score this id against
+  - ground truth revised (blind: no): the Phase 8 re-bake: seen while reading the after payload, not derived blind - the id shift is a fact about the two payloads, and the row is excluded rather than re-pointed at a block it was not written about
 - `formicHMI/12f48cdb` **formichmi-12f48cdb-home-claude-claude-md-8-end-of-implementation-summary** - truth `undecidable` [F-EOM]: `ignored` -> `unused`. the rule applied (code shipped) but whether the closing paragraph satisfies it is a judgement about prose that the frozen log cannot settle
   - accepted: a response-shape rule about prose; offline the tool can only say not-checkable, and the compiled record for it is a communication-scope judged one (Phase 8b worked example)
+- `reband/22c58939` **re-reband-22c58939-home-claude-claude-md-0-how-to-talk-to-me** - truth `undecidable`: `possibly-referenced` -> `unused`. tone, length and format rule with no observable action; the frozen transcript has the prose but nothing in a tool log settles it
+  - ground truth revised (blind: yes): the Phase 8 second pass: a rule that can only be followed invisibly is `undecidable`, not `no-hard-verdict`
+- `reband/22c58939` **re-reband-22c58939-home-claude-claude-md-1-global-claude-code-rules** - truth `undecidable`: `possibly-referenced` -> `unused`. asking before acting did happen (AskUserQuestion calls 19-33) but inside the grill-me skill; the comment rule would need the code the five phase agents wrote, and those transcripts are not frozen
+  - ground truth revised (blind: yes): the Phase 8 second pass: there is evidence on both sides and it does not settle the question
+- `reband/22c58939` **re-reband-22c58939-home-claude-claude-md-5-deep-thinking-for-hard-problems** - truth `undecidable`: `possibly-referenced` -> `unused`. extended-thinking use is not observable as an action; the 109 thinking items in the log are a model and CLI property, not compliance
+  - ground truth revised (blind: yes): the Phase 8 second pass: a rule that cannot be observed is `undecidable`
+- `reband/22c58939` **re-reband-22c58939-home-claude-claude-md-8-end-of-implementation-summary** - truth `undecidable` [F-EOM]: `ignored` -> `unused`. every implementation turn's closing prose carries a user-facing summary (ev 393, 467, 482), but each of those responses ends on a question, so whether `end your response with` is satisfied is a judgement about prose
+  - ground truth revised (blind: yes): the Phase 8 second pass: the first pass called this `used` on the audit's own reading; the blind pass found the responses end on a question, and ruling 6 refuses a prose judgement either way
+
+## External re-audit
+
+2026-09-05: 3 independent `verdict-auditor` runs over the 16 non-anchor sessions below - none of them in `sessions.json`, so none of them calibrated against - reported **2 false greens and 0 false reds** between them, and so **did not pass**: the gate is zero of each. The zero false reds is not evidence the tool accuses correctly: none of the sixteen sessions has a compiled checks file, so no `ignored` verdict was reachable in any of them and all three runs said so. The red path is measured on the anchor corpus instead, where two sessions carry one. Each run was withheld `snapshots/SCORECARD.md`, `snapshots/expected/`, `snapshots/after/`, `snapshots/baseline/`, and derived its ground truth from the raw transcripts. Re-run the list with `python3 snapshots/audit_sessions.py`.
+
+Both false greens are in the `agent-context-ide` sessions. `9cf0b16d`: the `commit` skill's GitHub-account step reads `used` because the skill was invoked, though no `gh auth` command ran in the session - that is ruling 4 of `snapshots/expected/RULINGS.md` working as written, and the auditor was blind to the ruling, so it is a dispute about the ruling rather than about the code. `406bba1d`: the `Decision Memory` block reads `used` on `template-echo`, because a document the run wrote quotes the rule's own `**Decided:**` / `**Why:**` template inside a sentence about this tool's blind spots; no decision entry was appended anywhere in that session. That one is a defect in `template-echo`, which cannot tell a template being used from a template being quoted.
+
+agent-context-ide `9cf0b16d`, agent-context-ide `406bba1d`, famigo `9e01f3df`, famigo `78c658bc`, famigo `139cf0b9`, famigo `3f8c828d`, formic-core `919f9e32`, formic-core `afe37732`, formic-core `1916e68e`, formic-core `5171447d`, formicHMI `7eb46245`, formicHMI `13e972ee`, reband `51fdcc25`, reband `71c4d1ca`, reband `f7136fed`, reband `113a0d2c`
+

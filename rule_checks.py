@@ -88,6 +88,14 @@ AST_KINDS = ("ast_forbidden",)
 
 CONFIDENCES = ("high", "medium", "low")
 
+# Fields a checks file may still carry that this tool no longer reads.
+# `ignore_strings` was a per-check opt-in for blanking string literals; the
+# source path blanks them unconditionally now (see `strip_comments_and_strings`),
+# so the field is accepted and does nothing. Refusing a record for carrying it
+# would turn every file written against the old format into a document of rules
+# nobody can check, which is a worse answer than a field that no longer matters.
+IGNORED_LEGACY_FIELDS = ("ignore_strings",)
+
 # Record-format v2 (research doc §8). Every field is optional, so a v1 checks
 # file keeps loading and reporting exactly what it did: the fields say what a
 # record *is*, and a file that says nothing is read the way it always was.
@@ -154,8 +162,8 @@ def _dialect(path):
     return None
 
 
-def strip_comments_and_strings(text, path="", strip_strings=False, fill=" "):
-    """Blank out comments, and string literals too when asked, preserving length.
+def strip_comments_and_strings(text, path="", strip_strings=True, fill=" "):
+    """Blank out comments and string literals, preserving length.
 
     Offsets are preserved so a match found in the stripped text can be quoted
     from the original and reported at the right line. Comment markers are
@@ -164,12 +172,19 @@ def strip_comments_and_strings(text, path="", strip_strings=False, fill=" "):
     everywhere would silently blind the checker to real code. A file whose
     extension names no known language is returned untouched (see `_dialect`).
 
-    String contents survive unless a check sets `ignore_strings`. Blanking them
-    by default cost far more than it bought: in JS and TS a module path is a
-    string literal, so `never import from X` - the most common architectural
-    rule there is - could never match, and every rule about `className` content
-    died with it. Comments, not strings, were the false-positive source this
-    stripping exists to remove.
+    Strings are blanked unconditionally on the source path, template literals
+    included. Leaving them standing was a per-check opt-in nobody set, so a
+    rule's identifier quoted inside a string literal - `expo.version` inside
+    the very script the rule prescribes - was reported as a violation of the
+    rule, in red. A rule that really is about the contents of a string literal
+    (an import path, a `className`) needs the syntax tree to tell the two
+    apart, which is what the `ast_forbidden` kind and its backend are for;
+    reading characters cannot, and guessing in the accusing direction is the
+    one direction that costs the reader trust.
+
+    `strip_strings=False` is for callers that need the comment spans alone:
+    `_comment_candidates` derives them from what was blanked, so blanking
+    string contents with the same sentinel would report them as comments.
 
     `fill` is what blanked-out text is replaced with. A caller that needs to
     know *which* characters were removed passes a sentinel instead of a space:
@@ -576,7 +591,8 @@ def _comment_candidates(text, path):
     line. That is deliberate: a site is only citable if it has a line, and
     "the comment on line 40" is what a reader can go and check.
     """
-    view = strip_comments_and_strings(text, path, fill=_COMMENT_FILL)
+    view = strip_comments_and_strings(text, path, strip_strings=False,
+                                      fill=_COMMENT_FILL)
     if view == text:
         return []
     out, start = [], None
@@ -693,8 +709,7 @@ def _evaluate_source(check, entry, normalised=None):
         return None
     strict = entry["text"]
     if normalised is None:
-        normalised = strip_comments_and_strings(
-            strict, entry["path"], strip_strings=bool(check.get("ignore_strings")))
+        normalised = strip_comments_and_strings(strict, entry["path"])
     strict_span = _candidate_span(check, strict)
     norm_span = _candidate_span(check, normalised)
     if strict_span and norm_span:
@@ -1057,17 +1072,15 @@ def evaluate_checks(checks, corpus, limit=20):
         elif check["kind"] in PATH_KINDS:
             findings.extend(_evaluate_path(check, corpus))
         else:
-            drop_strings = bool(check.get("ignore_strings"))
             reads = _evidence_source(check)
             for idx, entry in enumerate(_source_entries(check, corpus)):
-                # Keyed on the variant and the corpus too: checks differ on
-                # whether string contents are stripped, and on whether they
-                # read the net diff or every hunk, so one cached view cannot
-                # serve both - and index 0 is a different file in each corpus.
-                key = (reads, idx, drop_strings)
+                # Keyed on the corpus too: checks differ on whether they read
+                # the net diff or every hunk, and index 0 is a different file
+                # in each.
+                key = (reads, idx)
                 if key not in normalised:
                     normalised[key] = strip_comments_and_strings(
-                        entry["text"], entry["path"], strip_strings=drop_strings)
+                        entry["text"], entry["path"])
                 f = _evaluate_source(check, entry, normalised[key])
                 if f:
                     findings.append(f)
@@ -1836,9 +1849,25 @@ def fallback_checks(block):
             "pattern": r"\b" + re.escape(ident.rstrip("()")) + r"\b",
             "applies_to": globs or list(CODE_GLOBS),
             "confidence": "low",
-            "message": f"`{ident}` appears in written code, and this rule forbids it.",
+            "message": (f"`{ident}` appears in written code, and this rule appears to "
+                        "forbid it - but the pattern was extracted mechanically from "
+                        "the rule's prose, so this is a candidate, not a violation."),
         })
     return out
+
+
+def _as_candidate(finding):
+    """A mechanically extracted finding, downgraded to a candidate.
+
+    Nobody reviewed the pattern that produced it: it is a backticked token
+    lifted out of the rule's own prose, which the exception clause two
+    sentences later may well permit. A red badge is an accusation of
+    misconduct, and this mechanism cannot support one - so the strongest thing
+    it may say is that it found something worth a human look.
+    """
+    if finding["state"] not in ("violated", "acknowledged"):
+        return finding
+    return dict(finding, state="unclear")
 
 
 # ---------- per-block verdict ----------
@@ -1940,7 +1969,8 @@ def check_block(block, loaded, corpus, fallback=True, doc_path="", judge=None):
     `loaded` is the gated checks payload for the block's document, or None when
     the document has no checks file - in which case the mechanical fallback
     runs, if `fallback` allows it, and every finding it produces is low
-    confidence. Callers pass `fallback=False` for documents that are not
+    confidence and reported as `unclear` rather than as a violation (see
+    `_as_candidate`). Callers pass `fallback=False` for documents that are not
     guidelines (a file the agent merely read), where extracting rules from
     prose would invent them.
 
@@ -2031,6 +2061,8 @@ def check_block(block, loaded, corpus, fallback=True, doc_path="", judge=None):
     applied = runnable
 
     findings = evaluate_checks(applied, corpus) if applied else []
+    if source == "fallback":
+        findings = [_as_candidate(f) for f in findings]
     in_scope = _in_scope(applied, corpus)
 
     # A judged record is pinned to its rule's text by the same key a

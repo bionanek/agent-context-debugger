@@ -6,7 +6,12 @@
     "it is what the transcript directory name encodes, and the project CLAUDE.md",
     "and project-relative paths resolve against it.",
     "Only `capture` needs these paths; `verify` runs entirely off each snapshot's",
-    "own manifest, so a machine that never had these projects can still check one."
+    "own manifest, so a machine that never had these projects can still check one.",
+    "The directories both write into - snapshots/baseline/ and snapshots/after/ -",
+    "are gitignored: they hold raw transcripts and are never committed, so a",
+    "clone has this list and none of the sessions it names. The reviewed checks",
+    "files those baselines are judged with are committed, under snapshots/checks/,",
+    "and snapshots/freeze_checks.py copies them into the private trees."
   ],
   "sessions": [
     {"project": "famigo", "cwd": "/Users/jakuburban/Git/famigo", "session": "9dd3cc8a"},

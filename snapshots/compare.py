@@ -28,6 +28,10 @@ import sys
 from pathlib import Path
 
 SNAPSHOTS_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SNAPSHOTS_DIR))
+
+import audit_sessions  # noqa: E402
+
 DEFAULT_BASELINE = SNAPSHOTS_DIR / "baseline"
 DEFAULT_AFTER = SNAPSHOTS_DIR / "after"
 DEFAULT_EXPECTED = SNAPSHOTS_DIR / "expected"
@@ -52,6 +56,29 @@ TRUTHS = frozenset(ALLOWED) | {UNDECIDABLE}
 GREENS = frozenset({"used", "used-partial"})
 ABSENT = "(absent)"
 
+# What a header has to say before its rows are scored. The corpus was written
+# under two readings of `used` for descriptive blocks, and totals that mix them
+# are not one measurement - so the pointer to the rulings file and the one
+# sentence the two readings differed on are both required, whitespace-normalised
+# so a rewrap does not break the check.
+RULINGS_LINK = "snapshots/expected/RULINGS.md"
+DIRECTORY_RULING = "A file created under a directory the block names does not count."
+
+# A `revised:` note is the one edit that can ratify the tool, so the row has to
+# say whether the correction itself was derived blind. Yes or no: anything else
+# is a claim nobody can check.
+BLIND_ANSWERS = ("yes", "no")
+
+# File kinds governed by the invoked-skill ruling (RULINGS.md 4). They outnumber
+# the rest and one ruling decides how their identity blocks are credited, so a
+# headline that mixes them with rule-document blocks reports that ruling as a
+# measurement of the judging.
+SKILL_KINDS = frozenset({"skill", "command", "agent"})
+
+
+def _norm(text):
+    return " ".join(text.split())
+
 
 def error_kind(truth, status):
     """Which way a disagreement points, from the audited rule's side."""
@@ -74,10 +101,24 @@ def error_kind(truth, status):
 # ---------- inputs ----------
 
 def load_expected(path):
-    """Parse one expected.md. Prose is ignored; verdict lines are the contract."""
+    """Parse one expected.md. Prose is ignored; verdict lines are the contract.
+
+    Two things in the prose are not ignored: the header has to reference the
+    rulings and quote the disputed one, and a `revised:` note has to carry a
+    `blind:` answer. Both are refusals rather than warnings, because a row
+    scored under an unstated ruling and a correction made while looking at the
+    answer are the two ways this corpus has already been wrong.
+    """
+    text = Path(path).read_text(encoding="utf-8")
+    flat = _norm(text)
+    if RULINGS_LINK not in flat:
+        raise ValueError(f"{path}: header does not reference {RULINGS_LINK}")
+    if _norm(DIRECTORY_RULING) not in flat:
+        raise ValueError(f"{path}: header does not state the descriptive-block "
+                         f"ruling about a directory verbatim: {DIRECTORY_RULING!r}")
     out = {}
     last = None
-    for raw in Path(path).read_text(encoding="utf-8").splitlines():
+    for raw in text.splitlines():
         line = raw.strip()
         if line.startswith("- ") and " :: " in line:
             parts = [p.strip() for p in line[2:].split(" :: ", 3)]
@@ -89,12 +130,20 @@ def load_expected(path):
                 # the `undecidable` path and drop a block out of the gate.
                 raise ValueError(f"{path}: unknown truth class {truth!r} for {bid}")
             out[bid] = {"truth": truth, "tag": None if tag == "-" else tag,
-                        "evidence": evidence, "accept": None, "revised": None}
+                        "evidence": evidence, "accept": None, "revised": None,
+                        "blind": None}
             last = bid
         elif last:
-            for key in ("accept", "revised"):
+            for key in ("accept", "revised", "blind"):
                 if line.startswith(key + ":"):
                     out[last][key] = line[len(key) + 1:].strip()
+    for bid, entry in out.items():
+        if entry["blind"] is not None and entry["blind"] not in BLIND_ANSWERS:
+            raise ValueError(f"{path}: {bid}: `blind:` must be one of "
+                             f"{', '.join(BLIND_ANSWERS)}, not {entry['blind']!r}")
+        if entry["revised"] and entry["blind"] is None:
+            raise ValueError(f"{path}: {bid}: a `revised:` note requires a `blind:` "
+                             "line saying whether the correction was derived blind")
     return out
 
 
@@ -121,6 +170,39 @@ def judged_statuses(payload, session_id=None):
     return out
 
 
+def judged_halves(payload, session_id=None):
+    """{block id: "skill" | "rule-document"}, from the file each block sits in.
+
+    Read off the payload's own `kind` rather than guessed from the path: the
+    loader already decided what a document is, and a second classifier here
+    would put a block in one half of the scorecard and the other half of the
+    tool.
+    """
+    sessions = payload["perSession"]
+    if session_id is None:
+        session_id = next(iter(sessions))
+    out = {}
+    for f in sessions[session_id].get("contextFiles", []):
+        half = "skill" if f.get("kind") in SKILL_KINDS else "rule-document"
+        for b in f.get("blocks", []):
+            out[b["id"]] = half
+    return out
+
+
+def has_checks_file(snap_dir):
+    """Whether this snapshot froze a reviewed `<doc>.checks.json` alongside its rules.
+
+    Without one, no compiled check ran, so the corpus says nothing about the
+    only mechanism allowed to call a rule violated.
+    """
+    manifest = Path(snap_dir) / "manifest.json"
+    if not manifest.is_file():
+        return False
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+    return any(str(e.get("key", "")).endswith(".checks.json")
+               for e in data.get("inputs") or [])
+
+
 def _session_id(snap_dir):
     manifest = Path(snap_dir) / "manifest.json"
     if manifest.is_file():
@@ -140,8 +222,11 @@ def compare_session(name, baseline_dir, after_dir, expected_file):
     problem pointed the other way - a stale line quietly scored as a miss.
     """
     expected = load_expected(expected_file)
-    before = judged_statuses(read_payload(baseline_dir), _session_id(baseline_dir))
-    after = judged_statuses(read_payload(after_dir), _session_id(after_dir))
+    before_payload, after_payload = read_payload(baseline_dir), read_payload(after_dir)
+    before = judged_statuses(before_payload, _session_id(baseline_dir))
+    after = judged_statuses(after_payload, _session_id(after_dir))
+    halves = dict(judged_halves(after_payload, _session_id(after_dir)))
+    halves.update(judged_halves(before_payload, _session_id(baseline_dir)))
     unscored = [f"{name} {bid}: judged `{before.get(bid) or after.get(bid)}` "
                 f"with no ground truth" for bid in sorted(set(before) | set(after))
                 if bid not in expected]
@@ -157,7 +242,9 @@ def compare_session(name, baseline_dir, after_dir, expected_file):
                          "tag": exp["tag"], "before": b, "after": a,
                          "beforeError": None, "afterError": None,
                          "outcome": "excluded", "accept": exp["accept"],
-                         "revised": exp["revised"], "evidence": exp["evidence"]})
+                         "revised": exp["revised"], "blind": exp["blind"],
+                         "evidence": exp["evidence"],
+                         "half": halves.get(bid, "rule-document")})
             continue
         be = error_kind(exp["truth"], b)
         ae = error_kind(exp["truth"], a)
@@ -172,7 +259,8 @@ def compare_session(name, baseline_dir, after_dir, expected_file):
         rows.append({"session": name, "id": bid, "truth": exp["truth"], "tag": exp["tag"],
                      "before": b, "after": a, "beforeError": be, "afterError": ae,
                      "outcome": outcome, "accept": exp["accept"], "revised": exp["revised"],
-                     "evidence": exp["evidence"]})
+                     "blind": exp["blind"], "evidence": exp["evidence"],
+                     "half": halves.get(bid, "rule-document")})
     return rows, unscored
 
 
@@ -180,12 +268,14 @@ def _tally(rows):
     t = {k: 0 for k in ("scored", "excluded", "agreed", "fixed", "regressed", "still-wrong",
                         "agreedBefore", "agreedAfter", "falseGreenBefore", "falseGreenAfter",
                         "falseRedBefore", "falseRedAfter", "missedBefore", "missedAfter",
-                        "absentBefore", "absentAfter")}
+                        "absentBefore", "absentAfter", "violatedTruths")}
     for r in rows:
         t[r["outcome"]] += 1
         if r["outcome"] == "excluded":
             continue
         t["scored"] += 1
+        if r["truth"] == "violated":
+            t["violatedTruths"] += 1
         for half in ("before", "after"):
             err = r[half + "Error"]
             key = "Before" if half == "before" else "After"
@@ -206,7 +296,7 @@ def compare_all(baseline_dir=None, after_dir=None, expected_dir=None):
     baseline_dir = Path(baseline_dir or DEFAULT_BASELINE)
     after_dir = Path(after_dir or DEFAULT_AFTER)
     expected_dir = Path(expected_dir or DEFAULT_EXPECTED)
-    rows, missing, unscored = [], [], []
+    rows, missing, unscored, checks_files = [], [], [], []
     for exp in sorted(expected_dir.glob("*/*/expected.md")):
         project, prefix = exp.parent.parent.name, exp.parent.name
         name = f"{project}/{prefix}"
@@ -219,13 +309,20 @@ def compare_all(baseline_dir=None, after_dir=None, expected_dir=None):
         session_rows, session_unscored = compare_session(name, b, a, exp)
         rows.extend(session_rows)
         unscored.extend(session_unscored)
-    by_session, by_tag = {}, {}
+        if has_checks_file(b):
+            checks_files.append(name)
+    by_session, by_tag, by_half = {}, {}, {}
     for r in rows:
         by_session.setdefault(r["session"], []).append(r)
         by_tag.setdefault(r["tag"] or "(untagged)", []).append(r)
+        by_half.setdefault(r["half"], []).append(r)
+    for half in ("skill", "rule-document"):
+        by_half.setdefault(half, [])
     return {"rows": rows, "totals": _tally(rows), "missing": missing, "unscored": unscored,
+            "checksFiles": checks_files,
             "bySession": {k: _tally(v) for k, v in by_session.items()},
-            "byTag": {k: _tally(v) for k, v in by_tag.items()}}
+            "byTag": {k: _tally(v) for k, v in by_tag.items()},
+            "byHalf": {k: _tally(v) for k, v in by_half.items()}}
 
 
 def blockers(report):
@@ -242,8 +339,43 @@ def _row_line(r):
     if r["accept"]:
         line += f"\n  - accepted: {r['accept']}"
     if r["revised"]:
-        line += f"\n  - ground truth revised: {r['revised']}"
+        line += (f"\n  - ground truth revised (blind: {r['blind']}): {r['revised']}")
     return line
+
+
+def _half_table(report, half, title, note):
+    t = report["byHalf"].get(half) or {}
+    if not t.get("scored") and not t.get("excluded"):
+        return [f"## {title}", "", "No rows in this half.", ""]
+    return [f"## {title}", "", note, "",
+            "| | before | after |", "|---|---|---|",
+            f"| agrees with ground truth | {t['agreedBefore']} | {t['agreedAfter']} |",
+            f"| false green | {t['falseGreenBefore']} | {t['falseGreenAfter']} |",
+            f"| false red | {t['falseRedBefore']} | {t['falseRedAfter']} |",
+            f"| missed compliance / violation | {t['missedBefore']} | {t['missedAfter']} |",
+            f"| block not judged at all | {t['absentBefore']} | {t['absentAfter']} |",
+            "",
+            f"**{t['scored']} scored · fixed {t['fixed']} · regressed {t['regressed']} "
+            f"· still wrong {t['still-wrong']}**", ""]
+
+
+def _coverage_lines(report):
+    """What the corpus can and cannot measure, said before any number is read."""
+    t = report["totals"]
+    files = report.get("checksFiles") or []
+    out = [f"Red-side coverage: {t['violatedTruths']} `violated` truth"
+           f"{'' if t['violatedTruths'] == 1 else 's'} in the scored rows, and "
+           f"{len(files)} session{'' if len(files) == 1 else 's'} "
+           f"carr{'ies' if len(files) == 1 else 'y'} a compiled checks file"
+           + (" (" + ", ".join(files) + ")." if files else ".")]
+    if not t["violatedTruths"] or not files:
+        out += ["",
+                "> **Warning: the red side of this corpus is unmeasured.** With no "
+                "`violated` truth, or with no compiled checks file for any session, "
+                "nothing here could have produced a red badge - so a false-red count "
+                "of zero records that the tool stopped accusing, not that it accuses "
+                "correctly."]
+    return out + [""]
 
 
 def render(report):
@@ -270,6 +402,7 @@ def render(report):
         out += ["> Blocks outside the gate (no ground truth, or ground truth for a block",
                 "> neither payload judges):"]
         out += [f"> - {u}" for u in report["unscored"]] + [""]
+    out += _coverage_lines(report)
     out += [
         f"{t['scored']} judged blocks scored, {t['excluded']} excluded as `undecidable`.", "",
         "| | before | after |",
@@ -282,6 +415,15 @@ def render(report):
         "",
         f"**fixed {t['fixed']} · regressed {t['regressed']} · still wrong {t['still-wrong']} "
         f"· agreed throughout {t['agreed']}**", "",
+    ]
+    out += _half_table(report, "skill", "Skill and command blocks",
+                       "Governed by the invoked-skill ruling (RULINGS.md 4), which credits "
+                       "an invocation to the document's identity block alone, so a step here "
+                       "is scored on evidence of its own.")
+    out += _half_table(report, "rule-document", "Rule-document blocks",
+                       "The half the judging mechanisms actually decide, one block at a "
+                       "time. This is the number the reliability claim is about.")
+    out += [
         "## Per session", "",
         "| session | scored | agreed before | agreed after | fixed | regressed | still wrong |",
         "|---|---|---|---|---|---|---|",
@@ -304,6 +446,7 @@ def render(report):
     out += ["", "## Excluded as undecidable", ""]
     ex = [r for r in report["rows"] if r["outcome"] == "excluded"]
     out += [_row_line(r) for r in ex] or ["None."]
+    out += [""] + audit_sessions.footer_lines()
     return out
 
 
@@ -315,6 +458,18 @@ def main():
     p.add_argument("--expected-dir", type=Path, default=None)
     p.add_argument("--out", type=Path, default=None, help="write the scorecard here too")
     args = p.parse_args()
+    # Every session lands in `missing` when a whole tree is absent, and the
+    # scorecard then renders zero rows and exits 0 - a clone would read that as
+    # a clean gate rather than as no gate at all.
+    for label, given, default in (("baseline", args.baseline_dir, DEFAULT_BASELINE),
+                                  ("after", args.after_dir, DEFAULT_AFTER),
+                                  ("expected", args.expected_dir, DEFAULT_EXPECTED)):
+        path = Path(given or default)
+        if not path.is_dir():
+            sys.exit(f"error: no {label} tree at {path}. The frozen corpus is "
+                     "the author's own sessions and is gitignored, so a clone "
+                     "cannot regenerate the scorecard; see the trust-model "
+                     "section of README.md.")
     report = compare_all(args.baseline_dir, args.after_dir, args.expected_dir)
     text = "\n".join(render(report)) + "\n"
     if args.out:

@@ -442,9 +442,11 @@ def test_every_content_position_is_scanned_for_injection(tmp_path):
 
 
 def test_an_injection_is_reported_and_the_verdict_is_unchanged(tmp_path):
-    # In a string literal, not a comment: the candidate extractor reads the
-    # comment-stripped view, so a comment in the body never reaches the judge.
-    poisoned = f'try {{\n  go();\n}} catch (e) {{\n  log("{INJECTION}");\n}}\n' 
+    # Inside a `${...}` interpolation, which the stripper deliberately keeps
+    # standing because it is executable code. Comments and string contents both
+    # go through the central stripper before a site is enumerated, so neither
+    # reaches the judge at all; an interpolation is the vector that survives.
+    poisoned = f'try {{\n  go();\n}} catch (e) {{\n  log(`${{{INJECTION}}}`);\n}}\n'
     events = [user_text("add the handler", 1),
               write_call("/repo/src/a.ts", poisoned, 2)]
     stub = Stub({"verdict": "violated", "evidence": "catch (e) {",
@@ -456,6 +458,18 @@ def test_an_injection_is_reported_and_the_verdict_is_unchanged(tmp_path):
     # The verdict the judge actually gave stands, unchanged by the attempt.
     assert [f["state"] for f in findings if f["judgeVerdict"] != "injection-attempt"] \
         == ["violated"]
+
+
+def test_a_string_literal_in_a_candidate_body_never_reaches_the_judge(tmp_path):
+    """Central string stripping runs before the sites are enumerated, so text
+    an attacker put in a string literal is not part of the question asked."""
+    poisoned = f'try {{\n  go();\n}} catch (e) {{\n  log("{INJECTION}");\n}}\n'
+    events = [user_text("add the handler", 1),
+              write_call("/repo/src/a.ts", poisoned, 2)]
+    stub = Stub({"verdict": "clear", "evidence": "catch (e) {", "reason": "fine"})
+    findings, _, _, _ = ask(hybrid(), events, stub, tmp_path)
+    assert [f for f in findings if f["judgeVerdict"] == "injection-attempt"] == []
+    assert stub.prompts and INJECTION not in stub.prompts[-1][0]
 
 
 def test_an_injection_note_cannot_change_the_block_state(tmp_path):

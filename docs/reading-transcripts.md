@@ -127,6 +127,31 @@ command can be buried mid-pipeline (`a && b; c | d`), not just at the start.
   point at. A `Read` with `offset`/`limit` delivered only part of the file - blocks outside
   that range were never seen, and judging them is judging text the model never read.
 
+**Where the delivered text itself lives.** The file on disk today is not evidence of what
+the session was given, and a rule document that gained a sentence after the session ended
+will otherwise be judged as if the model had read it. Three event shapes carry the text:
+
+- A `Read` result's `toolUseResult` is `{"type": "text", "file": {filePath, content,
+  startLine, numLines, totalLines}}`. `content` is the file's own text, no line-number
+  gutter. It is the whole file only when `startLine` is 1 and `numLines` is not below
+  `totalLines`; anything else is a slice, and the rest of the file is not in the transcript
+  at all. Beware `file.base64` - an image read has the same envelope and no text.
+- `attachment` events carry `nested_memory`, `already_read_file` and `file` contents
+  verbatim. This is the strongest record there is, and it is also the one shape that says
+  outright whether it differs from disk (`contentDiffersFromDisk`).
+- An `Edit` result carries `originalFile`, the whole file **before** the edit, beside
+  `oldString` / `newString`. That is the only record of what a document said before a
+  session rewrote it, and a session that rewrites its own CLAUDE.md is exactly the one
+  whose earlier turns must not be judged against the new wording. A `Write` result carries
+  the post-write `content` the same way.
+
+**Harness injection of CLAUDE.md is not in the transcript.** Across every audited session
+the project and global memory files reach the model through the system prompt, which the
+`.jsonl` does not store, and no `Contents of …` reminder appears. The only outside record
+is the ctxlog hook's `InstructionsLoaded` entry, whose `stats` carry the file's line count,
+byte size and a truncated sha256 **as loaded** - not the text, but enough to prove that
+today's file is or is not the one the model was given.
+
 ---
 
 ## 7. Thinking blocks

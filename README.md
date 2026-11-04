@@ -42,16 +42,37 @@ in the loop.
 
 ## What it tells you
 
-**Measured, not asserted.** On a frozen corpus of 8 real sessions across 5
-projects - 547 judged blocks, each with a hand-written ground truth established
-from the raw transcript before any report was read - the verdicts now agree with
-that ground truth **521 times out of 547 (95%), with zero false greens and zero
-false reds**. The same corpus judged by the code this work started from agreed
-295 times, with 4 false greens, 11 false reds and 18 blocks it never judged
-at all. Nothing regressed. Every one of
-the 26 remaining misses is an under-credit - a rule the run followed and the tool
-would not claim credit for - and each is listed with its reason in
-[`snapshots/SCORECARD.md`](snapshots/SCORECARD.md). See
+**Measured, not asserted, and split in two.** On a frozen corpus of 8 real
+sessions across 5 projects, each judged block carries a hand-written ground
+truth established from the raw transcript before any report was read. The rows
+divide into two halves that measure different things, so they are reported
+apart.
+
+**Rule-document blocks** - the half the judging mechanisms decide one block at a
+time, and the half a reliability claim is about: **280 of 326 agree (86%), with
+zero false greens and zero false reds**, against 250 with 4 false greens and 10
+false reds for the code this work started from. The remaining 46 are
+under-credits: a rule the run followed and the tool would not claim credit for.
+
+**Skill and command blocks** - governed by one ruling about what an invocation
+proves. It credits the invocation to the document's own identity block and to
+nothing else, because a `Skill` call records that the document ran, not that any
+instruction inside it was carried out: **121 of 210 agree, against 72 before**.
+Every step is now scored on evidence of its own, so the remaining 83 are steps
+nothing in the run cites.
+
+The red side is measured rather than assumed: the corpus carries 2 `violated`
+truths, both real commit-message violations, and 2 sessions with a reviewed
+compiled checks file behind them - without either, "zero false reds" would only
+record that the tool stopped accusing. Eight verdicts regressed, all named. Two
+are rule-document rows where a skill really was invoked, but the hook's own
+record proves that `~/.claude/CLAUDE.md` changed after it was loaded, so the
+tool now refuses to read its wording as a rule at all. The other six are skill
+steps the truth calls uncited while the tool still greens them from a write or a
+combine - a disagreement the scorecard prints in full rather than settles. Every row, and every row not derived blind,
+is in [`snapshots/SCORECARD.md`](snapshots/SCORECARD.md); the rulings the truth
+applies are in
+[`snapshots/expected/RULINGS.md`](snapshots/expected/RULINGS.md). See
 [Baseline snapshots](#baseline-snapshots) for how to reproduce the number.
 
 For every session, per turn (one real user prompt to the next):
@@ -62,9 +83,10 @@ For every session, per turn (one real user prompt to the next):
   merely **possibly referenced**, **dormant**, **unused**, **undelivered** (truncated
   away before the model saw it), or **not loaded** at all.
 - Followed rules, detected from what the run actually did - not only from what it
-  said. A skill the agent executed marks that skill's own sections used; a write to
-  a file a rule names, a template a rule spells out reproduced in a file the agent
-  wrote, and a documented command that ran verbatim each count as evidence, cited by
+  said. A skill the agent executed marks that skill's own sections used; inside a
+  document the harness recorded as running, a read or a write of a file a step
+  names and the step's template reproduced in a file the agent wrote count too;
+  and a documented command that ran verbatim counts anywhere. Each is cited by
   file and command. These signals only ever give credit: nothing was written to
   `ERRORS.md` is not read as a violation, because the session may have had nothing
   worth logging.
@@ -290,7 +312,7 @@ Every `CLAUDE.md`/skill block gets one of 8 statuses in two families:
 - **NOT-USED**: `undelivered`, `unused`, `dormant`, `not-loaded`
 
 Evidence is tiered. **Strong** evidence ties the block to a specific observable
-outcome (a trigger the user actually typed, a structural record of what the run
+outcome (a command the run really invoked, a structural record of what the run
 did, or a reviewed compiled check that ran) and is the only tier that can
 produce `used`, `used-partial` or `ignored`. **Weak** evidence (bare command
 mentions, and the lexical tier below) tops out at `possibly-referenced` and
@@ -309,11 +331,45 @@ author's own CLAUDE.md - a project-path table and a "close with a short
 summary" rule - and both were wrong in both directions on every session
 audited.
 
-Four of the strong signals are structural - a record of what the run did,
+Five of the strong signals are structural - a record of what the run did,
 joined to something the block itself names: a skill the agent executed (its own
-sections were what ran), a write to a file path the block names, the block's
-template reproduced in a file the agent wrote, and a documented command that
-ran verbatim. These four only ever give credit. Nothing written to the file a
+sections were what ran), a write to a file path the block names, a *read* of a
+file path the block names, the block's template reproduced in a file the agent
+wrote, and a documented command that ran verbatim. The path join means a
+*file*: a directory (`docs/skills/`), a slash command (`/create-pr`) or a
+heading token names nothing to write, and the acted-on path's own filename has
+to be the one the block named - otherwise any write under a directory a rule
+mentions stood as proof the rule was followed. Reads and writes to the block's
+own document are excluded, because editing (or opening) the rule file is not
+obeying the rule.
+
+**Three of the five - the read, the write and the template - count only inside a
+document the harness recorded as *running*.** A filename lifted out of prose
+carries no direction: by the time the token meets a path the run touched, the
+sentence that made it a target, a warning or an example is gone. A blind audit
+found six false greens built on exactly that - a gotchas note *warning* that
+`app.json` does not propagate, credited by an edit to `app.json`; a "read this
+first" step credited by a commit turn that edited the file and never read it; a
+decisions-log template credited by a document that merely *described* it.
+Inside a running procedure the invocation supplies the missing context - the
+step's own file being touched is the step being carried out. For a plain rule
+document (a `CLAUDE.md`, an `AGENTS.md`, anything the agent merely read) nothing
+does, so such a rule reports as uncompiled and the report names `/compile-rules`:
+a reviewed compiled check is the only path that can credit it, and the only one
+that can also report a violation of it. Where a file was both read and written,
+the read is what gets cited: the two are one interaction with that file, and the
+write may be any other work the session did.
+
+The command signal needs no such gate, and keeps working on every document: it
+matches a verb the run executed rather than a noun a sentence mentions. "Ran
+verbatim" means the command was a command: it has to start one of the things the
+shell call actually ran, so a command quoted inside a PR body or a heredoc is
+text about the command rather than a run of it. A pipe is not a split point
+either - `&&`, `||` and `;` join commands that each stand alone, but a pipeline
+is one composed command, so a rule documenting `printf '%s' "$c" | pbcopy` does
+not prescribe `pbcopy`, and the `echo "x" | pbcopy` it forbids no longer scores
+it as followed. These five only ever
+give credit. Nothing written to the file a
 rule names is not read as a violation, because the run may have had nothing to
 write - and each one names the file or command it is citing, so the claim can
 be checked.
@@ -321,6 +377,19 @@ be checked.
 Delivery is checked before anything is scored: a block the model never saw
 (truncated tail, a gap between disjoint read ranges) is `undelivered`, never
 "unused" — the difference between *never arrived* and *arrived and ignored*.
+
+And the text a verdict is about is the text the session was given, not the file
+on disk today. A rule document routinely gains sentences after the session you
+are auditing, and crediting the agent with following one of those is a green
+nobody can defend. Where the transcript carries the delivered text — a whole-file
+`Read` result, an attachment, or the pre-edit copy an `Edit` result carries —
+that is what the block is parsed from, per turn, so a session that rewrites its
+own CLAUDE.md is judged in each turn against the wording that turn was handed.
+Every block says which text it was: `transcript`, `disk` (nothing recovered it,
+so the reason ends with a clause saying the wording may postdate the session),
+or `stale` — the ctxlog hook recorded the file's size and digest when it was
+loaded and they no longer match, so the disk wording is provably not what the
+model saw and no rule is derived from it.
 
 A rule is only judged where it was **exercised** - where the run actually did
 the kind of thing the rule is about. A turn that ran no `gh` command at all is
@@ -463,7 +532,8 @@ prose at runtime — interpretation happens exactly once, offline, at authoring 
 4. **Load-time enforcement** (`rule_checks.py`): self-tests are re-run with this
    tool's own matcher and any failing check is refused (a generator's claim that
    its tests pass is not evidence). Comments and string literals are stripped
-   centrally, offset-preserving, before any pattern runs. A `violated` state
+   centrally and unconditionally, offset-preserving, before any pattern runs —
+   a v1 check's `ignore_strings` is accepted and ignored. A `violated` state
    requires the pattern to fire on **both** the raw and the stripped text;
    disagreement is `unclear`, never a violation. An inline `ctx-allow`
    (or `ctx-allow: <check-id>`) marker on the match's line or the line above
@@ -476,8 +546,10 @@ prose at runtime — interpretation happens exactly once, offline, at authoring 
    a block red (`ignored`), citing file, line and matched text.
 6. **Fallback**: a guidelines doc with no checks file gets a narrow mechanical
    extraction (negation cue + backticked code-shaped token, max 5 checks),
-   always `confidence: low`, which can never redden a block. Files the agent
-   merely read get no rule treatment at all.
+   always `confidence: low` and always reported as `unclear`, never
+   `violated` — nobody reviewed the pattern, and the rule's own exception
+   clause may permit exactly what it matched, so the block cannot go red on
+   it. Files the agent merely read get no rule treatment at all.
 
 Example: the rule *"Never combine observer() and memo() on the same component"*
 becomes a `forbidden_co_occurrence` check with patterns `observer\(` and
@@ -629,12 +701,26 @@ places at once - in `lexical.py` where they are used, and in
 `tests/fixtures/lexical_pairs.json`, a set of 250 labelled (block, session)
 pairs that justifies them. `tests/test_calibration.py` re-measures on every run
 and fails if precision drops below 0.90 or if the code and the fixture disagree
-about a threshold. Precision-first is deliberate: a false `topical-overlap`
+about a threshold. **218 of those pairs reference the frozen corpus, which is
+private** (below), so a clone measures the 32 inline pairs alone: the tests
+whose claim is about the whole set skip by name rather than posting the same
+green over a third of it. Precision-first is deliberate: a false `topical-overlap`
 reads exactly like a real one, whereas a miss costs an honest
 `no-lexical-trace`. Recall at the frozen point is about half, and the misses
 are in the fixture with a note each saying why - most of them are compliance
 that happened entirely in file writes and left no trace in the prose, which is
 what the structural predicates rather than the vocabulary are for.
+
+**The calibration corpus is the author's own sessions, and is not
+distributable.** `snapshots/baseline/` and `snapshots/after/` are frozen raw
+transcripts: a production host, credentials, thousands of employer ticket
+references and other people's names. They cannot be sanitised without
+destroying what they measure, so they are gitignored and never committed
+(`tests/test_privacy.py` is that as a test). Two consequences, stated plainly:
+the scorecard is the author's measurement of the author's sessions and a
+contributor cannot regenerate or re-check it, and `pytest` on a clone runs
+everything except the corpus-dependent tests, which skip naming the directory.
+Contributed pairs carry their corpus inline for exactly this reason.
 
 **Contributing labelled pairs.** The calibration set is only as broad as the
 rule documents behind it, and right now that is one author's. To add yours:
@@ -762,16 +848,27 @@ HTML and opening it.
 `tests/test_regression_verdicts.py` is the verdict regression harness: one case
 per verdict a hand audit of real sessions proved wrong, reconstructed from
 in-memory events that reproduce the mechanism rather than the session. Test
-names carry the mechanism tag (`pytest -k f_trigger`), and the cases still
-waiting on a fix are `xfail(strict=True)` - so the suite is green today, a fix
-flips its own cases to passes, and a regression un-flips them loudly. Alongside
-them sit counter-anchors: the verdicts the audit found correct, which must keep
-passing.
+names carry the mechanism tag (`pytest -k f_trigger`). Alongside them sit
+counter-anchors: the verdicts the audit found correct, which must keep passing.
+
+Every case there has to be able to fail. A case whose fixture derives no
+predicate and whose document has no compiled checks file is vacuous - nothing
+can reach a hard verdict on it, so "not a violation" passes whatever the code
+does - so the rules whose bespoke predicates were retired are driven through a
+worked-example document with a reviewed checks file beside it, each case
+asserts the exact status and rule-check state rather than a negation, and the
+module docstring records the one-line change to the tool that turns each family
+red. The red path is exercised in the same file rather than assumed: a `gh`
+command with no prior account check comes out `ignored` with a cited span.
 
 `tests/test_calibration.py` scores the labelled lexical set in
-`tests/fixtures/lexical_pairs.json` and gates on precision; it also pins the
-thresholds in `lexical.py` against the fixture, so moving one without
-re-measuring fails. `tests/test_degradation.py` is the degradation matrix -
+`tests/fixtures/lexical_pairs.json` and gates on precision together with the
+exact false-positive count, because a ratio over 245 pairs is too coarse on its
+own - a loosened threshold can invent two or three false positives and still
+clear 0.90. It also pins the thresholds in `lexical.py` against the fixture, so
+moving one without re-measuring fails. Most of that set needs the private corpus, so on a clone
+those tests skip by name and the gate runs over the inline pairs.
+`tests/test_degradation.py` is the degradation matrix -
 every optional signal switched off individually, every verdict compared against
 the same run with it on. Both are described in
 [The trust model](#the-trust-model).
@@ -795,7 +892,18 @@ stored artifacts, so the bytes don't depend on where the checkout lives), which
 means block ids in a snapshot differ from a live run's — compare snapshot to
 snapshot, never snapshot to a fresh build. And `capture` needs the live machine
 that owns those sessions, while `verify` runs entirely off the manifest, so
-anyone can check a committed baseline.
+anyone holding a baseline can check it.
+
+**The captured trees are not committed and cannot be.** They are raw
+transcripts of the author's real sessions, private content and all, so
+`snapshots/baseline/` and `snapshots/after/` are gitignored - `capture` and
+`after` write into a working tree that stays local. What is committed is the
+ground truth, the scorer and the scorecard, which means the numbers below are
+the author's measurement of the author's sessions: reproducing them needs those
+sessions, and `python3 snapshots/compare.py` says so and exits rather than
+scoring an empty tree. What a clone *can* check is every unit test, the
+inline half of the calibration set, and the scorer itself
+(`tests/test_scorecard.py` scores it against a synthetic triple).
 
 ```bash
 python3 snapshots/take_baseline.py list                    # what is captured
@@ -817,9 +925,34 @@ written from — the ordered action list, the block identity, and over-generous
 substring candidates — with every verdict field withheld, so the ground truth
 could not be anchored by what the tool says.
 
+The rulings that decide what `used` means are written once, in
+[`snapshots/expected/RULINGS.md`](snapshots/expected/RULINGS.md), and the scorer
+refuses an `expected.md` whose header does not reference them and quote the one
+they were read two ways: **a file created under a directory the block names does
+not count**. A row corrected after a payload was read carries a `revised:` note,
+and the scorer refuses that without a `blind:` line saying whether the
+correction itself was derived blind - a correction made while looking at the
+answer is the one edit that can ratify the tool, so it has to be visible as one.
+
 `snapshots/compare.py` then scores the baseline payload and the after payload
-against it and writes [`snapshots/SCORECARD.md`](snapshots/SCORECARD.md). A row
-`regressed` (right before, wrong after) is a release blocker; every row that is
-still wrong carries the reason it is accepted. The truth classes are coarse on
-purpose — `dormant` versus `unused` is not a reliability claim, while a green
-over a rule nothing tied to the run is.
+against it and writes [`snapshots/SCORECARD.md`](snapshots/SCORECARD.md), as two
+tables: skill and command blocks, and rule-document blocks. They are apart
+because one ruling decides how an invocation is credited across every skill
+and command document, and those rows outnumber the rest - mixed together they
+report that ruling as a measurement. The header states how many `violated` truths and how many compiled
+checks files the corpus holds, and warns in as many words when either is zero,
+because a false-red count of zero over a corpus with no red path measures
+nothing.
+
+A row `regressed` (right before, wrong after) is a release blocker; every row
+that is still wrong carries the reason it is accepted. The truth classes are
+coarse on purpose — `dormant` versus `unused` is not a reliability claim, while
+a green over a rule nothing tied to the run is.
+
+The reviewed checks files are committed even though the trees they are frozen
+into are not: `snapshots/checks/<project>/<session>/<key>` holds them, and
+`python3 snapshots/freeze_checks.py` copies each into the matching baseline's
+`inputs/` and records it in the manifest (`--check` reports drift instead of
+writing). A checks file is a judgement input, not a derived artifact - the same
+prose scores differently with and without it - so a reader can see the patterns
+behind a red badge without ever seeing a transcript.

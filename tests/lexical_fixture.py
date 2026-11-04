@@ -21,6 +21,11 @@ baselines under `snapshots/baseline/` rather than copying session prose into
 a second thing to keep in step. Contributed pairs carry their corpus inline
 instead (see `tests/label_pairs.py`), which is what makes them shareable.
 
+Those baselines are the author's own sessions and are gitignored, so a clone
+does not have them: `resolvable` says which pairs survive their absence, and
+the tests that need the full set skip by name rather than quietly measuring
+the inline third.
+
 **Ground truth, and how each label was arrived at**, since a calibration set is
 worthless if nobody can tell how it was labelled:
 
@@ -78,6 +83,12 @@ def load(path=FIXTURE):
 
 def snapshots_available():
     return SNAPSHOT_ROOT.is_dir()
+
+
+CORPUS_ABSENT = (
+    f"the frozen calibration corpus at {SNAPSHOT_ROOT} is absent. It is the "
+    "author's own sessions and is deliberately not distributable, so a clone "
+    "scores the inline pairs only")
 
 
 # ---------- corpora ----------
@@ -174,12 +185,29 @@ def score_pair(pair, fixture):
     return lexical.score(block_content(pair, fixture), corpus["bg"], corpus["q"])
 
 
-def _resolvable(pair):
-    return "content" in pair["block"] or snapshots_available()
+def resolvable(pair):
+    """Whether both halves of the pair can be read without the frozen corpus.
+
+    Both halves, not just the block: a pair whose corpus is a snapshot cannot
+    be scored however the block is stored, and scoring one against a corpus
+    that is not there is how a shrunken set passes as the full one.
+    """
+    inline = "content" in pair["block"] and "inline" in pair["corpus"]
+    return inline or snapshots_available()
+
+
+def inline_pair_count(fixture):
+    """The floor under `resolved`: what a clone with no corpus must still score."""
+    return sum(1 for p in fixture["pairs"]
+               if "content" in p["block"] and "inline" in p["corpus"])
 
 
 def evaluate(fixture):
     """Score every resolvable pair and return the confusion figures.
+
+    `resolved` / `unresolved` are reported alongside them because the corpus is
+    private: on a clone without it 218 of the pairs cannot be read at all, and
+    a ratio over the remaining 32 must not be mistaken for the frozen one.
 
     `precision` is over predicted positives; `undecidable` pairs are scored so
     their result is visible but are counted in neither metric - a pair with no
@@ -189,14 +217,16 @@ def evaluate(fixture):
     """
     rows = []
     for pair in fixture["pairs"]:
-        if not _resolvable(pair):
+        if not resolvable(pair):
             continue
         result = score_pair(pair, fixture)
         rows.append({"id": pair["id"], "label": pair["label"],
                      "provenance": pair["provenance"],
                      "predicted": result["label"], "result": result,
                      "note": pair.get("note", "")})
-    return summarise(rows)
+    metrics = summarise(rows)
+    metrics["unresolved"] = len(fixture["pairs"]) - len(rows)
+    return metrics
 
 
 def summarise(rows):
@@ -217,6 +247,11 @@ def summarise(rows):
     truth_pos = len(tp) + len(fn)
     return {
         "rows": rows,
+        # How many pairs were read at all, as opposed to how many carry a
+        # scorable label: a set that shrank because its corpus is missing and
+        # one that shrank because its pairs are undecidable are different
+        # facts, and a single count would report them as the same.
+        "resolved": len(rows),
         "scored": len(scored),
         "unlabelled": len(unlabelled),
         "truePositives": len(tp),
@@ -232,12 +267,16 @@ def summarise(rows):
 
 def report(metrics):
     """The one-screen summary, printed by a failing gate and by the CLI."""
-    lines = [f"scored {metrics['scored']} pairs (undecidable excluded: "
+    lines = [f"resolved {metrics['resolved']} pairs",
+             f"scored {metrics['scored']} pairs (undecidable excluded: "
              f"{len(metrics['rows']) - metrics['scored'] - metrics['unlabelled']}, "
              f"unlabelled excluded: {metrics['unlabelled']})",
              f"  precision {metrics['precision']}  recall {metrics['recall']}",
              f"  tp {metrics['truePositives']}  fp {metrics['falsePositives']}  "
              f"fn {metrics['falseNegatives']}"]
+    if metrics.get("unresolved"):
+        lines.insert(1, f"  {metrics['unresolved']} pairs unresolved: "
+                        f"{CORPUS_ABSENT}")
     for kind, label in (("fp", "FALSE POSITIVE"), ("fn", "miss")):
         for row in metrics[kind]:
             lines.append(f"  {label}: {row['id']} labelled {row['label']}, "
