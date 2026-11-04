@@ -533,3 +533,32 @@ def test_a_git_ignored_fixture_corpus_is_not_reported_as_this_projects_rules(tmp
     assert not any("corpus/CLAUDE.md" in p for p in paths), paths
     brv.project_rule_documents.cache_clear()
     rc.checks_for_doc.cache_clear()
+
+
+def test_compile_status_lists_a_rule_document_the_session_only_read(tmp_path, monkeypatch):
+    """Reading a nested rule document must not erase it from a project screen.
+
+    A `backend/CLAUDE.md` opened with the `Read` tool enters the session as a
+    read file, not as a rule document, so filtering the loaded list by kind
+    dropped it - and the disk walk skipped it because the path was loaded. The
+    screen then listed fewer documents the more of them the session opened,
+    which is the session-varying answer its own header denies.
+    """
+    nested = tmp_path / "backend"
+    nested.mkdir()
+    (nested / "CLAUDE.md").write_text("# Backend\n\n## Logging\n\nNever log a secret.\n")
+    brv.project_rule_documents.cache_clear()
+    events = [user_text("do the thing", 0),
+              assistant_tool_use("Read", {"file_path": str(nested / "CLAUDE.md")}, 1)]
+    summary, per_session = _session(tmp_path, monkeypatch, events=events)
+
+    loaded = {f["path"] for f in per_session["contextFiles"]}
+    assert any(p.endswith("backend/CLAUDE.md") for p in loaded), \
+        "the fixture no longer exercises a read document"
+
+    paths = [d["path"] for d in per_session["ruleCompile"]["docs"]]
+    assert any(p.endswith("backend/CLAUDE.md") for p in paths), paths
+    out = _query(summary, per_session, ["sessions"], compile_status=True)
+    assert "backend/CLAUDE.md" in out
+    brv.project_rule_documents.cache_clear()
+    rc.checks_for_doc.cache_clear()

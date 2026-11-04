@@ -6346,16 +6346,18 @@ def _rule_compile_rollup(context_files, project_dir=None):
 
     Scope is the project, not the session: the loaded documents come first (a
     nested CLAUDE.md the harness injected is already one of them), and the walk
-    adds the rest.
+    adds the rest. What the walk already covers is keyed on the guideline-kind
+    files only - a nested CLAUDE.md the session merely *read* enters as a read
+    file, so keying on every loaded path dropped it from both halves and made
+    the screen list fewer documents the more of them a session opened.
     """
     docs = []
     totals = Counter()
     scanned = project_rule_documents(str(project_dir)) if project_dir else ()
-    loaded_paths = {f.get("abs_path") for f in context_files}
-    for f in list(context_files) + [d for d in scanned
-                                    if d["abs_path"] not in loaded_paths]:
-        if f["kind"] not in GUIDELINE_KINDS:
-            continue
+    guideline = [f for f in context_files if f["kind"] in GUIDELINE_KINDS]
+    loaded_paths = {f.get("abs_path") for f in guideline}
+    for f in guideline + [d for d in scanned
+                          if d["abs_path"] not in loaded_paths]:
         status = rule_checks.compile_status(
             f["blocks"], rule_checks.checks_for_doc(f.get("abs_path") or ""))
         # A document that states no rules has nothing to compile, and listing it
