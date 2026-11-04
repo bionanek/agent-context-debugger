@@ -497,6 +497,34 @@ def _search(pattern, text):
     return re.search(pattern, text, re.MULTILINE)
 
 
+_QUOTED_ARG = re.compile(r"'[^']*'|\"[^\"]*\"")
+_COMMAND_JOIN = re.compile(r"&&|\|\||;")
+
+
+def _command_joins(text):
+    """Offsets where one command ends and the next begins, quoting masked."""
+    masked = _QUOTED_ARG.sub(lambda m: "_" * (m.end() - m.start()), text)
+    return [m.start() for m in _COMMAND_JOIN.finditer(masked)]
+
+
+def _command_search(pattern, text):
+    """The first match that stays inside a single command.
+
+    `&&`, `||` and `;` join commands that each stand on their own, while a call
+    is rendered as one searchable line - so an unanchored run like `[^\n]*`
+    reaches straight across them. That is how a branch push followed by `gh pr
+    create --base master` was read as a push to master: the run was accused of
+    the one action it did not take, which is the worst failure this tool has. A
+    pipe is deliberately not a join, because it composes a single command out
+    of stages rather than prescribing each one.
+    """
+    joins = _command_joins(text)
+    for m in re.finditer(pattern, text, re.MULTILINE):
+        if not any(m.start() <= j < m.end() for j in joins):
+            return m
+    return None
+
+
 def _first_line_span(text):
     """Anchor for absence-based kinds: the first non-blank line of the hunk."""
     for m in re.finditer(r"^(.*\S.*)$", text, re.MULTILINE):
@@ -935,16 +963,16 @@ def _evaluate_shell(check, corpus):
         return entries[i] if i < len(entries) else None
     if check["kind"] == "forbidden_command":
         for i, cmd in enumerate(commands):
-            m = _search(check["pattern"], cmd)
+            m = _command_search(check["pattern"], cmd)
             if m:
                 state = "acknowledged" if _suppressed(cmd, m.start(), check["id"]) else "violated"
                 out.append(_governing(
                     _finding(check, SHELL_PATH, cmd, (m.start(), m.end()), state), at(i)))
     else:  # required_command
-        satisfied = any(_search(check["pattern"], c) for c in commands)
+        satisfied = any(_command_search(check["pattern"], c) for c in commands)
         if not satisfied:
             for i, cmd in enumerate(commands):
-                m = _search(check["trigger_pattern"], cmd)
+                m = _command_search(check["trigger_pattern"], cmd)
                 if m:
                     state = ("acknowledged" if _suppressed(cmd, m.start(), check["id"])
                              else "violated")
@@ -968,7 +996,7 @@ def _matching_calls(entries, pattern):
     """(entry, match) for every call whose line the pattern hits, in call order."""
     out = []
     for e in entries:
-        m = _search(pattern, e["text"])
+        m = _command_search(pattern, e["text"])
         if m:
             out.append((e, m))
     return out

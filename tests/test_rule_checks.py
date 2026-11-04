@@ -921,6 +921,52 @@ def test_a_shell_finding_names_its_governing_prompt_too(tmp_path):
     assert governing["turnIndex"] == 0 and governing["callIndex"] == 0
 
 
+def test_a_forbidden_pattern_may_not_span_two_commands_in_one_call(tmp_path):
+    """The false red this corpus was frozen to measure.
+
+    The agent pushed a branch and then opened a PR against master. `&&` joins
+    two commands that each stand on their own, and the call log renders a call
+    as one line, so `git push \u2026 master` matched across the join and the run was
+    accused of the one action it did not take. A pattern is about a command, so
+    it may not span the point where one command ends and the next begins.
+    """
+    src, block = push_block(tmp_path)
+    compound = ("git push -u origin docs/admin-posts-crud-spec 2>&1 | tail -2 "
+                "&& git ls-remote --heads origin master | head -1 "
+                "&& GH_TOKEN=$(gh auth token --user me) gh pr create --base master")
+    v = brv.assess_block(block, rule_file(src),
+                         trace_for([user_text("open the PR", 1), bash(compound, 2)]))
+    assert [f["state"] for f in v["ruleCheck"]["findings"]] == ["not-exercised"]
+    assert v["status"] != "ignored"
+
+    # The control: the forbidden command on its own still reds, so the
+    # assertion above cannot pass merely because the check stopped working.
+    red = brv.assess_block(block, rule_file(src),
+                           trace_for([user_text("push it", 1),
+                                      bash("git push origin master", 2)]))
+    assert red["ruleCheck"]["findings"][0]["state"] == "violated"
+    assert red["status"] == "ignored"
+
+
+def test_a_shell_pattern_may_not_span_two_commands_either(tmp_path):
+    """The shell kinds read the same compound line and need the same bound."""
+    shell = push_check(id="no-push-shell", domain="shell", kind="forbidden_command",
+                       pattern=r"\bgit\s+push\b[^\n]*\bmaster\b",
+                       self_test={"should_match": ["git push origin master"],
+                                  "should_not_match": ["git push -u origin feat/posts"]})
+    src, block = push_block(tmp_path, checks=[shell])
+    compound = "git push -u origin feat/x && gh pr create --base master"
+    v = brv.assess_block(block, rule_file(src),
+                         trace_for([user_text("open the PR", 1), bash(compound, 2)]))
+    assert [f["state"] for f in v["ruleCheck"]["findings"]] == []
+    assert v["status"] != "ignored"
+
+    red = brv.assess_block(block, rule_file(src),
+                           trace_for([user_text("push it", 1),
+                                      bash("git push origin master", 2)]))
+    assert red["ruleCheck"]["findings"][0]["state"] == "violated"
+
+
 # ---------- the join reads the same turns the rest of the payload does ----------
 
 class _SessionArgs:

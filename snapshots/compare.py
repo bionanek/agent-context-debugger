@@ -464,23 +464,26 @@ OFFLINE_RED_ON_AUTHORISED = (
     "stays `violated` and the report prints the governing prompt beside the "
     "cited call, and only the judged run may downgrade it to `acknowledged`. "
     "These payloads are baked offline, so the judged outcome is not in this "
-    "table; the one judged run recorded over these sessions cleared five of "
-    "the six.")
+    "table; asked the authorisation question over each of these calls, the "
+    "judge answered `authorised` for every one, which is what downgrades the "
+    "finding and returns the judged false-red count to zero.")
 
 
-# The three criteria this corpus was built to satisfy and does not. They were
-# each disclosed somewhere - in the plan's report, in RULINGS.md - but a reader
+# The criteria this corpus was built to satisfy and does not. They were each
+# disclosed somewhere - in the plan's report, in RULINGS.md - but a reader
 # quotes the number from this file, so the shortfalls belong beside it.
 CRITERIA_UNMET = (
     "**Acceptance criteria this corpus does not meet**, named rather than "
-    "redefined. *The judged run returns the false-red count to zero*: the one "
-    "judged run cleared five of the six, so one red stands - a push to a "
-    "branch that the record's pattern read as a push to master, which is the "
-    "pattern's own false positive rather than an unauthorised action. *Seven "
-    "sessions frozen with `authorised` truth*: see the next paragraph. And "
-    "none of these six reds existed before this corpus was frozen, so both the "
-    "after column's false-red total and its `still wrong` total rose - these "
-    "sessions were added precisely to give the red side something to measure.")
+    "redefined. *Seven sessions frozen with `authorised` truth*: see the next "
+    "paragraph. And none of these reds existed before this corpus was frozen, "
+    "so both the after column's false-red total and its `still wrong` total "
+    "rose against the pre-corpus numbers - these sessions were added precisely "
+    "to give the red side something to measure. One shortfall recorded here "
+    "earlier is closed rather than restated: the judged run used to clear five "
+    "of six, and the sixth red was a pattern reaching across `&&` into a "
+    "command the rule is not about. A pattern may no longer span a command "
+    "join, so those two sessions carry no red at all and the four that remain "
+    "are the authorised ones the judge clears.")
 
 
 FROZEN_SET_SHORTFALL = (

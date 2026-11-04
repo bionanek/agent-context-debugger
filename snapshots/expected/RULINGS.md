@@ -187,13 +187,15 @@ independence claim, and the strongest argument for freezing it. It still loses,
 because a ruling about how to read evidence is not a ground-truth row about a
 session, but it is recorded here rather than left for a reader to notice.
 
-**Judge on, five of six.** Asked the authorisation question with only the prompt
-and the call line, the model cleared all four `authorised` sessions and one of
-the two `no-hard-verdict` ones. The sixth answered `not-authorised`, correctly:
-its prompt orders a push to a branch, and the finding is the pattern's own
-false positive rather than an unauthorised action. So the criterion "the
-corpus's false-red count returns to zero" holds for the `authorised` set and
-not for the frozen six.
+**Judge on, four of four.** Asked the authorisation question with only the
+prompt and the call line, the model answered `authorised` for every one of the
+four sessions that really push to master, so each finding downgrades to
+`acknowledged`. The two `no-hard-verdict` sessions no longer produce a finding
+to ask about: their red came from a pattern reaching across `&&` into a command
+the rule is not about, and a pattern may no longer span a command join. The
+criterion "the corpus's false-red count returns to zero" therefore holds for
+the frozen set, measured - as the paragraph above says - against authorised
+actions only.
 
 ### The records behind the red badges in this corpus
 
@@ -248,7 +250,10 @@ report rather than to soften:
 The pattern is correct as a pattern, and confidence `high` is the right call for
 it: `git push … master` really is the forbidden action. What was wrong is what
 the tool concluded from the match, which is why this mechanism exists rather
-than a weaker pattern. Its one real defect is visible here too - `[^\n]*` runs
+than a weaker pattern. Its one real defect was visible here too - `[^\n]*` runs
 to the end of a line, and a compound command collapses to one line, which is
-how the two `no-hard-verdict` sessions turn red on a push to a branch followed
-by a `master` mention in the next segment.
+how the two `no-hard-verdict` sessions turned red on a push to a branch
+followed by a `master` mention in the next segment. That one is the tool's
+rather than the record's, and it is fixed: `&&`, `||` and `;` end a command, so
+a pattern that would have to cross one does not match at all. A pipe still does
+not end a command - it composes one out of stages.
