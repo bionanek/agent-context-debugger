@@ -30,7 +30,7 @@ in the loop.
 - [Block verdicts](#block-verdicts)
 - [Rule checks: turning prose rules into checkable items](#rule-checks-turning-prose-rules-into-checkable-items)
 - [Structural rule checks (optional)](#structural-rule-checks-optional)
-- [The LLM audit tier (optional, off by default)](#the-llm-audit-tier-optional-off-by-default)
+- [The LLM audit tier (on by default)](#the-llm-audit-tier-on-by-default)
 - [The trust model](#the-trust-model)
 - [Token attribution](#token-attribution)
 - [Subagents](#subagents)
@@ -95,8 +95,8 @@ For every session, per turn (one real user prompt to the next):
   context files that were resident for it, cached vs fresh, plus cache-break markers.
 - Duplicated/overlapping content across context files, priced in attributed tokens.
 - Wasted context: every loaded file listed by what it cost and how many turns it sat
-  there. Offline that ordering is cost alone. With `--judge` each file also gets a
-  relevance judgment against what the session actually did, so the list becomes
+  there. That ordering is cost alone; with `--judge-relevance` each file also gets
+  a relevance judgment against what the session actually did, so the list becomes
   cost x relevance - an expensive file that earned its place drops below a cheaper
   one that pertained to nothing. A file nobody could place is `undecidable`, which
   costs it nothing, and relevance never marks a rule followed or broken. See
@@ -215,10 +215,11 @@ python3 hooks/ctxlog.py report [SID]  # timeline + coverage check for a session
 | `--query ADDRESS…` | off | Read-only plain-text query instead of an HTML build (see below). |
 | `--field NAME` | none | With `--query`: print one field in full, unbounded. Block: `title/status/reason/content/moments`; agent: `prompt/result`; session/turn: `prompt`. |
 | `--all` | off | With `--query`: print every listing row instead of the first 60. |
-| `--judge` | **off** | Opt in to the LLM audit tier. **Changes the privacy contract** - see below. |
-| `--judge-model ID` | `sonnet` | With `--judge`: the model to ask. Part of the verdict cache key. |
-| `--judge-cache PATH` | `~/.claude/ctxide/judge-cache.json` | With `--judge`: where verdicts are cached. `$CTXIDE_JUDGE_CACHE` overrides the default. |
-| `--judge-max-calls N` | 200 | With `--judge`: cap on model calls in one run. Cached verdicts are free and do not count. |
+| `--no-judge` | off | Run offline: rules no pattern can decide are reported unchecked instead of being asked of a model. **By default they are asked** - see the trust model below. |
+| `--judge-model ID` | `sonnet` | The model to ask. Part of the verdict cache key. |
+| `--judge-cache PATH` | `~/.claude/ctxide/judge-cache.json` | Where verdicts are cached. `$CTXIDE_JUDGE_CACHE` overrides the default. |
+| `--judge-max-calls N` | 200 | Cap on model calls in one run. Cached verdicts are free and do not count. |
+| `--judge-relevance` | **off** | Also ask whether each loaded file pertained to the session's task. One call per loaded file per session, where the rule questions are a handful per project. |
 
 ## Query mode
 
@@ -297,7 +298,7 @@ Five tabs, all rendering the same baked JSON:
   marker rows.
 - **File Activity** - reads/edits per file across the scope, plus **Wasted
   context**: every loaded file by cost and turns resident, session-wide. Cost
-  ordering offline; cost x relevance with `--judge`.
+  cost ordering by default; cost x relevance with `--judge-relevance`.
 - **Duplications** - overlapping context content, classified
   `redundant` / `overlap` / `related`, priced by attributed tokens (the share
   that could have been deleted).
@@ -511,8 +512,8 @@ prose at runtime - interpretation happens exactly once, offline, at authoring ti
    (`diff`/`files`/`transcript`), `bucket`
    (`deterministic`/`hybrid`/`judged`), and `examples_positive` /
    `examples_negative`. Only `deterministic` records run here; `hybrid` and
-   `judged` need the opt-in judge tier and are reported as unchecked with the
-   bucket named. A deterministic record whose fixtures stop reproducing is
+   `judged` go to the judge tier, and are reported as unchecked with the
+   bucket named whenever no judge answered them. A deterministic record whose fixtures stop reproducing is
    **demoted to `judged` and says so** rather than silently dropped - the
    point of re-running fixtures is that a broken check becomes visible.
 
@@ -612,25 +613,42 @@ ast-grep itself); coverage is per tree-sitter grammar, strong for TS/JS/Python/G
 and absent for niche languages; and semantic rules stay out of reach. It raises
 the precision of the deterministic tier - it does not change the epistemics.
 
-## The LLM audit tier (optional, off by default)
+## The LLM audit tier (on by default)
 
 Deterministic checks can decide roughly a fifth to a third of the rules people
 actually write. The rest - *"end with a plain-language summary"*, *"comments
 explain why, never what"* - are not pattern-shaped, and the honest offline
-answer for them is `not-checkable`. `--judge` is the opt-in way to get an answer
-anyway, by asking a model.
+answer for them is `not-checkable`. Since 2026-11-04 those rules are asked of a
+model instead, without a flag: a tier nobody switches on is a tier that does not
+exist.
 
-**The privacy contract, stated plainly.** Default: nothing leaves your machine -
-no model call, no network request, and the module that could make one is never
-even imported. With `--judge`: session content (the code the run wrote, or its
-tool log) is sent to the model, through your existing Claude Code auth. There is
-no second API key and no second account; the tier shells out to the `claude` CLI
-you are already logged into. If that trade is not one you want on a given
-repository, do not pass the flag - everything else works exactly the same.
+**What that costs you, stated plainly.** By default, session content - your
+prompts, the code the run wrote, the rule text being checked - is sent to
+Anthropic's `sonnet` model through the `claude` CLI you are already logged into.
+There is no second API key and no second account. The tool says this itself,
+once per machine, the first time it asks anything. If that trade is not one you
+want on a given repository, `--no-judge` turns it off and everything else works
+exactly the same.
+
+What did **not** change when the default did, and each of these has a test:
+
+1. `--no-judge` produces the offline payload, and produces it without
+   `judge_tier` being importable at all - the import lives inside `make_judge`.
+2. A judge that cannot be reached - logged out, offline, no CLI - degrades to
+   exactly the offline report plus a note. The bake succeeds and exits 0.
+3. **No judge answer awards a badge**, green or red. A semantic verdict is
+   advisory; a bucket-B verdict can report a violation only with a citation the
+   reader can go and check.
+
+Every report names the mode it was produced in - `judged`,
+`offline (--no-judge)` or `offline (judge unavailable: <reason>)` - in the page
+header and as the last line of every `--query` answer. You never have to guess
+whether a model was behind a verdict.
 
 ```bash
-python3 build_real_view.py --judge                 # bake the page with the tier on
-python3 build_real_view.py --query <id> --judge    # same, as text
+python3 build_real_view.py                      # the judge runs; the header says `judged`
+python3 build_real_view.py --no-judge           # offline, byte for byte
+python3 build_real_view.py --query <id>         # same modes, named on the last line
 ```
 
 **What actually gets asked.** One rule, one candidate, one call - never "here is
@@ -661,12 +679,18 @@ exactly as the deterministic layer already does. Every judged violation in a
 report carries a file, a line and the snippet.
 
 **The third question: was this context wasted?** Beside the rule verdicts, the
-tier answers one question per loaded file - *did this file pertain to anything
-this session did?* - from the file's own summary plus a digest of every prompt
-the user typed. The structural half of waste (delivery, residency, token
-attribution, duplicates) stays Python-computed and is unchanged with the flag
-off; the judgment only reorders the list, and it is asked most-expensive-file
-first so a finite budget is spent where the money went - it shares the one `--judge-max-calls` budget with the rule questions, so bake a single session (`--session <id> --judge`) rather than the default twenty when you want every file asked about. Answers are
+tier can answer one question per loaded file - *did this file pertain to
+anything this session did?* - from the file's own summary plus a digest of every
+prompt the user typed. This one stays behind a flag, `--judge-relevance`, when
+the rule questions do not: it is a call per loaded file per session, so a
+default bake of twenty sessions would spend the whole budget on it before a
+rule was asked. The structural half of waste (delivery, residency, token
+attribution, duplicates) stays Python-computed and is unchanged without the
+flag; the judgment only reorders the list, and it is asked most-expensive-file
+first so a finite budget is spent where the money went - it shares the one
+`--judge-max-calls` budget with the rule questions, so bake a single session
+(`--session <id> --judge-relevance`) rather than the default twenty when you
+want every file asked about. Answers are
 `pertinent` / `not-pertinent` / `undecidable`, cached on `(file content hash,
 task digest hash, model id)`. A file whose summary tries to instruct the auditor
 has its answer thrown away and reported as `undecidable` - the file picked its
@@ -692,13 +716,14 @@ default path never imports (`install_ast_grep.py`, `judge_tier.py`), and a test
 asserts that no analysis module imports either of them at module level, or
 reaches for `urllib` at all.
 
-**Three things are opt-in, and this is the whole of what each one changes:**
+**One thing runs by default and two are opt-in; this is the whole of what each
+one changes:**
 
-| Opt-in | What it changes | What leaves your machine |
+| Signal | What it changes | What leaves your machine |
 |---|---|---|
 | `hooks/ctxlog.py` | Records which instruction files Claude Code actually loaded, so a rule that was never delivered reads `not-loaded` instead of being assumed present. | Nothing. It writes a local JSON-lines log. |
 | `install_ast_grep.py` | Adds the `ast_forbidden` check kind, which asks a structural question a regex only approximates. | One download, from a URL and checksum printed before you consent, into the tool's own `vendor/` directory. Never your `PATH`. |
-| `--judge` | Sends one narrow question per rule per candidate site to a model through your existing `claude` CLI, and asks whether each loaded file pertained to the task at all. | The rule statement, its two examples, and the specific snippet or file summary the question is about. Never the session, never a second rule. |
+| the judge tier (**on**; `--no-judge` turns it off) | Sends one narrow question per rule per candidate site to a model through your existing `claude` CLI. `--judge-relevance` adds one question per loaded file about whether it pertained to the task. | The rule statement, its two examples, and the specific snippet or file summary the question is about. Never the session, never a second rule. |
 
 **Every optional signal degrades to "signal unavailable", never to a worse
 verdict.** That includes the two above, readable extended thinking (which some
@@ -810,11 +835,12 @@ candidate; one that is `used` on the turns that matter earns its cost.
   binary, which you install on purpose, which is pinned to a checksum, and which
   lives in the tool's own directory rather than on your `PATH`. Nothing else,
   ever.
-- **No LLM calls and no network in default mode.** Rule interpretation happens
-  at authoring time; the tool only reads the checked-in JSON. The one command
-  that downloads anything is `install_ast_grep.py`, which nothing on the analysis
-  path imports. `--judge` is the single documented exception, off by default and
-  in its own module that the default path never loads.
+- **Rule interpretation is offline, the judge is not.** A prose rule is turned
+  into checks once, outside the tool, and the tool only reads the checked-in
+  JSON. The judge tier asks a model about the rules no pattern can decide, by
+  default, and `--no-judge` is the offline path - which never loads
+  `judge_tier.py` at all. The one command that downloads anything is
+  `install_ast_grep.py`, which nothing on the analysis path imports.
 - **One self-contained HTML file.** All UI lives inside `HTML_TEMPLATE` in the
   script; it is never split out.
 - **Everything the UI shows is computed in Python and baked.** The JS renders
@@ -837,7 +863,7 @@ candidate; one that is `used` on the turns that matter earns its cost.
 | `ctxlog_facts.py` | Hook-log parser: "actually loaded" facts that override path conventions. |
 | `hooks/ctxlog.py` | The hook that writes those logs. Self-installing (`install --write`); also a standalone session reporter. |
 | `install_ast_grep.py` | The consented, checksum-pinned installer for the optional ast-grep binary. The only file here that touches the network. |
-| `judge_tier.py` | The opt-in LLM audit tier: prompt construction, the untrusted-content boundary, and the verdict cache. Loaded only when `--judge` is passed. |
+| `judge_tier.py` | The LLM audit tier: prompt construction, the untrusted-content boundary, and the verdict cache. Runs by default; not loaded at all under `--no-judge`. |
 | `prompts/translate-rules.md` | The rule-compilation prompt `/compile-rules` follows to turn a guidelines doc into a checks file. |
 | `.claude/commands/compile-rules.md` | The `/compile-rules` slash command. Copy it into your own project to compile rules there. |
 | `CLAUDE.md` | The detailed architecture map (canonical for contributors). |

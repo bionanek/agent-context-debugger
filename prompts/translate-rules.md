@@ -35,12 +35,12 @@ It cannot parse an AST, resolve types, follow imports across files, or see the r
 Every record declares one, in `bucket`:
 
 - **`deterministic`** - a pattern over the corpora above decides it, with fixtures that prove the pattern's behaviour. This is the only bucket the tool can decide today, and the only one that can ever mark a rule violated.
-- **`hybrid`** - the *sites* are enumerable but the question about each one is semantic ("does this catch body actually handle the error?"). Name the `candidate` kind; the tool extracts the sites deterministically and asks one question per site. This needs the opt-in judge tier (`--judge`): with the tier off - the default - the rule is reported as unchecked, never as followed; with it on, the tool enumerates the sites and asks your statement about each one.
-- **`judged`** - purely semantic ("be direct, zero fluff"). No pattern, no sites. Reported as unchecked with the tier off; with it on the verdict is **advisory** - it can flag the rule for a reader but never call it violated or mark it followed.
+- **`hybrid`** - the *sites* are enumerable but the question about each one is semantic ("does this catch body actually handle the error?"). Name the `candidate` kind; the tool extracts the sites deterministically and asks one question per site. This needs the judge tier, which runs by default: the tool enumerates the sites and asks your statement about each one, and under `--no-judge` (or when the judge cannot be reached) the rule is reported as unchecked, never as followed.
+- **`judged`** - purely semantic ("be direct, zero fluff"). No pattern, no sites. The verdict is **advisory** - it can flag the rule for a reader but never call it violated or mark it followed - and under `--no-judge` the rule is reported as unchecked.
 
 A rule that fits none of these is not a record at all: put it in `not_checkable` with a one-line `why`.
 
-Prefer `deterministic` only where the pattern is genuinely decisive. A rule forced into `deterministic` with a hopeful regex is the failure mode this whole architecture exists to remove; `hybrid` and `judged` are honest answers offline and are what the opt-in judge tier reads.
+Prefer `deterministic` only where the pattern is genuinely decisive. A rule forced into `deterministic` with a hopeful regex is the failure mode this whole architecture exists to remove; `hybrid` and `judged` are honest answers offline and are what the judge tier reads.
 
 ## Vocabulary
 

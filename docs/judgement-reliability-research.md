@@ -824,6 +824,22 @@ rules at all. Constraints that make it safe:
   scoped, cacheable *relevance* judgments per loaded file ("does this file pertain to
   anything this session did?"), upgrading "wasted" from token accounting to meaning.
 
+**Superseded on 2026-11-04: the tier is on by default.** The opt-in framing above described
+the tier as shipped and is kept for the reasoning behind it, but the default it argues for no
+longer holds. A tier nobody switches on is a tier that does not exist, and this tool is used
+daily by its author, who was not passing the flag. So the judge now runs without one and the
+no-network-by-default claim is retired rather than quietly weakened: by default, session
+content is sent to Anthropic's model through the user's own Claude Code CLI, and a one-time
+notice per machine says so. Everything else in this section stands, and three properties
+replace the retired one, each with a test: `--no-judge` produces the offline report and never
+imports the tier's module; a judge that cannot be reached degrades to exactly the offline
+report plus a note, exiting 0; and no judge answer awards a green or a red badge in either
+direction (which is §9.1's citation rule plus the blind-judge measurement of 2026-11-04 - 53
+false greens to the deterministic tier's 2). The relevance judgment of the last bullet is the
+one judged question that stays behind a flag, `--judge-relevance`: it is a call per loaded
+file per session, where the rule questions are a handful per project, so a default bake would
+spend the whole call budget on it before a rule was asked.
+
 ### 9.2 ast-grep - ACCEPTED, as a pinned optional enhancer
 
 - **Value (real):** structural matching properly kills the comment/string false-positive

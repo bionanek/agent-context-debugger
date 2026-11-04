@@ -5372,23 +5372,29 @@ def parse_args():
                    help="With --query: print one field in full, unbounded "
                         "(block: title/status/reason/content/moments; agent: prompt/result; "
                         "session or turn: prompt).")
-    # The opt-in LLM audit tier (research doc §9.1). Off by default, and its
-    # module is not even imported until it is asked for: the default path's
-    # promise is that nothing leaves the machine, and a flag is the only thing
-    # that may change it.
-    p.add_argument("--judge", action="store_true",
-                   help="Opt in to the LLM audit tier: rules this tool cannot decide "
-                        "deterministically are asked of a model through your own Claude "
-                        "Code auth. CHANGES THE PRIVACY CONTRACT - session content is "
-                        "sent to the model. Off by default.")
+    # The LLM audit tier (research doc §9.1). On by default since 2026-11-04:
+    # a tier nobody switches on is a tier that does not exist. The cost is
+    # stated rather than softened - session content is sent to the model
+    # through the user's own Claude Code auth - and `--no-judge` is the
+    # offline path, which the tier's presence may never change.
+    p.add_argument("--no-judge", action="store_true",
+                   help="Run offline: rules this tool cannot decide deterministically are "
+                        "reported as unchecked instead of being asked of a model. By "
+                        "default they are asked through your own Claude Code auth, which "
+                        "sends session content to the model.")
     p.add_argument("--judge-model", type=str, default=None,
-                   help="With --judge: the model id to ask (default: sonnet). Part of the "
+                   help="The model id to ask (default: sonnet). Part of the "
                         "verdict cache key.")
     p.add_argument("--judge-cache", type=Path, default=None,
-                   help="With --judge: the verdict cache file "
+                   help="The verdict cache file "
                         "(default: $CTXIDE_JUDGE_CACHE, else ~/.claude/ctxide/judge-cache.json).")
+    p.add_argument("--judge-relevance", action="store_true",
+                   help="Also ask the model whether each loaded file pertained to the "
+                        "session's task. Off by default: that is one call per loaded "
+                        "file per session, where the rule questions are a handful per "
+                        "project.")
     p.add_argument("--judge-max-calls", type=int, default=200,
-                   help="With --judge: cap on model calls in one run (default: 200). "
+                   help="Cap on model calls in one run (default: 200). "
                         "Cached verdicts are free and do not count.")
     p.add_argument("--all", action="store_true",
                    help="With --query: print every row of a listing instead of the first "
@@ -5627,7 +5633,7 @@ def _waste_lines(session_data):
             f"{_fmt_tokens(roll['totalTokens'])} attributed")
     if not roll["judged"]:
         return [head + (f" ({roll['note']})" if roll.get("note")
-                        else " (relevance not judged - add --judge)")]
+                        else " (relevance not judged this run)")]
     return [head + f"; {roll['notPertinent']} of {roll['asked']} judged "
                    f"not pertinent, costing {_fmt_tokens(roll['tokens'])}"]
 
@@ -5887,8 +5893,8 @@ def query_waste(sid, session_data, show_all=False):
         # waste, and a reader who does not know the question was never asked
         # will read the top of this list as the answer to it.
         lines.append(roll.get("note")
-                     or "relevance was not judged this run - cost only. Add "
-                        "--judge to ask whether each file pertained to the task.")
+                     or "relevance was not judged this run - cost only. The mode "
+                        "line below says why no model was asked.")
     rows = [f"{r['id']}  [{r['relevanceLabel']}]  "
             f"{r['path']}: {_fmt_tokens(r['tokens'])} over {r['sentCount']} request(s), "
             f"resident in {r['turns']} turn(s)"
@@ -6085,7 +6091,21 @@ def run_query(data, address, field=None, show_all=False, compile_status=False):
 
     Read-only by construction: it touches nothing but `data`, which is why the
     query path can never leave an HTML artifact behind.
+
+    Every answer ends with the mode it was produced in, the same string the
+    page header shows: a verdict a model was behind and one it was not read
+    identically otherwise.
     """
+    lines = _answer(data, address, field=field, show_all=show_all,
+                    compile_status=compile_status)
+    # Never under `--field`, which exists to print one value and nothing else:
+    # a footer there lands in whatever the caller piped it into.
+    if field:
+        return lines
+    return lines + [f"mode: {data.get('judgeMode') or JUDGE_MODE_OFF}"]
+
+
+def _answer(data, address, field=None, show_all=False, compile_status=False):
     if not address:
         raise QueryError(f"error: --query needs an address. Start with: {_query_cmd('sessions')}")
     # Project scope, so it answers the same whatever address asked for it.
@@ -6180,7 +6200,8 @@ def cmd_query(args):
 
     all_paths, active_path = select_transcripts(args)
     sessions, per_session_data, active_id = bake_sessions(all_paths, active_path, args)
-    data = build_data(os.getcwd(), sessions, per_session_data, active_id)
+    data = build_data(os.getcwd(), sessions, per_session_data, active_id,
+                      judge=getattr(args, "judge_runner", None))
     for line in run_query(data, address, field=args.field, show_all=args.all,
                           compile_status=args.compile_status):
         print(line)
@@ -7032,6 +7053,8 @@ def process_session(transcript_path, args):
     # doc pertain to turn 7?").
     digest = task_digest(turn_payloads, aggregate["userPrompt"])
     judge = aggregate["trace"].get("judge")
+    if judge is not None and not judge.ask_relevance:
+        judge = None
     note = ""
     if judge is not None and digest:
         judge_relevance(aggregate["contextFiles"], digest, judge)
@@ -7136,12 +7159,17 @@ def process_session(transcript_path, args):
     return summary, per_session
 
 
-def build_data(cwd, sessions, per_session_data, active_id, compare=None):
+def build_data(cwd, sessions, per_session_data, active_id, compare=None, judge=None):
     """Assemble the object baked into the page.
 
     The `compare` key is omitted entirely when no comparison was requested, so
     a default build serialises byte-for-byte as it did before compare existed.
+
+    `judgeMode` is computed here rather than in the template because the page
+    and `--query` both name it, and a mode worked out twice is a mode the two
+    views can disagree about.
     """
+    mode, unavailable = judge_mode(judge)
     data = {
         "project": {
             "cwd": cwd,
@@ -7153,6 +7181,9 @@ def build_data(cwd, sessions, per_session_data, active_id, compare=None):
     }
     if compare is not None:
         data["compare"] = compare
+    data["judgeMode"] = mode
+    if unavailable:
+        data["judgeUnavailable"] = unavailable
     return data
 
 
@@ -7193,15 +7224,87 @@ def select_transcripts(args):
     return all_paths, active_path
 
 
-def make_judge(args):
-    """The opt-in judge runner, or None when the tier was not asked for.
+# The three modes a report can be produced in, named in the page header and in
+# every `--query` answer. A reader must never have to guess whether a model was
+# behind a verdict.
+JUDGE_MODE_JUDGED = "judged"
+JUDGE_MODE_OFF = "offline (--no-judge)"
 
-    Imported lazily and nowhere else: with the flag off the module that can
-    send session content to a model is never loaded, so the default path's
-    offline guarantee is a property of the import graph rather than of a branch
-    someone could get wrong.
+CONFIG_ENV = "CTXIDE_CONFIG"
+DEFAULT_CONFIG_PATH = Path.home() / ".claude" / "ctxide" / "config.json"
+NOTICE_KEY = "judgeNoticeShown"
+
+
+def config_path(override=None):
+    if override:
+        return Path(override)
+    env = os.environ.get(CONFIG_ENV, "").strip()
+    return Path(env) if env else DEFAULT_CONFIG_PATH
+
+
+def judge_notice(model=None, config=None, stream=None):
+    """Say once per machine what the default run sends, and to whom.
+
+    A notice, not a gate: the tier is on by default, nobody reads a README
+    before their first run, and a prompt would make the tool unusable in a
+    script. Printed on stderr so it can never land in a `--query` answer, and
+    recorded in the config file so it does not become a nag. Returns whether it
+    was printed.
+
+    A config file that cannot be read or written costs the user a repeated
+    notice, never a failed bake: this is the least important thing in the run.
     """
-    if not getattr(args, "judge", False):
+    import judge_tier
+    path = config_path(config)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    if data.get(NOTICE_KEY):
+        return False
+    print(
+        "note: the rule judge is on by default. Rules this tool cannot decide "
+        "deterministically are sent - with the code, prompts and rule text they "
+        f"are about - to Anthropic's `{model or judge_tier.DEFAULT_MODEL}` model "
+        "through your own Claude Code CLI auth. No judge answer can award a green "
+        f"or a red badge. Verdicts are cached at {judge_tier.cache_path()}. "
+        "Run with --no-judge to stay offline. (This notice prints once.)",
+        file=stream or sys.stderr)
+    data[NOTICE_KEY] = True
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n",
+                        encoding="utf-8")
+    except OSError:
+        pass
+    return True
+
+
+def judge_mode(judge):
+    """(mode, unavailable reason) for the report, from the runner that was used.
+
+    A judge that could not be reached is reported as the offline run it in fact
+    produced, naming the reason: degrading silently would let a reader take a
+    page of unchecked rules for a page of checked ones.
+    """
+    if judge is None:
+        return JUDGE_MODE_OFF, None
+    reason = judge.unavailable_reason()
+    if reason:
+        return f"offline (judge unavailable: {reason})", reason
+    return JUDGE_MODE_JUDGED, None
+
+
+def make_judge(args):
+    """The judge runner, or None under `--no-judge`.
+
+    Imported lazily, which is what keeps `--no-judge` a genuinely offline path:
+    with the flag on, the module that can send session content to a model is
+    never loaded at all.
+    """
+    if getattr(args, "no_judge", False):
         return None
     import judge_tier
     # `or` would be wrong on the budget: `--judge-max-calls 0` is a deliberate
@@ -7211,7 +7314,8 @@ def make_judge(args):
     return judge_tier.Judge(model=getattr(args, "judge_model", None),
                             cache=getattr(args, "judge_cache", None),
                             max_calls=judge_tier.DEFAULT_MAX_CALLS
-                            if budget is None else budget)
+                            if budget is None else budget,
+                            ask_relevance=getattr(args, "judge_relevance", False))
 
 
 def bake_sessions(all_paths, active_path, args):
@@ -7226,6 +7330,8 @@ def bake_sessions(all_paths, active_path, args):
     # One runner for the whole bake, so its cache and its call budget span every
     # session rather than resetting per transcript.
     args.judge_runner = make_judge(args)
+    if args.judge_runner is not None:
+        judge_notice(model=args.judge_runner.model)
     for path in all_paths:
         try:
             summary, data = process_session(path, args)
@@ -7290,7 +7396,8 @@ def main():
         id_b = compare_id(per_session_data, args.compare[1])
         compare = compare_sessions(per_session_data[id_a], per_session_data[id_b])
 
-    data = build_data(os.getcwd(), sessions, per_session_data, active_id, compare=compare)
+    data = build_data(os.getcwd(), sessions, per_session_data, active_id,
+                      compare=compare, judge=getattr(args, "judge_runner", None))
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     # Escape sequences that would otherwise break out of the surrounding <script> tag.
@@ -7631,6 +7738,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .agent-notloaded { border-style: dashed; }
   .agent-notloaded code { font-family: monospace; font-size: 11px; color: var(--text); word-break: break-all; }
   .block-reason { color: var(--text-dim); font-size: 11px; }
+  .judge-mode { font-family: monospace; font-size: 10px; color: var(--text-dim); margin-left: 10px; }
   .scope-badge { display: inline-block; padding: 2px 7px; border-radius: 10px; background: var(--panel-2); border: 1px solid var(--border); font-size: 10px; color: var(--text-dim); font-family: monospace; letter-spacing: 0.3px; }
   .scope-badge.turn { color: var(--accent); border-color: var(--accent); }
   .block .scope-badge { margin-left: 6px; }
@@ -7954,6 +8062,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   </nav>
   <div class="session-picker">
     <span class="count" id="session-count"></span>
+    <span class="judge-mode" id="judge-mode"></span>
   </div>
 </header>
 <div class="crumb-bar" id="crumb-bar"></div>
@@ -9110,6 +9219,13 @@ function blockStatusLabel(status) {
 function renderSessionCount() {
   document.getElementById('session-count').textContent =
     `${DATA.sessions.length} session${DATA.sessions.length===1?'':'s'} for ${DATA.project.name}`;
+  // Baked, never derived here: `--query` prints the same string, and a mode
+  // worked out twice is a mode the two views can disagree about.
+  const mode = document.getElementById('judge-mode');
+  mode.textContent = `mode: ${DATA.judgeMode || 'offline (--no-judge)'}`;
+  mode.title = DATA.judgeMode === 'judged'
+    ? 'Rules no pattern can decide were asked of a model. No judge answer awards a badge.'
+    : 'No model was asked; rules no pattern can decide are reported as unchecked.';
 }
 
 function rerenderAll() {
@@ -9180,7 +9296,7 @@ const HELP_CONTENT = {
     <h5>Where this comes from</h5>
     <div>A rule document can carry a <em>checks file</em> beside it (<code>&lt;doc&gt;.checks.json</code>): each prose rule compiled once, ahead of time, into a deterministic pattern with its own fixtures. By default this tool never asks a model anything - at build time it re-runs every check's fixtures with its own matcher and refuses any check that fails, then applies the survivors to the commands the agent ran, the paths it touched, and the code its writes left behind. A failing check is never quietly dropped: it is listed below as <em>demoted</em>, and so is any rule whose bucket needs a judge, because a rule nobody could check must not read as one that was followed.</div>
     <div style="margin-top:6px">A rule whose question is about the <em>shape</em> of the code rather than its text - "never leave a catch body empty" - can carry a structural pattern instead, matched against the syntax tree by the optional ast-grep binary. It is never installed for you and never taken from your PATH; without it those rules report as unchecked and name the installer, and they are never approximated by a regex answering a different question.</div>
-    <div style="margin-top:6px">The rules a pattern cannot decide stay unchecked unless you opt in to the LLM audit tier (<code>--judge</code>), which sends session content to a model through your own Claude Code auth. With it on, findings are labelled <em>judge</em> - one call per rule per site, and a verdict that cannot quote the text it is about degrades to <em>unclear</em>. A purely semantic verdict is labelled <em>judge · advisory</em>: it may pull a rule down to <em>unclear</em>, but it can never on its own call a rule violated or mark it followed.</div>
+    <div style="margin-top:6px">The rules a pattern cannot decide are asked of a model through your own Claude Code auth, which sends session content to it; <code>--no-judge</code> leaves them unchecked instead. With it on, findings are labelled <em>judge</em> - one call per rule per site, and a verdict that cannot quote the text it is about degrades to <em>unclear</em>. A purely semantic verdict is labelled <em>judge · advisory</em>: it may pull a rule down to <em>unclear</em>, but it can never on its own call a rule violated or mark it followed.</div>
     <div style="margin-top:6px">Code rules are judged on the <b>net</b> effect of the session's writes. An attempt the agent wrote and then edited away is not in the tree, and a violation the reader cannot find when they go looking is worse than none. Rules broken by <em>omission</em> - "always implement the catch body" - leave nothing to match, so the checker enumerates the sites itself (every catch block, every comment) and asks about each one.</div>
     <h5>The states</h5>
     <ul>
@@ -9915,7 +10031,7 @@ function renderWastedContext() {
   // start reporting different numbers off the same list.
   html += roll.judged
     ? `<div class="waste-note">${roll.notPertinent} of the ${roll.asked} file${roll.asked===1?'':'s'} asked about pertained to nothing this session did, costing ${fmtTokens(roll.tokens)}. Relevance is a model judgment: it orders this list, it never marks a rule followed or broken.</div>`
-    : `<div class="waste-note">Ordered by what each file cost. ${roll.note ? escapeHtml(roll.note) + '.' : `Whether it earned that was not asked - rebuild with <code>--judge</code> to have each file's relevance to this session judged.`}</div>`;
+    : `<div class="waste-note">Ordered by what each file cost. ${roll.note ? escapeHtml(roll.note) + '.' : `Whether it earned that was not asked - the mode in the header says why no model was asked.`}</div>`;
   html += `<div class="file-list">`;
   rows.slice(0, 40).forEach(r => {
     const tag = r.relevance

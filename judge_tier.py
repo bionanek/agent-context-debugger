@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""The opt-in LLM audit tier (research doc §9.1). Off by default.
+"""The LLM audit tier (research doc §9.1). On by default since 2026-11-04.
 
 Deterministic checks can decide only a minority of the rules people actually
-write, so the majority can be covered at all only by asking a model. That is a
-change to this tool's trust contract, not a feature toggle, which is why the
-tier lives in its own module that the default path never imports: with the flag
-off, nothing here runs, nothing is loaded, and nothing leaves the machine.
+write, so the majority can be covered at all only by asking a model. The tier
+was opt-in and nobody opted in, so it now runs without a flag and the cost is
+stated rather than softened: by default, session content goes to the model.
+`--no-judge` is the offline path, and this module is imported from inside
+`build_real_view.make_judge` alone, so that path does not load it at all.
 
 Three properties make the tier safe enough to ship:
 
@@ -15,6 +16,10 @@ Three properties make the tier safe enough to ship:
 * **Citation or downgrade.** A verdict whose quoted evidence is not in the
   content it was given cannot be checked by the reader, so it is not reportable
   as a violation - the same rule the deterministic layer already enforces.
+* **No badge, either way.** A judge answer can inform a reader, contest a
+  verdict and pull a rule down to `unclear`; it can never make a block green or
+  red. A judge that cannot be reached therefore costs the report a note and not
+  a verdict - `unavailable_reason` is what names it.
 * **Reproducibility by cache.** Every verdict is keyed on
   `(rule_key, question hash, candidate content hash, model id)` in a local
   human-readable
@@ -513,8 +518,14 @@ class Judge:
     """
 
     def __init__(self, model=DEFAULT_MODEL, cache=None, invoke=None,
-                 max_calls=DEFAULT_MAX_CALLS):
+                 max_calls=DEFAULT_MAX_CALLS, ask_relevance=False):
         self.model = model or DEFAULT_MODEL
+        # The rule questions are a handful per project - one per parked record,
+        # cached - which is what makes them affordable without a flag. The
+        # relevance question is one call per loaded file per session, so a
+        # default bake of twenty sessions would spend the whole call budget on
+        # it before a single rule was asked. It stays behind its own flag.
+        self.ask_relevance = ask_relevance
         self.cache_file = cache_path(cache)
         # Resolved at call time, never bound as a default: a test that patches
         # the module function has to be able to stop a real call from going out.
@@ -523,7 +534,12 @@ class Judge:
         self._cache, unreadable = _read_cache(self.cache_file)
         self.calls = 0
         self.hits = 0
+        self.answered = 0
         self.errors = [unreadable] if unreadable else []
+        # The first backend failure, kept apart from `errors`: a cache that
+        # could not be written is not a judge that could not be reached, and
+        # only the latter means the report is an offline one.
+        self.unreachable = None
         # Refuse to write over a file we could not read: the user deletes or
         # fixes it, and no verdict is lost in the meantime.
         self._writable = unreadable is None
@@ -537,6 +553,7 @@ class Judge:
         hit = self._cache.get(key)
         if isinstance(hit, dict) and hit.get("verdict") in verdicts:
             self.hits += 1
+            self.answered += 1
             return {"verdict": hit["verdict"], "evidence": hit.get("evidence", ""),
                     "reason": hit.get("reason", ""), "cached": True}
         if self.calls >= self.max_calls:
@@ -555,6 +572,8 @@ class Judge:
             # Never cached: a backend that was down must not pin an "unclear"
             # onto a candidate for every future run.
             self.errors.append(str(e))
+            if self.unreachable is None:
+                self.unreachable = str(e)
             return {"verdict": unknown, "evidence": "",
                     "reason": f"the judge could not be reached ({e})", "cached": False,
                     "unavailable": True}
@@ -565,10 +584,21 @@ class Judge:
             # candidate for every future run.
             self.errors.append(UNPARSED)
             return dict(verdict, cached=False, unavailable=True)
+        self.answered += 1
         self._cache[key] = dict(verdict, model=self.model, ruleKey=request["ruleKey"],
                                 askedAt=time.strftime("%Y-%m-%dT%H:%M:%S"))
         self.save()
         return dict(verdict, cached=False)
+
+    def unavailable_reason(self):
+        """Why this run got no judge answer at all, or None.
+
+        Only a run in which nothing was answered is an offline run: a backend
+        that failed once and answered twenty times produced a judged report
+        with a gap in it, and reporting that as "the judge is missing" would
+        tell the reader to discount verdicts a model really did give.
+        """
+        return None if self.answered else self.unreachable
 
     def save(self):
         """Write the cache through after each answer.
@@ -591,7 +621,7 @@ class Judge:
         merged.update(self._cache)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            payload = {"_note": "Verdict cache for build_real_view.py --judge. "
+            payload = {"_note": "Verdict cache for build_real_view.py. "
                                 "Keys are <rule key>|<question hash>|<content hash>|"
                                 "<model id>. Delete a line to re-ask that question.",
                        "verdicts": merged}

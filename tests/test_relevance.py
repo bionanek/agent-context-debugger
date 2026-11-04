@@ -43,8 +43,11 @@ class Stub:
 
 
 def judge(stub, tmp_path, **over):
+    # `ask_relevance` is the flag that turns this question on: the rule
+    # questions run without one, this one is a call per loaded file per
+    # session and is asked only when it was asked for.
     kw = {"model": "test-model", "cache": tmp_path / "judge-cache.json",
-          "invoke": stub}
+          "invoke": stub, "ask_relevance": True}
     kw.update(over)
     return judge_tier.Judge(**kw)
 

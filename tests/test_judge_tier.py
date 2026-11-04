@@ -676,7 +676,7 @@ def test_a_bucket_b_violation_paints_the_block_and_carries_its_citation(tmp_path
 def test_a_zero_budget_is_honoured_not_replaced_by_the_default(monkeypatch, tmp_path):
     """`--judge-max-calls 0` is a deliberate dry run, not an unset value."""
     monkeypatch.setattr(brv.sys, "argv",
-                        ["build_real_view.py", "--judge", "--judge-max-calls", "0",
+                        ["build_real_view.py", "--judge-max-calls", "0",
                          "--judge-cache", str(tmp_path / "c.json")])
     assert brv.make_judge(brv.parse_args()).max_calls == 0
 
