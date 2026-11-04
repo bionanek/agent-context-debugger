@@ -491,3 +491,46 @@ def test_the_judge_tier_off_never_acknowledges_an_authorised_action(tmp_path):
     # structure, so switching the judge off costs the reader nothing to look at.
     assert (off["ruleCheck"]["findings"][0]["governingPrompt"]
             == on["ruleCheck"]["findings"][0]["governingPrompt"])
+
+
+class _AlwaysCompliant:
+    def __call__(self, prompt, model):
+        return json.dumps({"verdict": "compliant", "evidence": "catch (e) {",
+                           "reason": "the body reports the error"})
+
+
+def test_the_judge_tier_off_never_contests_a_block(tmp_path):
+    """`contested` is the judge's whole voice, so with the judge off it is silent.
+
+    Silence is the right degradation: a block nobody asked a second opinion
+    about must not read as a block two readers agreed on. And the flag may
+    never move a verdict, so the status has to be identical either way.
+    """
+    doc = tmp_path / "RULES.md"
+    doc.write_text("# Rules\n\n## Error handling\n\nAlways implement the catch body.\n")
+    (tmp_path / "RULES.md.checks.json").write_text(
+        json.dumps({"source": str(doc), "checks": [dict(HYBRID_CHECK, bucket="judged")]}))
+    rc.checks_for_doc.cache_clear()
+    events = [user_text("add the handler", 1),
+              assistant_tool_use("Write", {"file_path": str(tmp_path / "a.ts"),
+                                           "content": EMPTY_CATCH_SRC}, 2, tool_id="w1")]
+    file = {"loaded": True, "kind": "project", "path": str(doc),
+            "abs_path": str(doc), "name": None}
+    block = next(b for b in brv.parse_claude_md(doc.read_text())
+                 if b["title"] == "Error handling")
+
+    def verdict(judge):
+        trace = brv.build_trace(events, brv.tool_calls(events),
+                                brv.assistant_text_segments(events), "add the handler")
+        trace["judge"] = judge
+        return brv.assess_block(block, file, trace)
+
+    on = verdict(judge_tier.Judge(model="test-model",
+                                  cache=tmp_path / "judge-cache.json",
+                                  invoke=_AlwaysCompliant()))
+    off = verdict(None)
+
+    assert on["contested"], "the judge read this block as used; the flag has to say so"
+    assert "contested" not in off
+    assert on["status"] == off["status"], "the flag must never move a verdict"
+    assert_not_worse(on, off, "judge-tier")

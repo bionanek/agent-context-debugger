@@ -269,3 +269,21 @@ def test_payload_is_purely_additive(tmp_path, monkeypatch):
     golden = json.loads(GOLDEN.read_text())
     actual = _normalised(_fixture_payload(tmp_path, monkeypatch), tmp_path)
     _assert_subset(golden, actual)
+
+
+# ---------- the contested count ----------
+
+def test_the_session_rollup_counts_contested_blocks(tmp_path, monkeypatch):
+    """Baked in Python at both scopes, so the picker and the CLI agree.
+
+    Offline there is no judge, so the honest count is zero - and zero has to be
+    *present*, or a reader cannot tell "no disagreement" from "never asked".
+    """
+    summary, per_session = _run(
+        tmp_path, monkeypatch, _fixture_events(tmp_path),
+        global_md="# Talking\nbe direct and brief\n",
+        project_md="# Build\nrun the build before claiming done\n")
+    assert summary["contestedBlocks"] == 0
+    assert per_session["contestedBlocks"] == 0
+    assert not any(b.get("contested") for f in per_session["contextFiles"]
+                   for b in f["blocks"])
