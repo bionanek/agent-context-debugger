@@ -176,7 +176,8 @@ def test_measure_counts_a_failed_call_rather_than_dropping_it(tmp_path):
         calls.append(prompt)
         return None  # the backend was unreachable
 
-    rec = bj.measure([_fake_corpus(tmp_path)], invoke=invoke, model="m", chunk=2)
+    rec = bj.measure([_fake_corpus(tmp_path)], invoke=invoke, model="m", chunk=2,
+                     rounds=1)
     assert rec["calls"] == 1 and rec["callsFailed"] == 1
     assert rec["blocks"] == 0 and rec["unanswered"] == 2
 
@@ -189,7 +190,8 @@ def test_a_backend_that_raises_is_a_failed_call_not_a_crashed_run(tmp_path):
     def invoke(prompt, model):
         raise judge_tier.JudgeError("the judge exited 1: no output")
 
-    rec = bj.measure([_fake_corpus(tmp_path)], invoke=invoke, model="m", chunk=2)
+    rec = bj.measure([_fake_corpus(tmp_path)], invoke=invoke, model="m", chunk=2,
+                     rounds=1)
     assert rec["calls"] == 1 and rec["callsFailed"] == 1
     assert rec["unanswered"] == 2
 
@@ -205,6 +207,41 @@ def test_measure_scores_the_answers_it_got(tmp_path):
     assert rec["falseGreen"] == 1
     assert rec["codeFalseGreen"] == 1  # the code tier said the same there
     assert rec["sessions"] == 1
+
+
+def test_a_block_the_judge_skipped_is_asked_again(tmp_path):
+    """A silent omission is the failure mode a call count cannot see.
+
+    The first corpus run made 51 calls, every one of them reporting success,
+    and still left 100 of 512 blocks unanswered: asked for twelve lines the
+    judge sometimes wrote nine. Scoring the remainder is a measurement of a
+    fifth of the corpus presented as a measurement of the corpus, so the
+    blocks that came back missing are asked again on their own.
+    """
+    seen = []
+
+    def invoke(prompt, model):
+        # Answers only the first block it is asked about, as the real judge did
+        # when a chunk ran long.
+        ids = [l.split()[1] for l in prompt.splitlines() if l.startswith("### ")]
+        seen.append(len(ids))
+        return f"{ids[0]}: used"
+
+    rec = bj.measure([_fake_corpus(tmp_path)], invoke=invoke, model="m",
+                     chunk=2, rounds=3)
+    assert rec["unanswered"] == 0
+    assert seen == [2, 1]          # the chunk, then the one it skipped
+    assert rec["calls"] == 2
+
+
+def test_the_retry_gives_up_rather_than_looping_on_a_judge_that_never_answers(tmp_path):
+    def invoke(prompt, model):
+        return "nothing useful here"
+
+    rec = bj.measure([_fake_corpus(tmp_path)], invoke=invoke, model="m",
+                     chunk=2, rounds=3)
+    assert rec["unanswered"] == 2
+    assert rec["calls"] <= 1 + 2 * 2   # the chunk, then at most one per block per round
 
 
 def test_the_record_names_the_protocol_the_model_and_the_date(tmp_path):
