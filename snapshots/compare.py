@@ -574,8 +574,37 @@ NO_BLIND_JUDGE_RECORD = (
     "would be a number with no artifact behind it.")
 
 
+# A record this harness wrote says so in its own `source`. The distinction is
+# the whole difference between a number a reader can contradict and one they
+# can only take on trust, so it is read off the record rather than assumed from
+# the file being present.
+HARNESS = "snapshots/blind_judge.py"
+
+
+def reproducible(j):
+    """Whether this record came from the committed harness."""
+    return HARNESS.rsplit("/", 1)[-1] in (j.get("source") or "")
+
+
 def blind_judge_provenance(j):
     """Said at the row, because the table prints it in the measured row's shape."""
+    if reproducible(j):
+        unanswered = j.get("unanswered")
+        return (
+            "The judge row **is a reading of this corpus**, produced by "
+            f"`{HARNESS}` on {j['when']} with `{j.get('model')}` over "
+            f"{j['blocks']} of the corpus's scored blocks. The judge was handed "
+            "exactly what the ground-truth author was handed - `inventory.py`'s "
+            "actions and joins views plus `RULINGS.md` - and never the tool's "
+            "verdict, and both columns of this table are scored over those same "
+            f"{j['blocks']} blocks with the same `error_kind`, so the two are "
+            "comparable with each other. They are not comparable with the "
+            "before/after tables above, which score "
+            + (f"a few more blocks: {j['calls']} call(s) were made, "
+               f"{j['callsFailed']} failed")
+            + (f" and {unanswered} block(s) went unanswered" if unanswered else "")
+            + ". The code column here is this corpus baked offline, as everywhere "
+            "else in this file.")
     return (
         "The judge row is **not a reading of this corpus**. It is the "
         f"blind-judge experiment of {j['when']} over {j['blocks']} blocks from "
@@ -593,6 +622,19 @@ def blind_judge_provenance(j):
 # measured one. The blind-judge harness was not re-run for this scorecard and
 # no harness for it exists here, so neither the row nor the four-way split
 # below it can be reproduced or contradicted by anything in this repo.
+JUDGE_ROW_FALSIFIABLE = (
+    "**The judge row can be reproduced and contradicted.** Re-run it with "
+    f"`python3 {HARNESS}`, which asks the question again and rewrites the "
+    "record; a change that makes the judge worse moves these numbers. Three "
+    "limits stay, and none of them is the one this replaced. The frozen corpus "
+    "is gitignored, so only its author can re-run it. The protocol is this "
+    "harness's, not the 2026-11-04 one-off's - that run left nothing behind, "
+    "so its wording, batching and retries are unrecoverable and its numbers "
+    "are history rather than a baseline this can be diffed against. And the "
+    "model is named on the row rather than pinned: a judge is re-measured "
+    "against whatever model answers today, so a row read a year from now "
+    "describes that model and not this one.")
+
 JUDGE_ROW_NOT_FALSIFIABLE = (
     "**Nothing in this repo can reproduce or falsify the judge row, or the "
     "four-way split below it.** The record it is read from is a transcript of "
@@ -606,18 +648,47 @@ JUDGE_ROW_NOT_FALSIFIABLE = (
     "that is a phase of its own.")
 
 
+def _false_red_clause(j):
+    """The false-red comparison, said whichever way it came out.
+
+    This sentence was written when the judge posted eleven false reds against
+    the code tier's zero, and it asserted a direction rather than reporting
+    one. A re-measurement that puts the judge below the code tier leaves the
+    phrasing describing the opposite of its own figures - and the claim beside
+    it, the false-green gap, is what the whole architecture rests on, so a
+    reader who catches the contradiction discounts both. The false-green gap is
+    the argument; the reds are reported, not argued from.
+    """
+    jr, cr = j["falseRed"], j["codeFalseRed"]
+    if jr > cr:
+        return f"It also posted {jr} false reds against the code tier's {cr}."
+    if jr == cr:
+        return (f"On false reds the two are level, at the same {jr} - a count "
+                "this corpus measures only against authorised actions, since "
+                "it holds no genuine unsupervised violation.")
+    return (f"On false reds it did better: fewer false reds than the code tier, "
+            f"{jr} against {cr}. That column is not like for like. The code "
+            "tier's reds here are the authorised rows, standing because these "
+            "payloads are baked offline and only the judged run may downgrade "
+            "one to `acknowledged` - and the corpus holds no genuine "
+            "unsupervised violation for either tier to be measured on. It is "
+            "not evidence that a model accuses more carefully than a compiled "
+            "check with a citable span.")
+
+
 def _four_way_lines(j):
     """The experiment's four-way split, which is what the architecture rests on."""
+    where = "this corpus's" if reproducible(j) else "that experiment's own"
     return [
-        f"On that experiment's own {j['blocks']} blocks the two tiers split four "
+        f"On {where} {j['blocks']} blocks the two tiers split four "
         f"ways: both right {j['bothRight']}, judge right and code wrong "
         f"{j['judgeOnly']}, code right and judge wrong {j['codeOnly']}, neither "
         f"{j['neither']}. The judge agreed with the ground truth more often "
         f"({j['agrees']} against {j['codeAgrees']}) and was wrong in the one "
         f"direction that cannot be shown to a reader as a verdict: "
         f"{j['falseGreen']} false greens against the code tier's "
-        f"{j['codeFalseGreen']}, and {j['falseRed']} false reds against "
-        f"{j['codeFalseRed']}. Where it is better is the missed compliance - "
+        f"{j['codeFalseGreen']}. " + _false_red_clause(j)
+        + " Where it is better is the missed compliance - "
         f"{j['missed']} against {j['codeMissed']} - which is exactly what the "
         f"contested chip surfaces without letting it decide anything."]
 
@@ -682,19 +753,32 @@ def _tier_lines(report):
     """Both tiers' false counts in one table, and what each row is made of."""
     t = report["totals"]
     j = load_blind_judge()
+    # Where the record is this harness's, both rows are read from it: it scored
+    # the code tier over the same blocks it asked the judge about, and the pair
+    # of false-green counts is the whole argument for the chip. A pair taken
+    # over two different block sets is not a pair, and the whole-corpus totals
+    # cover blocks the judge was never asked about.
+    paired = j is not None and reproducible(j)
+    code_row = (f"| compiled checks (this corpus, after, {j['blocks']} blocks) | "
+                f"{j['codeFalseGreen']} | {j['codeFalseRed']} | {j['codeMissed']} |"
+                if paired else
+                f"| compiled checks (this corpus, after) | {t['falseGreenAfter']} | "
+                f"{t['falseRedAfter']} | {t['missedAfter']} |")
     out = ["## Both tiers, side by side", "",
            "The compiled path may accuse and the judge may not. These two rows "
            "are the reason.", "",
            "| tier | false green | false red | missed compliance |",
            "|---|---|---|---|",
-           f"| compiled checks (this corpus, after) | {t['falseGreenAfter']} | "
-           f"{t['falseRedAfter']} | {t['missedAfter']} |"]
+           code_row]
     if j is None:
         out += ["", NO_BLIND_JUDGE_RECORD, ""]
     else:
-        out += [f"| blind judge ({j['when']}, {j['blocks']} blocks) | "
+        out += [f"| blind judge ({j['when']}, {j['blocks']} blocks"
+                + (f", `{j['model']}`)" if paired else ")") + " | "
                 f"{j['falseGreen']} | {j['falseRed']} | {j['missed']} |",
-                "", blind_judge_provenance(j), "", JUDGE_ROW_NOT_FALSIFIABLE,
+                "", blind_judge_provenance(j), "",
+                JUDGE_ROW_FALSIFIABLE if reproducible(j)
+                else JUDGE_ROW_NOT_FALSIFIABLE,
                 ""] + _four_way_lines(j) + [""]
     return out + [
         contested_rate_line(j), "",
